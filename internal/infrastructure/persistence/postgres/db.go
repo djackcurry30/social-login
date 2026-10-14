@@ -9,7 +9,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // Config 是数据库连接参数。

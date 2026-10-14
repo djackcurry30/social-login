@@ -7,9 +7,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/alex/social-login/internal/domain/session"
-	"github.com/alex/social-login/internal/pkg/appctx"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/domain/session"
+	"github.com/djackcurry30/social-login/internal/pkg/appctx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // 轮转链回溯的安全上限。

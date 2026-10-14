@@ -35,14 +35,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/bootstrap"
-	"github.com/alex/social-login/internal/domain/provider"
-	"github.com/alex/social-login/internal/domain/tenant"
-	"github.com/alex/social-login/internal/infrastructure/crypto"
-	"github.com/alex/social-login/internal/infrastructure/persistence/postgres"
-	"github.com/alex/social-login/internal/pkg/appctx"
-	"github.com/alex/social-login/internal/pkg/ids"
-	"github.com/alex/social-login/internal/testsupport/mockoauth2"
+	"github.com/djackcurry30/social-login/internal/bootstrap"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/domain/tenant"
+	"github.com/djackcurry30/social-login/internal/infrastructure/crypto"
+	"github.com/djackcurry30/social-login/internal/infrastructure/persistence/postgres"
+	"github.com/djackcurry30/social-login/internal/pkg/appctx"
+	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/testsupport/mockoauth2"
 )
 
 const (

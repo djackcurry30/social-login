@@ -17,13 +17,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/application/tenantconfig"
-	"github.com/alex/social-login/internal/application/token"
-	"github.com/alex/social-login/internal/infrastructure/crypto"
-	"github.com/alex/social-login/internal/interfaces/http/handler"
-	"github.com/alex/social-login/internal/interfaces/http/httputil"
-	"github.com/alex/social-login/internal/interfaces/http/middleware"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
+	"github.com/djackcurry30/social-login/internal/application/token"
+	"github.com/djackcurry30/social-login/internal/infrastructure/crypto"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // 各路由分组的超时预算（架构 §5.7 的第二段超时）。

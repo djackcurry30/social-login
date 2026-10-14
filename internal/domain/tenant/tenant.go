@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alex/social-login/internal/domain/provider"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // ErrNotFound 表示应用或渠道配置不存在。

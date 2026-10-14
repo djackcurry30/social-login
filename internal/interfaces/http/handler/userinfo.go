@@ -5,9 +5,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/alex/social-login/internal/interfaces/http/httputil"
-	"github.com/alex/social-login/internal/interfaces/http/middleware"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // UserInfo 处理 GET /v1/userinfo：返回归一化的当前用户身份与已绑渠道。

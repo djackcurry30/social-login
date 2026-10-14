@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/domain/audit"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
 )
 
 // Emit 写入审计事件；失败只记录日志，不返回错误。

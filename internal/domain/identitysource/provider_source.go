@@ -3,7 +3,7 @@ package identitysource
 import (
 	"context"
 
-	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
 )
 
 // providerSource 把 provider.Provider 适配为 Source。

@@ -18,9 +18,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/domain/provider"
-	"github.com/alex/social-login/internal/pkg/errs"
-	"github.com/alex/social-login/internal/pkg/httpx"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/httpx"
 )
 
 // Extra 配置项名称。全部写在 app_provider_configs.extra 里，改配置不改代码。

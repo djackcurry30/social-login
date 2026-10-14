@@ -7,9 +7,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/alex/social-login/internal/domain/identity"
-	"github.com/alex/social-login/internal/pkg/appctx"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/pkg/appctx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // ClaimRepository 是 identity_claims 表的仓储。

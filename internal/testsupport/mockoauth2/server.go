@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alex/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/ids"
 )
 
 // Profile 是 mock 用户的信息。

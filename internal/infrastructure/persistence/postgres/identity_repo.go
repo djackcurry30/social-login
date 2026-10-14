@@ -8,9 +8,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/alex/social-login/internal/domain/identity"
-	"github.com/alex/social-login/internal/pkg/appctx"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/pkg/appctx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // IdentityRepository 是 oauth_identities 表的仓储。

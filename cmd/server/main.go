@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/alex/social-login/internal/bootstrap"
+	"github.com/djackcurry30/social-login/internal/bootstrap"
 )
 
 func main() {

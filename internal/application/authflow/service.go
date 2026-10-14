@@ -19,18 +19,18 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/application/tenantconfig"
-	"github.com/alex/social-login/internal/domain/account"
-	"github.com/alex/social-login/internal/domain/audit"
-	"github.com/alex/social-login/internal/domain/binding"
-	"github.com/alex/social-login/internal/domain/identity"
-	"github.com/alex/social-login/internal/domain/identitysource"
-	"github.com/alex/social-login/internal/domain/provider"
-	"github.com/alex/social-login/internal/domain/ticket"
-	"github.com/alex/social-login/internal/pkg/errs"
-	"github.com/alex/social-login/internal/pkg/httpx"
-	"github.com/alex/social-login/internal/pkg/ids"
-	"github.com/alex/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
+	"github.com/djackcurry30/social-login/internal/domain/account"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
+	"github.com/djackcurry30/social-login/internal/domain/binding"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/domain/identitysource"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/httpx"
+	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
 
 // Config 是流程配置。

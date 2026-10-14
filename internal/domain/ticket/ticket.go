@@ -17,7 +17,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
 )
 
 // 各类票据的默认有效期。

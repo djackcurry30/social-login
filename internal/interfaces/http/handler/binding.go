@@ -6,10 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/alex/social-login/internal/application/binding"
-	"github.com/alex/social-login/internal/interfaces/http/httputil"
-	"github.com/alex/social-login/internal/interfaces/http/middleware"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/application/binding"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // bindRequest 是 POST /v1/bind 的请求体。

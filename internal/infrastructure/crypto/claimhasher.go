@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 
-	"github.com/alex/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
 )
 
 // ClaimHasher 用【应用级静态盐】计算凭证的匹配哈希。

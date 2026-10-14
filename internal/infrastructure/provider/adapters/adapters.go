@@ -11,7 +11,7 @@ package adapters
 
 import (
 	// 通用 OAuth2（配置驱动）。第一期验收即用它接入自建 OAuth2 测试服务。
-	_ "github.com/alex/social-login/internal/infrastructure/provider/adapters/generic_oauth2"
+	_ "github.com/djackcurry30/social-login/internal/infrastructure/provider/adapters/generic_oauth2"
 	// 后续渠道在此追加，每个渠道一行：
 	//   _ ".../adapters/wechat"   // 第二期：app / mini_program / official_account / pc_qr
 	//   _ ".../adapters/alipay"   // 第二期：app / mini_program / web

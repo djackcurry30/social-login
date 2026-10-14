@@ -15,14 +15,14 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/application/tenantconfig"
-	"github.com/alex/social-login/internal/application/token"
-	"github.com/alex/social-login/internal/domain/audit"
-	domainbinding "github.com/alex/social-login/internal/domain/binding"
-	"github.com/alex/social-login/internal/domain/ticket"
-	"github.com/alex/social-login/internal/pkg/auditx"
-	"github.com/alex/social-login/internal/pkg/errs"
-	"github.com/alex/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
+	"github.com/djackcurry30/social-login/internal/application/token"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
+	domainbinding "github.com/djackcurry30/social-login/internal/domain/binding"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
+	"github.com/djackcurry30/social-login/internal/pkg/auditx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
 
 // Deps 是依赖集合。

@@ -4,7 +4,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // Registry 是渠道注册表。适配器在包 init 时注册，运行期只读查找。

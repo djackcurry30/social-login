@@ -18,16 +18,16 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/application/tenantconfig"
-	"github.com/alex/social-login/internal/domain/audit"
-	"github.com/alex/social-login/internal/domain/identity"
-	"github.com/alex/social-login/internal/domain/session"
-	"github.com/alex/social-login/internal/domain/ticket"
-	"github.com/alex/social-login/internal/pkg/auditx"
-	"github.com/alex/social-login/internal/pkg/errs"
-	"github.com/alex/social-login/internal/pkg/ids"
-	"github.com/alex/social-login/internal/pkg/jwtkit"
-	"github.com/alex/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/domain/session"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
+	"github.com/djackcurry30/social-login/internal/pkg/auditx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/jwtkit"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
 
 // AccessTokenTTL 是 access_token 有效期（架构 §8.1）。

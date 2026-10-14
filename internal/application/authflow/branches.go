@@ -9,17 +9,17 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/alex/social-login/internal/domain/account"
-	"github.com/alex/social-login/internal/domain/audit"
-	"github.com/alex/social-login/internal/domain/binding"
-	"github.com/alex/social-login/internal/domain/identity"
-	"github.com/alex/social-login/internal/domain/provider"
-	"github.com/alex/social-login/internal/domain/tenant"
-	"github.com/alex/social-login/internal/domain/ticket"
-	"github.com/alex/social-login/internal/pkg/auditx"
-	"github.com/alex/social-login/internal/pkg/errs"
-	"github.com/alex/social-login/internal/pkg/ids"
-	"github.com/alex/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/domain/account"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
+	"github.com/djackcurry30/social-login/internal/domain/binding"
+	"github.com/djackcurry30/social-login/internal/domain/identity"
+	"github.com/djackcurry30/social-login/internal/domain/provider"
+	"github.com/djackcurry30/social-login/internal/domain/tenant"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
+	"github.com/djackcurry30/social-login/internal/pkg/auditx"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
 
 // finishLogin 处理 login 模式的分支（架构 §7.1 的决策流程）。

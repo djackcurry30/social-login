@@ -7,7 +7,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/alex/social-login/internal/pkg/appctx"
+	"github.com/djackcurry30/social-login/internal/pkg/appctx"
 )
 
 // scopedTables 是需要强制应用隔离的表（约束 C1）。

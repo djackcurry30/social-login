@@ -13,8 +13,8 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/alex/social-login/internal/domain/tenant"
-	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/domain/tenant"
+	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
 // MasterKeySize 是主密钥长度（AES-256）。
