@@ -8,9 +8,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/domain/tenant"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/domain/tenant"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // Options 是构造参数。

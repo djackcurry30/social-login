@@ -7,12 +7,12 @@ package handler
 import (
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/application/authflow"
-	"github.com/17track/social-login/internal/application/binding"
-	"github.com/17track/social-login/internal/application/tenantconfig"
-	"github.com/17track/social-login/internal/application/token"
-	"github.com/17track/social-login/internal/infrastructure/crypto"
-	"github.com/17track/social-login/internal/pkg/jwtkit"
+	"github.com/alex/social-login/internal/application/authflow"
+	"github.com/alex/social-login/internal/application/binding"
+	"github.com/alex/social-login/internal/application/tenantconfig"
+	"github.com/alex/social-login/internal/application/token"
+	"github.com/alex/social-login/internal/infrastructure/crypto"
+	"github.com/alex/social-login/internal/pkg/jwtkit"
 )
 
 // Deps 是处理器依赖。

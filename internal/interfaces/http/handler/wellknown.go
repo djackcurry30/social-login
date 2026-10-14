@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/17track/social-login/internal/interfaces/http/httputil"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/interfaces/http/httputil"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // JWKS 处理 GET /v1/jwks：暴露签名公钥集。

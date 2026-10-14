@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // ClaimType 是凭证类型。

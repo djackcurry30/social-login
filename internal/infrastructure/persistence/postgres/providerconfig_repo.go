@@ -8,10 +8,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/domain/tenant"
-	"github.com/17track/social-login/internal/pkg/appctx"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/domain/tenant"
+	"github.com/alex/social-login/internal/pkg/appctx"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // DefaultConfigKey 是渠道配置的默认 config_key。

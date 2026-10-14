@@ -22,11 +22,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/bootstrap"
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/domain/tenant"
-	"github.com/17track/social-login/internal/infrastructure/crypto"
-	"github.com/17track/social-login/internal/infrastructure/persistence/postgres"
+	"github.com/alex/social-login/internal/bootstrap"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/domain/tenant"
+	"github.com/alex/social-login/internal/infrastructure/crypto"
+	"github.com/alex/social-login/internal/infrastructure/persistence/postgres"
 )
 
 func main() {

@@ -8,9 +8,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/17track/social-login/internal/domain/binding"
-	"github.com/17track/social-login/internal/pkg/appctx"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/binding"
+	"github.com/alex/social-login/internal/pkg/appctx"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // BindingRepository 是 oauth_bindings 表的仓储。

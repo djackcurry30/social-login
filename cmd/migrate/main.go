@@ -26,9 +26,9 @@ import (
 
 	"github.com/pressly/goose/v3"
 
-	"github.com/17track/social-login/internal/bootstrap"
-	"github.com/17track/social-login/internal/infrastructure/persistence/postgres"
-	"github.com/17track/social-login/migrations"
+	"github.com/alex/social-login/internal/bootstrap"
+	"github.com/alex/social-login/internal/infrastructure/persistence/postgres"
+	"github.com/alex/social-login/migrations"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/17track/social-login
+module github.com/alex/social-login
 
 go 1.26.0
 

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/17track/social-login/internal/domain/identity"
+	"github.com/alex/social-login/internal/domain/identity"
 )
 
 // TestClaimHasherDeterministicWithinApp 验证 claim 哈希的核心性质。

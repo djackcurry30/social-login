@@ -10,21 +10,21 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/17track/social-login/internal/application/authflow"
-	"github.com/17track/social-login/internal/application/binding"
-	"github.com/17track/social-login/internal/application/tenantconfig"
-	"github.com/17track/social-login/internal/application/token"
-	"github.com/17track/social-login/internal/domain/identitysource"
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/infrastructure/cache"
-	"github.com/17track/social-login/internal/infrastructure/persistence/postgres"
-	httpapi "github.com/17track/social-login/internal/interfaces/http"
-	"github.com/17track/social-login/internal/interfaces/http/handler"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/application/authflow"
+	"github.com/alex/social-login/internal/application/binding"
+	"github.com/alex/social-login/internal/application/tenantconfig"
+	"github.com/alex/social-login/internal/application/token"
+	"github.com/alex/social-login/internal/domain/identitysource"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/infrastructure/cache"
+	"github.com/alex/social-login/internal/infrastructure/persistence/postgres"
+	httpapi "github.com/alex/social-login/internal/interfaces/http"
+	"github.com/alex/social-login/internal/interfaces/http/handler"
+	"github.com/alex/social-login/internal/pkg/errs"
 
 	// blank import 触发各渠道适配器的编译期注册（决策 D7）。
 	// 新增渠道时改这一行即可，装配代码与核心编排都不需要动。
-	_ "github.com/17track/social-login/internal/infrastructure/provider/adapters"
+	_ "github.com/alex/social-login/internal/infrastructure/provider/adapters"
 )
 
 // Version 由构建时通过 -ldflags 注入。

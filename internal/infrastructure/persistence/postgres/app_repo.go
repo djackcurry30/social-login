@@ -8,8 +8,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/17track/social-login/internal/domain/tenant"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/tenant"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // AppRepository 是 applications 表的仓储。

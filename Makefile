@@ -8,7 +8,7 @@ VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || e
 COMMIT          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILT_AT        ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS         := -s -w \
-                   -X github.com/17track/social-login/internal/bootstrap.Version=$(VERSION)
+                   -X github.com/alex/social-login/internal/bootstrap.Version=$(VERSION)
 
 CONFIG          ?= configs/config.yaml
 PG_CONTAINER    ?= social-login-pg

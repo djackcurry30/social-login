@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	domainaccount "github.com/17track/social-login/internal/domain/account"
-	"github.com/17track/social-login/internal/domain/identity"
-	"github.com/17track/social-login/internal/pkg/errs"
+	domainaccount "github.com/alex/social-login/internal/domain/account"
+	"github.com/alex/social-login/internal/domain/identity"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // StubProvider 是内存实现的账号提供者，仅供开发与集成测试使用。

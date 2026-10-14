@@ -19,7 +19,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/17track/social-login/internal/infrastructure/crypto"
+	"github.com/alex/social-login/internal/infrastructure/crypto"
 )
 
 func main() {

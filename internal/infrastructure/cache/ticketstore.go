@@ -6,8 +6,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/17track/social-login/internal/domain/ticket"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/ticket"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // Redis 键前缀（架构 §6.3）。

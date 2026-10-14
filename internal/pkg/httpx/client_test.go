@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // TestDoClassifiesFailureForCircuitBreaker 验证失败分类。

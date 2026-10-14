@@ -19,18 +19,18 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/application/tenantconfig"
-	"github.com/17track/social-login/internal/domain/account"
-	"github.com/17track/social-login/internal/domain/audit"
-	"github.com/17track/social-login/internal/domain/binding"
-	"github.com/17track/social-login/internal/domain/identity"
-	"github.com/17track/social-login/internal/domain/identitysource"
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/domain/ticket"
-	"github.com/17track/social-login/internal/pkg/errs"
-	"github.com/17track/social-login/internal/pkg/httpx"
-	"github.com/17track/social-login/internal/pkg/ids"
-	"github.com/17track/social-login/internal/pkg/reqmeta"
+	"github.com/alex/social-login/internal/application/tenantconfig"
+	"github.com/alex/social-login/internal/domain/account"
+	"github.com/alex/social-login/internal/domain/audit"
+	"github.com/alex/social-login/internal/domain/binding"
+	"github.com/alex/social-login/internal/domain/identity"
+	"github.com/alex/social-login/internal/domain/identitysource"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/domain/ticket"
+	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/httpx"
+	"github.com/alex/social-login/internal/pkg/ids"
+	"github.com/alex/social-login/internal/pkg/reqmeta"
 )
 
 // Config 是流程配置。

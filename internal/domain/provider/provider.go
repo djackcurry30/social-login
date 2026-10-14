@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // Provider 是所有三方渠道必须实现的契约。

@@ -25,8 +25,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/17track/social-login/internal/pkg/errs"
-	"github.com/17track/social-login/internal/pkg/ids"
+	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/ids"
 )
 
 // Claims 是本服务签发的 JWT 载荷（架构 §8.1）。

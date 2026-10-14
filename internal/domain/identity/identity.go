@@ -15,7 +15,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // ErrNotFound 表示身份不存在。仓储实现返回它，调用方用 errors.Is 判定。

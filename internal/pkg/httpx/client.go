@@ -28,7 +28,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // 默认值。可被 Config 覆盖。

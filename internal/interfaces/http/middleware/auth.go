@@ -7,13 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/application/tenantconfig"
-	"github.com/17track/social-login/internal/application/token"
-	"github.com/17track/social-login/internal/domain/tenant"
-	"github.com/17track/social-login/internal/infrastructure/crypto"
-	"github.com/17track/social-login/internal/interfaces/http/httputil"
-	"github.com/17track/social-login/internal/pkg/errs"
-	"github.com/17track/social-login/internal/pkg/reqmeta"
+	"github.com/alex/social-login/internal/application/tenantconfig"
+	"github.com/alex/social-login/internal/application/token"
+	"github.com/alex/social-login/internal/domain/tenant"
+	"github.com/alex/social-login/internal/infrastructure/crypto"
+	"github.com/alex/social-login/internal/interfaces/http/httputil"
+	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/reqmeta"
 )
 
 // 请求头名。

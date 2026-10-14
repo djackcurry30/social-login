@@ -14,8 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/pkg/ids"
-	"github.com/17track/social-login/internal/pkg/reqmeta"
+	"github.com/alex/social-login/internal/pkg/ids"
+	"github.com/alex/social-login/internal/pkg/reqmeta"
 )
 
 // gin context 中使用的键。用常量而非字面量，避免拼写不一致造成的静默失效。

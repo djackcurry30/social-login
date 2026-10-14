@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/17track/social-login/internal/domain/identity"
-	"github.com/17track/social-login/internal/domain/session"
-	"github.com/17track/social-login/internal/pkg/errs"
-	"github.com/17track/social-login/internal/pkg/jwtkit"
+	"github.com/alex/social-login/internal/domain/identity"
+	"github.com/alex/social-login/internal/domain/session"
+	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/jwtkit"
 )
 
 // BoundIdentity 是"绑定关系已确立后直接签发令牌"所需的要素。

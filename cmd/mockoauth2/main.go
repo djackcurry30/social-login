@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/17track/social-login/internal/testsupport/mockoauth2"
+	"github.com/alex/social-login/internal/testsupport/mockoauth2"
 )
 
 func main() {

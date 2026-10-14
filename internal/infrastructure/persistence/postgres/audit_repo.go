@@ -6,9 +6,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/17track/social-login/internal/domain/audit"
-	"github.com/17track/social-login/internal/pkg/appctx"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/domain/audit"
+	"github.com/alex/social-login/internal/pkg/appctx"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // AuditRepository 是 auth_audit_logs 表的仓储。

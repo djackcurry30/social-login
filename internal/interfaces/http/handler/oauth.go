@@ -7,10 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/17track/social-login/internal/application/authflow"
-	"github.com/17track/social-login/internal/domain/provider"
-	"github.com/17track/social-login/internal/interfaces/http/httputil"
-	"github.com/17track/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/application/authflow"
+	"github.com/alex/social-login/internal/domain/provider"
+	"github.com/alex/social-login/internal/interfaces/http/httputil"
+	"github.com/alex/social-login/internal/pkg/errs"
 )
 
 // authorizeQuery 是 /v1/authorize 的查询参数。

@@ -7,13 +7,13 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	domainaccount "github.com/17track/social-login/internal/domain/account"
-	infraaccount "github.com/17track/social-login/internal/infrastructure/account"
-	"github.com/17track/social-login/internal/infrastructure/crypto"
-	"github.com/17track/social-login/internal/pkg/errs"
-	"github.com/17track/social-login/internal/pkg/ids"
-	"github.com/17track/social-login/internal/pkg/jwtkit"
-	"github.com/17track/social-login/migrations"
+	domainaccount "github.com/alex/social-login/internal/domain/account"
+	infraaccount "github.com/alex/social-login/internal/infrastructure/account"
+	"github.com/alex/social-login/internal/infrastructure/crypto"
+	"github.com/alex/social-login/internal/pkg/errs"
+	"github.com/alex/social-login/internal/pkg/ids"
+	"github.com/alex/social-login/internal/pkg/jwtkit"
+	"github.com/alex/social-login/migrations"
 )
 
 // 开发环境自动生成密钥时的提示语。
