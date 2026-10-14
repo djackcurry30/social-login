@@ -1,252 +1,345 @@
 # 技术栈选型
 
 > 配套文档：`architecture-design.md`（v0.9）· `design-review.md`
-> 本文档只回答一个问题：**用哪些 Go 生态的库来实现这套设计，以及为什么不用别的。**
-> 每一项都给出「选了什么 / 为什么不选常见的替代品」，避免后续在 PR 里反复争论。
+> 本文档回答一个问题：**用哪些 Go 生态的库来实现这套设计，以及为什么不用别的。**
+>
+> ---
+> **v2 修订说明（重要）**：v1 的选型偏向"技术纯度"（chi / sqlc / koanf / slog / 自研 HTTP 封装），
+> 但**团队熟悉度是一阶因素，不是可以忽略的偏好**——一个团队不熟的"更优"技术栈，
+> 长期维护成本和踩坑概率都高于一个"够用但大家都会"的栈。
+> v2 按「**主流优先，只在主流方案真的会出错时才偏离**」的原则重选，偏离处均标注理由与缓解措施。
 
 ---
 
-## 0. 先定两个基础决策（影响面最大，必须先拍板）
+## 0. 选型原则（v2）
 
-### 0.1 数据库：PostgreSQL 16（不是 MySQL）
+按优先级排序，冲突时上位优先：
 
-架构文档写的是「MySQL 或 PostgreSQL」，编码前必须二选一。**本项目选 PostgreSQL**，理由不是偏好，而是设计里已经用到了 PostgreSQL 的独有特性：
+| 优先级 | 原则 | 说明 |
+| --- | --- | --- |
+| 1 | **团队熟悉度** | 主流、社区大、遇到问题能搜到答案。这是维护成本的直接决定因素 |
+| 2 | **正确性** | 主流方案若会导致**数据错误或安全缺陷**，必须偏离并说明 |
+| 3 | 性能 | 本服务是 IO 密集型（等三方平台响应），性能不是瓶颈项 |
+| 4 | 简洁 / 优雅 | 最不重要。可读性由团队约定保证，不靠换库 |
+
+**结论**：v2 只保留 4 处"非最主流"的选择，每一处都对应一个**具体的、会导致出错的**技术原因（见 §4）。
+
+---
+
+## 1. 基础决策
+
+### 1.1 数据库：PostgreSQL 16 ✅ 已确认
+
+设计里已经用到 4 项 PostgreSQL 独有特性，切换成本随代码量增长：
 
 | 设计中的依赖点 | PostgreSQL | MySQL 8 |
 | --- | --- | --- |
-| **部分唯一索引**（`uk_claims_verified WHERE verified = true AND revoked_at IS NULL`） | 原生支持（§6.2 的核心约束 P0-1） | ❌ 不支持，需用生成列 + 唯一索引绕过，语义等价但可读性差、易写错 |
-| **`FOR UPDATE SKIP LOCKED`**（补偿任务与 Outbox worker 多副本安全拉取，§12） | 原生支持 | 8.0 支持 |
-| **JSONB**（`policy` / `extra` / `profile_snapshot` / `detail` / `before_state`） | JSONB 可建 GIN 索引，可直接索引查询 | JSON 可查询但无等价索引能力 |
+| **部分唯一索引**（`uk_claims_verified WHERE verified = true AND revoked_at IS NULL`，P0-1 的核心约束） | 原生支持 | ❌ 不支持，须用生成列绕过 |
+| **`FOR UPDATE SKIP LOCKED`**（补偿任务与 Outbox worker 多副本安全拉取，§12） | 原生 | 8.0 支持 |
+| **JSONB + GIN 索引**（`policy` / `extra` / `profile_snapshot`，§6.2） | 支持 | JSON 可查但无等价索引能力 |
 | **`INET` 类型**（`auth_audit_logs.client_ip`） | 原生 | ❌ 需存 VARCHAR |
 
-切换成本对比：**现在选 PostgreSQL = 0 成本；用 MySQL 写完之后再迁移 = 重写全部迁移脚本 + 改索引写法 + 改 IP 存储**。
+### 1.2 Web 框架：gin v1.10+
 
-> 若团队 MySQL 运维能力强、且不接受引入新数据库，需明确接受上面 4 项降级方案，并在 `migrations/` 中统一使用生成列写法。**这是一个必须显式决策的点，不能默认。**
+**选 gin。** 理由是团队熟悉度 + 生态完整，且**不存在技术障碍**：
 
-### 0.2 Web 框架：chi v5（不是 gin / echo / fiber）
-
-**选 chi**，理由：
-
-1. **100% 实现 `net/http` 的 `http.Handler` 接口**。中间件、测试、`httptest` 全部走标准库，不引入框架专有 context。本项目有 5 类中间件（app 鉴权、管理员 RBAC、限流、审计、trace），需要自由组合，chi 的中间件模型最干净。
-2. 本项目有**两套完全独立的鉴权体系**（业务端 `appId+secret`、管理端 Bearer+RBAC），需要按路径前缀挂载不同中间件链。chi 的 `Route`/`Group`/`Mount` 天然适配（§15.2）。
-3. 零依赖、可读、维护活跃。
-
-**否决原因**：
-
-| 框架 | 否决理由 |
+| 关注点 | gin 的实际表现 |
 | --- | --- |
-| **gin** | 自研 `gin.Context`，与标准库中间件不互通；本项目大量中间件需复用（限流、审计），会产生适配层 |
-| **echo** | 同 gin，且抽象层更多 |
-| **fiber** | 基于 fasthttp，**不是 `net/http` 接口**，`httptest`、OpenTelemetry 官方中间件、部分标准库生态都无法直接用 |
-| **纯标准库** | Go 1.22+ 的 `ServeMux` 已支持 method + path 参数，简单场景够用；但本项目需要「中间件按路由分组挂载」，手写会很啰嗦。**chi 本质上是标准库的薄封装，保留升级到纯标准库的可能** |
+| 与标准库中间件互通 | `gin.WrapH(mw)` 可把 `func(http.Handler) http.Handler` 直接包成 gin 中间件，方向是通的 |
+| 可观测性 | **`otelgin` 是 OpenTelemetry 官方中间件**，无需自研 |
+| 两套鉴权链按路径挂载 | `r.Group("/v1")` 与 `r.Group("/admin/v1")` 各挂各的中间件，天然支持（§15.2） |
+| handler 单元测试 | `httptest` 正常可用（`router.ServeHTTP(w, req)`） |
+| 路由性能 | gin 更快，但**对本服务无意义**——瓶颈是调三方平台的网络 IO，不是路由匹配 |
+
+**v1 原选的 chi 为什么改掉**：chi 的优势是"100% 实现 `net/http` 接口"，但 gin 通过 `WrapH` 已能覆盖实际需要；而团队不熟悉会带来真实的排障成本。
+
+> ⚠️ **v1 中我列的 gin 否决理由（"自研 context 与标准库中间件不互通"）是不严谨的**——那只适用于 fiber。
+> gin 的 `*gin.Context` 确实不是 `context.Context`，但 `WrapH` 提供了双向可用的桥接，不构成阻碍。
+
+**gin 使用约定**：
+
+```
+· 禁用 gin.Default()，只用 gin.New() + 自研 Recovery（记录 trace_id，不泄漏堆栈）
+· 禁用 gin 自带 Logger，访问日志统一走 zap（ginzap 或自研中间件）
+· 错误响应体统一为项目错误码格式（§5.3），不用 gin 的 ShouldBind 错误直出
+· handler 内禁止把 *gin.Context 往下层传；向下只传 context.Context（c.Request.Context()）
+```
+
+> ⚠️ **fiber 不在此列**：它基于 fasthttp，**不是 `net/http` 接口**——`httptest`、OTel 官方中间件、部分标准库生态都用不了。**这是技术障碍，不是偏好。**
 
 ---
 
-## 1. 总览
+## 2. 总览
 
-| 分层 | 用途 | 选型 | 版本 |
+| 分层 | 用途 | 选型 | 主流度 |
 | --- | --- | --- | --- |
-| 语言 | — | **Go** | ≥ 1.23（最低 1.22，需 `net/http` 增强路由） |
-| Web | 路由 + 中间件 | **go-chi/chi** | v5 |
-| 配置 | 多源配置加载 | **knadh/koanf** | v2 |
-| 数据库 | 驱动 | **jackc/pgx** | v5 |
-| 数据库 | SQL → 类型安全代码 | **sqlc** | v1 |
-| 数据库 | 迁移 | **pressly/goose** | v3 |
-| 缓存/队列 | Redis 客户端 | **redis/go-redis** | v9 |
-| 缓存/队列 | 分布式锁 | **go-redis + Lua**（自研薄封装） | — |
-| 认证 | JWT 签发与校验 | **golang-jwt/jwt** | v5 |
-| 认证 | JWK / JWKS（Apple 验签 + 自建 JWKS） | **lestrrat-go/jwx** | v2 |
-| 认证 | 通用 OAuth2 客户端 | **golang.org/x/oauth2** | latest |
-| HTTP 客户端 | 三方平台调用 | **标准库 + 自研薄封装** | — |
-| 校验 | 请求 DTO | **go-playground/validator** | v10 |
-| 日志 | 结构化日志 | **标准库 log/slog** | 内置 |
-| 可观测 | 链路追踪 | **OpenTelemetry**（otel + otelhttp + otlp） | latest |
-| 可观测 | 指标 | **prometheus/client_golang** | v1 |
-| 错误 | 错误码与包装 | **自研 `pkg/errs`** | — |
-| 加密 | 凭据加密 / 哈希 | **标准库 crypto**（AES-GCM / ECDSA / SHA-256） | 内置 |
-| 测试 | 断言与 mock | **stretchr/testify** | v1 |
-| 测试 | 依赖容器 | **testcontainers-go** | — |
-| 测试 | 接口 mock 生成 | **go.uber.org/mock**（原 golang/mock） | latest |
-| 代码生成 | OpenAPI → server stub / client | **oapi-codegen** | v2 |
-| 质量 | 静态检查 | **golangci-lint** | v1 |
-| 质量 | 漏洞扫描 | **govulncheck** | latest |
-| 构建 | 任务编排 | **Makefile**（不引入 task runner） | — |
-| 本地依赖 | PG + Redis | **docker-compose** | — |
-| 容器化 | 运行镜像 | **多阶段构建 + distroless** | — |
+| 语言 | — | **Go** ≥ 1.23 | — |
+| Web | 路由 + 中间件 | **gin** v1.10+ | ★★★★★ |
+| 配置 | 多源配置加载 | **viper** v1 | ★★★★★ |
+| 数据库 | ORM | **GORM** v2（pgx 驱动） | ★★★★★ |
+| 数据库 | 迁移 | **goose** v3 或 **golang-migrate**（团队选） | ★★★★ |
+| 缓存 | Redis 客户端 | **go-redis** v9 | ★★★★★ |
+| 认证 | JWT 签发与校验 | **golang-jwt/jwt** v5 | ★★★★★ |
+| 认证 | JWKS 拉取与验签（Apple） | **MicahParks/keyfunc** v3 | ★★★★ |
+| 认证 | 通用 OAuth2 客户端 | **golang.org/x/oauth2** | ★★★★★ |
+| HTTP 客户端 | 三方平台调用 | **resty** v2 | ★★★★ |
+| 校验 | 请求 DTO | **go-playground/validator** v10 | ★★★★★ |
+| 日志 | 结构化日志 | **zap** v1 + lumberjack 轮转 | ★★★★★ |
+| 可观测 | 链路追踪 | **OpenTelemetry** + `otelgin` + `otelhttp` | ★★★★★ |
+| 可观测 | 指标 | **prometheus/client_golang** | ★★★★★ |
+| 错误 | 错误码与包装 | **自研 `pkg/errs`**（约 100 行）+ `pkg/errors` 包装 | ★★★ |
+| 加密 | 凭据加密 / 哈希 | **标准库 crypto**（AES-GCM / ECDSA / SHA-256） | ★★★★★ |
+| 测试 | 断言 + mock | **testify** v1 | ★★★★★ |
+| 测试 | 依赖容器 | **testcontainers-go** | ★★★★ |
+| 测试 | 接口 mock 生成 | **go.uber.org/mock** | ★★★★ |
+| 代码生成 | OpenAPI → stub / DTO | **oapi-codegen** v2 | ★★★★ |
+| 质量 | 静态检查 | **golangci-lint** | ★★★★★ |
+| 质量 | 漏洞扫描 | **govulncheck** | ★★★★ |
+| 质量 | 凭据防泄漏 | **gitleaks** | ★★★★ |
+| 构建 | 任务编排 | **Makefile** | ★★★★★ |
+| 容器化 | 本地依赖 | **docker-compose** | ★★★★★ |
 
 ---
 
-## 2. 逐项说明
+## 3. 逐项说明（重点是与 v1 的差异）
 
-### 2.1 配置：koanf v2
+### 3.1 配置：viper v1（v1 用 koanf）
 
-**为什么不用 viper**：viper 依赖树庞大（引入 fsnotify、cast、afero 等十几个包），且有全局单例状态的坏味道。koanf 是它的轻量替代，多源合并（默认值 → YAML → 环境变量）的模型更清晰，无全局状态。
+**改为 viper**：主流度远高，团队大概率用过。
+
+**唯一注意点**：**不要用包级全局单例**（`viper.Get()` 那套），用实例：
+
+```go
+v := viper.New()
+v.SetConfigFile("configs/config.yaml")
+v.SetEnvPrefix("AUTH")
+v.SetEnvKeyReplacer(strings.NewReplacer(".", "__"))
+v.AutomaticEnv()          // 环境变量覆盖配置文件
+```
 
 **配置分层约定**（对应架构 §9）：
 
 ```
 configs/config.yaml          # 默认值，入库
-configs/config.local.yaml    # 本地覆盖，.gitignore 排除
+configs/config.local.yaml    # 本地覆盖，已被 .gitignore 排除
 环境变量 AUTH__DB__DSN        # 最高优先级，容器部署用
 ```
 
-**敏感项不走配置文件**：DB 密码、Redis 密码、KMS 凭据一律只从环境变量读，配置文件里只放占位符。这与 `.gitignore` 的凭据规则是一套防线。
+**敏感项不走配置文件**：DB 密码、Redis 密码、KMS 凭据一律只从环境变量读，配置文件里只放占位符。这与 `.gitignore` 的凭据规则构成两道防线。
 
-### 2.2 数据库访问：sqlc + pgx，不用 ORM
+### 3.2 数据访问：GORM v2（v1 用 pgx + sqlc）
 
-**这是本项目最需要解释的一个选择。**
+**改为 GORM v2。** 这个决定需要展开说，因为 v1 推荐 sqlc 的论据有一部分成立、有一部分被我夸大了。
 
-**为什么不用 GORM**：本设计里有大量 ORM 会碍事的场景：
+**v1 的论据重新校准：**
 
-| 场景 | GORM 的痛点 |
-| --- | --- |
-| `CREATE UNIQUE INDEX ... WHERE verified = true`（P0-1） | ORM 无能力表达，仍需手写 SQL 迁移 |
-| 部分唯一索引冲突要**转成业务语义**（并发绑定兜底，§5.2） | 需要精确捕获 PG 错误码 `23505` + 约束名，GORM 的错误包装会丢失细节 |
-| `SELECT ... FOR UPDATE SKIP LOCKED`（worker 拉取） | 需 `Raw()` 绕过 |
-| `UPDATE ... WHERE status = 'pending' AND attempts < N RETURNING *` | 需 `Raw()` 绕过 |
-| JSONB 字段的部分更新（`policy.merge.mode`） | 需 `Raw()` 绕过 |
+| v1 的说法 | 实际情况 | 是否成立 |
+| --- | --- | --- |
+| GORM 无法表达部分唯一索引 | **成立，但不影响**——DDL 本来就在 `migrations/` 手写 SQL，ORM 管不着 | ❌ 不是阻碍 |
+| GORM 做不了 `FOR UPDATE SKIP LOCKED` | **不成立**。GORM v2 原生支持：`db.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})` | ❌ 我错了 |
+| GORM 捕获不到 `23505` 与约束名 | **基本成立但可解**。GORM 透传驱动错误，`errors.As(err, &pgErr)` 取 `*pgconn.PgError` 可拿到 `ConstraintName` | ⚠️ 可行 |
+| GORM 做 `RETURNING` 麻烦 | **不成立**。GORM v2 支持 `clause.Returning{}` | ❌ 我错了 |
+| JSONB 局部更新需 `Raw()` | **成立**。`jsonb_set(...)` 需 `gorm.Expr` 或读改写 | ✅ 成立，但影响小 |
+| 复杂多表查询链式 API 变丑 | **成立**。identity / claim 维度的匹配查询用 `Raw()` 更清楚 | ✅ 成立 |
 
-结论：**核心查询路径最终都要落回手写 SQL，那不如一开始就 SQL 优先**，用 sqlc 拿到类型安全，而不是引入一个"半可用"的 ORM。
+**结论**：GORM 在本项目**完全可用**，只有约 6 处复杂查询需要 `db.Raw()`。"GORM 管 CRUD + Raw 管复杂查询"是被广泛验证的混合模式，不是妥协。
 
-**为什么不用 ent**：ent 的 schema-as-code 会与 `migrations/` 中的手写 DDL 形成**两个真相源**——设计里已经把所有约束（部分唯一索引、生成列）写成 SQL 了，再用 ent 描述一遍必然漂移。
+**但必须守住两条不变量**（这两条与用什么库无关，才是真正重要的）：
 
-**sqlc 的工作流**：
+**① DDL 的唯一真相源是 `migrations/` 里的手写 SQL，禁止 AutoMigrate 管生产 schema**
 
+设计里的约束都很细，AutoMigrate 表达不了：
+
+```sql
+-- 例：identity_claims 的部分唯一索引（P0-1），AutoMigrate 无法表达
+CREATE UNIQUE INDEX uk_claims_verified
+    ON identity_claims (app_id, claim_type, claim_value_hash)
+    WHERE verified = true AND revoked_at IS NULL;
 ```
-internal/infrastructure/persistence/queries/*.sql   ← 手写 SQL（唯一真相源）
-        ↓ sqlc generate
-internal/infrastructure/persistence/sqlcgen/        ← 生成的类型安全代码（入库）
+
+AutoMigrate 的"只加不删"语义在涉及部分唯一索引、生成列时会**静默做错事**，且不可审计、不可回滚。
+约定：`migrations/` 是唯一真相源，GORM 只负责读写数据；本地开发也走迁移脚本，不跑 AutoMigrate。
+
+**② `app_id` 强制隔离用 GORM 全局 Callback 实现，不靠人自觉**
+
+架构 §9.1 要求"每条查询都必须带 `app_id`，Repository 层强制注入"。用手写 SQL 只能靠 code review 保证，**而用 GORM 反而能做中心化强制**：
+
+```go
+// 全局回调：任何 Query 前自动注入 app_id 条件，缺失则 panic
+db.Callback().Query().Before("gorm:query").Register("inject_app_scope", func(tx *gorm.DB) {
+    appID, ok := tx.Statement.Context.Value(ctxKeyAppID).(int64)
+    if !ok {
+        panic("missing app scope: 所有查询必须携带 app_id（架构 §9.1）")
+    }
+    tx.Statement.AddClause(clause.Where{Exprs: []clause.Expression{
+        clause.Eq{Column: "app_id", Value: appID},
+    }})
+})
 ```
 
-生成的代码入库（不放进 `.gitignore`），保证 CI 无需装 sqlc 也能编译；同时在 CI 中加一步 `sqlc diff` 检测"改了 SQL 但忘了 generate"。
+这比"每条 SQL 记得写 `WHERE app_id = ?`"可靠得多——**漏写在开发阶段就会 panic，而不是线上串号**。
 
-**连接池**：`pgxpool`，参数在 bootstrap 中按 CPU 核数与环境变量配置，不用默认值。
+**③ `db.Raw()` 的使用纪律**
 
-### 2.3 迁移：goose，不用 AutoMigrate
+允许用 `Raw()` 的场景仅限：多表 join、批量更新、窗口函数、JSONB 操作。用 `Raw()` 时**必须显式带 `app_id` 参数**（全局 Callback 不拦原生 SQL），并在 PR 中说明为什么绕过。
 
-**为什么不用 GORM AutoMigrate**：生产环境的 schema 变更必须是**显式、可审阅、可回滚**的。AutoMigrate 的"自动加列不删列"语义在涉及部分唯一索引、生成列时会静默做错事。而且本项目第一版就有 11 张表（含 outbox），AutoMigrate 完全不可控。
+### 3.3 迁移：goose 或 golang-migrate（团队选）
 
-**为什么选 goose 而不是 golang-migrate**：goose 支持 `-- +goose Up/Down` 注释式 SQL，也能嵌入二进制（`goose.SetBaseFS`），可以在启动时按需执行；golang-migrate 的 CLI 依赖更多。
+两者都是纯 SQL 迁移，都够用，**按团队熟悉的选**。
+
+**为什么不用 GORM AutoMigrate**：见 §3.2 ①。生产 schema 变更必须显式、可审阅、可回滚。
 
 **规范**：
-- 迁移文件命名 `migrations/0001_init_oauth_tables.sql`，序号连续不跳号
-- **每个迁移必须写 `Down`**，除了数据回填类
-- 涉及大表变更（如 `oauth_identities` 加索引）必须使用 `CREATE INDEX CONCURRENTLY`，并在迁移中标注不可回滚
+- 文件命名 `0001_init_oauth_tables.sql`，序号连续不跳号
+- **每个迁移必须写 `Down`**（数据回填类可标注不可回滚）
+- 大表加索引用 `CREATE INDEX CONCURRENTLY`，并在注释标注不可回滚
 
-### 2.4 Redis：go-redis v9
+### 3.4 日志：zap v1（v1 用 slog）
 
-事实标准，无需解释。补充两个使用约定：
+**改为 zap。** v1 选 slog 的理由是"标准库、零依赖、不会被废弃"，但**对这个服务不成立**：
 
-- **不使用 `KEYS`**，全部走 `SCAN`（生产环境 `KEYS` 会阻塞）
-- **Lua 脚本统一放 `internal/infrastructure/cache/lua/`**，用 `go:embed` 嵌入，禁止在 Go 代码里内联长脚本文本
-- 分布式锁用 `SET NX PX` + 唯一 token + Lua 校验后才能删除（**不能用简单的 `DEL`，会误删他人锁**）
+| 维度 | 实际情况 |
+| --- | --- |
+| 性能 | zap 更快，但本服务日志量低（登录事件，不是数据管道），**性能优势用不上** |
+| 生态 | zap 明显更成熟：`lumberjack` 日志轮转、`ginzap` 对接 gin 访问日志、`zapcore` 自定义 encoder |
+| 团队熟悉度 | 国内 Go 团队普遍在用 zap，不用重新学 |
+| 迁移性 | slog ↔ zap 有互转桥接（`zapslog` / `slog-zap`），不是单向门 |
 
-### 2.5 认证：golang-jwt + jwx 分工使用
+**使用约定**：
 
-两个库并存是刻意的，职责不重叠：
+```
+· 统一 gin.New() + 自研 Recovery，访问日志走 zap（不用 gin.Default() 自带 logger）
+· 用 zapcore 自定义 Encoder 做两件事：
+    ① 从 context 注入 trace_id（§11.2 的链路贯穿）
+    ② 对 openid / external_user_id / 手机号自动脱敏（§11.3）
+· 日志分级纪律：三方原始响应只在 Debug 级别记录；access_token / appSecret / code 永不进日志
+· 轮转交给 lumberjack，不自研
+```
 
-| 库 | 用途 | 理由 |
+### 3.5 HTTP 客户端：resty v2（v1 用标准库 + 自研封装）
+
+**改为 resty v2**，主流度高、团队熟悉。
+
+**但必须配置三条纪律**，否则会真的出错：
+
+**① 默认关闭自动重试**
+
+```go
+r := resty.New().
+    SetRetryCount(0).        // ★ 关键：全局默认不重试
+    SetTimeout(3 * time.Second)
+```
+
+原因：`code2session`、微信 `Exchange`（换 token）这类接口**不是幂等的**——授权码用掉就失效，重试只会拿到"code 已使用"，还可能触发平台风控。v1 否决 resty 的主要理由就是这一条，而它**可以通过配置规避**。
+
+**② 每渠道独立 client，独立超时**
+
+```go
+wechatClient := resty.New().SetRetryCount(0).SetTimeout(3 * time.Second)
+appleClient  := resty.New().SetRetryCount(0).SetTimeout(5 * time.Second)  // Apple 更慢
+```
+
+**重试的幂等性由调用方显式声明**：`UserInfo`（拉用户信息，幂等）可显式 `.SetRetryCount(2)`；`Exchange` 永不重试。
+
+**③ 保留原始响应**
+
+`profile_snapshot` 需要存平台原始响应供排障（§6.2）。resty 用 `SetResult()` 会自动反序列化，但**原始 body 仍可通过 `resp.String()` 取到**，两者并存。
+
+**④ 可观测与脱敏**
+
+用 resty 的 `OnBeforeRequest` / `OnAfterResponse` 钩子注入 OTel span 与脱敏逻辑，不必额外包一层中间件。
+
+### 3.6 认证：golang-jwt v5 + keyfunc v3（v1 用 golang-jwt + jwx）
+
+**jwx 换成 MicahParks/keyfunc v3。** 原因：
+
+- **keyfunc v3 是"用 JWKS 验签"这件事在 Go 里的主流库**，且**直接与 `golang-jwt/jwt/v5` 集成**：`keyfunc.NewDefault([]string{jwksURL})` 返回 `func(*jwt.Token) (interface{}, error)`，直接喂给 `jwt.Parse`
+- **自动处理 Apple 的密钥轮换**：遇到未知 `kid` 时自动刷新 JWKS，正是我们需要的（§4.4 ②）
+- jwx 能力更全（JWK / JWS / JWE 全家桶），但本项目只需"拉 JWKS + 验签"，用不上它的全部能力
+
+**职责分工**：
+
+| 用途 | 用什么 |
+| --- | --- |
+| 签发 / 校验本服务的 `access_token`、`id_token` | **golang-jwt/jwt v5**，标准库 `crypto/ecdsa` 做 ES256 |
+| 校验 Apple `id_token` | **golang-jwt + keyfunc**（keyfunc 负责拉取与轮换 Apple JWKS） |
+| 生成并发布**本服务的** JWKS（`/v1/jwks`，§8.3） | **手写约 30 行**（EC 公钥的 JWK 就是 base64url 的 x / y + kid），**不引依赖** |
+
+最后一条值得说明：EC 公钥的 JWK 序列化就是两个 base64url 字段，为它引一个 JOSE 全家桶不划算。若团队更希望用库，`go-jose/go-jose` 是 Go 里最标准的 JOSE 实现。
+
+**密钥保管**：ES256 私钥从环境变量 / KMS 注入，**绝不入库、绝不进代码库**（`.gitignore` 已有 `*.pem` / `*.key`）。
+
+### 3.7 错误处理：自研 `pkg/errs`（保留）
+
+**这一项保持自研**，因为主流替代品解决的是不同问题：
+
+| 库 | 解决的问题 | 为什么不够用 |
 | --- | --- | --- |
-| **golang-jwt/jwt v5** | 签发/校验本服务的 `access_token`、`id_token` | API 简单，`MapClaims` + `RegisteredClaims` 够用 |
-| **lestrrat-go/jwx v2** | ① 校验 Apple `id_token`（拉取并解析 Apple JWKS）<br>② **生成**本服务的 JWKS（§8.3 的 `/v1/jwks`）<br>③ ES256 密钥的 JWK 序列化 | jwx 的 `jwk`/`jws` 子包是 Go 生态里唯一完整覆盖 JWK 全族的实现，golang-jwt 不带 JWKS 生成能力 |
+| `github.com/pkg/errors` | 错误包装 + 堆栈 | 没有**业务错误码**概念 |
+| `cockroachdb/errors` | 更全的包装 + PII 擦除 | 同样没有业务错误码；依赖重 |
+| `samber/oops` | 结构化错误属性 | 较新，生态小 |
 
-**不用 `golang-jwt` 硬扛 JWKS**：它的 `jwk` 包能力有限，Apple 的密钥轮换（按 `kid` 匹配、找不到时强制刷新）实现起来会很难看。
+本项目对外要返回 `AUTH.INVALID_STATE`、`BIND.IDENTITY_TAKEN` 这类**稳定的、可被业务方编程判断的**错误码（§5.3），这是产品契约，不是日志信息。
 
-**密钥保管**：ES256 私钥从环境变量/KMS 注入，**绝不入库、绝不进代码库**（`.gitignore` 已有 `*.pem` / `*.key`）。
-
-### 2.6 HTTP 客户端：标准库 + 自研薄封装（不用 resty）
-
-**为什么不用 resty**：resty 的默认行为里有一些不适合本项目的隐式设计——自动重试（会造成非幂等的 `code2session` 被重试）、默认的 JSON 反序列化（本项目需要保留 `Raw map[string]any` 原始响应供排障）、以及错误处理会吞掉 HTTP 状态码细节。
-
-**自研封装要提供的能力**（`internal/pkg/httpclient`）：
-
-```
-· 每渠道独立的超时（微信 3s / Apple 5s / 支付宝 3s 可配）
-· 只对幂等请求开启重试（GET / 明确标记的请求），超时与 5xx 退避重试
-· 全量 OpenTelemetry 埋点（生成 span，记录 URL/状态码/耗时）
-· 响应体大小上限（防三方返回超大 body 打爆内存）
-· 敏感字段脱敏（access_token / secret 不出现在日志与 trace 中）
-· 保留 Raw 响应供 profile_snapshot 落库
-```
-
-**重试的幂等性判定**必须显式声明——`Exchange`（换 token）不能重试，`UserInfo`（拉用户信息）可以。
-
-### 2.7 校验：validator v10
-
-用于 HTTP 层 DTO 校验（`/v1/authorize` 的必填参数、`policy` 结构等）。约定：
-
-- **所有校验错误一次性返回全部问题**（`validator.ValidationErrors` 全量展开），不是遇到第一个就返回——前端一次改完
-- `policy` 的业务一致性校验（§7.5.4 的 REJECT/WARN）**不用 tag 表达**，因为涉及跨字段与外部状态（是否启用了 claim 渠道），实现在 `application/adminops/policy_validator.go` 里
-
-### 2.8 日志：标准库 slog
-
-Go 1.21 引入的 `log/slog` 已足够，不引入 zap/zerolog。
-
-**约定**（对应架构 §11.3）：自定义 `slog.Handler` 做两件事：
-
-1. 从 `context.Context` 中提取 `trace_id`，自动注入每条日志
-2. 对 `openid` / `external_user_id` / 手机号做自动脱敏
-
-**日志分级纪律**：三方原始响应只在 DEBUG 级别记录，生产默认 INFO。`access_token`、`appSecret`、`code` 永不进日志。
-
-### 2.9 可观测：OpenTelemetry + Prometheus
-
-- **trace**：`otelhttp` 包装 handler 与 HTTP 客户端；`trace_id` 从 `/authorize` 生成写入 ticket，回调时取出续接（§11.2）
-- **metric**：Prometheus 拉取模式，`/metrics` 端点**只在管理端网络暴露**（§15.2），不与业务 API 同端口
-- **`runtime/trace`**：仅用于本地定位 CPU/调度问题，不进生产链路
-
-### 2.10 错误处理：自研 `pkg/errs`
-
-**为什么不用 `cockroachdb/errors` 或 `pkg/errors`**：本项目需要的是**业务错误码**体系（`AUTH.INVALID_STATE`、`BIND.IDENTITY_TAKEN`，§5.3），不是堆栈追踪。自研约 100 行即可：
+自研约 100 行：
 
 ```go
 type Error struct {
-    Code    string   // AUTH.INVALID_STATE
-    Message string   // 面向调用方的提示
-    HTTP    int      // HTTP 状态码
-    Cause   error    // 内部原因，不对外暴露
-    Details map[string]any // 保留三方平台原始错误
+    Code     string         // AUTH.INVALID_STATE，对外稳定契约
+    Message  string         // 面向调用方的提示
+    HTTP     int            // HTTP 状态码
+    Cause    error          // 内部原因，只进日志，不进响应
+    Details  map[string]any // 保留三方平台原始错误（脱敏后）
 }
 ```
 
-**关键约定**：`Details` 里可以放三方平台的原始错误（便于排障），但**必须经过脱敏**；`Cause` 只在日志输出，不出现在 HTTP 响应里。
+**约定**：`Details` 可放三方平台原始错误便于排障，**但必须脱敏**；`Cause` 只在日志输出，**绝不出现在 HTTP 响应里**。
 
-### 2.11 加密
+内部包装仍可用 `pkg/errors` 的 `%w`，在 HTTP 边界统一转成 `errs.Error`。
+
+### 3.8 加密（保留）
 
 | 用途 | 方案 | 说明 |
 | --- | --- | --- |
 | 渠道凭据加密（第一期） | **AES-256-GCM**，主密钥从环境变量读 | §13 修正 P2-4：第一期不做 KMS 但**绝不明文入库** |
-| 渠道凭据加密（第四期） | **KMS 信封加密**：主密钥加密 DEK，DEK 加密凭据 | §D6，加密层做成接口，第一期与第四期互换实现 |
-| JWT 签名 | **ES256**（P-256），标准库 `crypto/ecdsa` + jwx 序列化 | §8.3 |
-| `app_secret` 存储 | **SHA-256 + 随机盐** | ⚠️ **不用 bcrypt/argon2**：`app_secret` 是 32 字节高熵随机串，不存在暴力破解风险，慢哈希只会让每次请求都付出 CPU 代价。慢哈希只适用于低熵的**用户密码**——而本项目不存用户密码 |
-| `claim_value_hash` | **SHA-256 + 全局静态盐** | 手机号空间小（11 位数字），必须加盐防彩虹表；但要用**静态盐**而非每行随机盐，否则无法按哈希值查找 |
-| `refresh_token` 存储 | **SHA-256**（不加盐） | 随机串，直接哈希可查 |
+| 渠道凭据加密（第四期） | **KMS 信封加密**：主密钥加密 DEK，DEK 加密凭据 | §D6，加密层做成接口，两期实现可互换 |
+| JWT 签名 | **ES256**（P-256），标准库 `crypto/ecdsa` | §8.3 |
+| `app_secret` 存储 | **SHA-256 + 随机盐** | ⚠️ **不用 bcrypt / argon2**，理由见下 |
+| `claim_value_hash` | **SHA-256 + 应用级静态盐** | ⚠️ 不能用每行随机盐，理由见下 |
+| `refresh_token` 存储 | **SHA-256**（不加盐） | 高熵随机串，直接哈希可查 |
 
-> `claim_hash` 的"加盐但必须可查"是个容易踩的坑：**每行随机盐会直接让按哈希查询失效**，功能就没了。必须用应用级静态盐。
+> ⚠️ **两条容易踩的坑，与用什么库无关，必须写进代码注释：**
+>
+> **1. `app_secret` 不用慢哈希。** 它是 32 字节高熵随机串，不存在暴力破解风险，bcrypt / argon2 只会让**每次请求都白付 CPU**（认证中间件是热路径）。慢哈希只适用于低熵的**用户密码**——而本服务不存用户密码。
+>
+> **2. `claim_value_hash` 必须用应用级静态盐，不能用每行随机盐。** 手机号只有 11 位数字、空间小，必须加盐防彩虹表；但**每行随机盐会让"按哈希值查询手机号"直接失效**——归并判定功能就没了。这是一对相互制约的需求，必须用静态盐。
 
-### 2.12 测试
+### 3.9 测试（保留，均为主流）
 
 | 层次 | 工具 | 约定 |
 | --- | --- | --- |
 | 单元测试 | `testing` + `testify/require` | 领域层与适配器纯逻辑，不碰真实依赖 |
-| 接口 mock | `go.uber.org/mock` + `//go:generate` | 为 `Provider` / `AccountProvider` / `IdentitySource` 生成 mock |
-| 集成测试 | `testcontainers-go` | **真起 PG + Redis 容器**——本项目大量依赖部分唯一索引与 `SKIP LOCKED`，用 sqlmock 会测不出真实行为 |
-| HTTP 层 | `net/http/httptest` | 直接测 chi handler |
-| 三方平台 | `httptest.Server` 做假平台 | **不 mock HTTP 客户端库内部**，起一个假服务器更真实 |
+| 接口 mock | `go.uber.org/mock` + `//go:generate` | 为 `Provider` / `AccountProvider` / `IdentitySource` 生成 |
+| 集成测试 | `testcontainers-go` | **真起 PG + Redis 容器**（需本地 Docker） |
+| HTTP 层 | `net/http/httptest` | 直接测 gin handler（`router.ServeHTTP(w, req)`） |
+| 三方平台 | `httptest.Server` 起假平台 | **不 mock HTTP 客户端库内部**，起假服务器更真实 |
+
+**为什么集成测试必须用真数据库**：本项目大量依赖**部分唯一索引**与 **`SKIP LOCKED`** 的行为，`sqlmock` 这类假驱动**测不出真实行为**，等于白测。
 
 **必须写集成测试的三处**（架构里的高风险点）：
 
 1. **并发绑定冲突**：两个 goroutine 同时为同一 identity 建绑定，验证唯一索引兜底（§5.2）
-2. **合并的孤儿窗口**：模拟"远端 Merge 成功但本地事务提交失败"，验证补偿任务能自愈（§13 第三期 P0-3 专项验收）
+2. **合并的孤儿窗口**：模拟"远端 `Merge` 成功但本地事务提交失败"，验证补偿任务能自愈（§13 第三期 P0-3 专项验收）
 3. **`identity_claims` 部分唯一索引**：验证"未验证的手机号不占用唯一键""撤销后可重新占用"（P0-1）
+
+**替代方案**：若团队不想引入 `testcontainers-go`（需 Docker 且启动有开销），可退化为"本地 docker-compose 起 PG + 用环境变量切换测试库"。**但绝不能退化为 sqlmock。**
 
 `go test -race` 是 CI 必跑项。
 
-### 2.13 代码生成
+### 3.10 代码生成（保留）
 
 | 生成器 | 输入 | 输出 | 触发 |
 | --- | --- | --- | --- |
-| **sqlc** | `queries/*.sql` + `schema` | 类型安全的 DB 代码 | `make gen` |
 | **oapi-codegen** | `api/openapi.yaml` | server interface + DTO | `make gen` |
 | **mockgen** | SPI 接口 | mock 实现 | `make gen` |
 
@@ -254,106 +347,124 @@ type Error struct {
 
 CI 中加 `make gen && git diff --exit-code` —— 检测"改了源但忘了重新生成"。
 
-### 2.14 质量与安全
+### 3.11 质量与安全（保留）
 
 | 工具 | 用途 | 接入方式 |
 | --- | --- | --- |
 | **golangci-lint** | 静态检查（含 `errcheck`、`gosec`、`bodyclose`、`contextcheck`） | pre-commit + CI |
 | **govulncheck** | 依赖漏洞扫描 | CI 每周 + 每次 `go.mod` 变更 |
 | **`go vet`** | 内置 | CI |
-| **gitleaks** 或 **git-secrets** | **防止凭据误提交** | pre-commit hook |
+| **gitleaks** | **防止凭据误提交** | pre-commit hook |
 
-> **`gitleaks` 这类工具对本项目是刚需**——会频繁接触 `.p8`、appSecret、KMS 材料。`.gitignore` 只能防"已知扩展名"，防不住"把密钥贴进 YAML 或注释里"。建议加上 pre-commit 拦截。
+> **`gitleaks` 对本项目是刚需**——会频繁接触 `.p8`、appSecret、KMS 材料。`.gitignore` 只能防"已知扩展名"，防不住"把密钥贴进 YAML 或注释里"。
 
 ---
 
-## 3. 开发环境
+## 4. 保留下来的 4 处"非最主流"选择及理由
 
-### 3.1 ⚠️ 当前环境缺少 Go
+每一处都对应一个**具体的、会导致出错的**技术原因，而不是偏好：
+
+| # | 选择 | 主流替代 | 为什么必须偏离 |
+| --- | --- | --- | --- |
+| 1 | **手写 SQL 迁移为 DDL 唯一真相源**（不用 GORM AutoMigrate） | AutoMigrate | AutoMigrate 表达不了部分唯一索引（P0-1 的核心约束）；"只加不删"语义会**静默做错事**，且不可审计、不可回滚 |
+| 2 | **自研 `pkg/errs`** | `pkg/errors` | 需要**对外稳定的业务错误码**（`AUTH.INVALID_STATE` 等），这是产品契约；主流库解决的是包装与堆栈，不是错误码。自研仅约 100 行 |
+| 3 | **`claim_value_hash` 用静态盐**（不用随机盐） | 随机盐 | 随机盐会让"按哈希查手机号"**直接失效**，归并判定功能就没了。这是需求约束，不是选型 |
+| 4 | **`app_secret` 用 SHA-256 而非 bcrypt / argon2** | bcrypt | 它是高熵随机串，慢哈希只会让认证热路径**白付 CPU**；慢哈希只适用于低熵用户密码 |
+
+> 第 3、4 条严格说不是"库选型"，而是**用法约定**，但它们的出错后果比选错库更严重，所以一并列出。
+
+---
+
+## 5. 明确不引入的东西
+
+| 不引入 | 原因 |
+| --- | --- |
+| **fiber** | 基于 fasthttp，**不是 `net/http` 接口**——`httptest`、OTel 官方中间件、部分标准库生态都用不了。**这是技术障碍，不是偏好** |
+| **Kubernetes / Helm** | 当前规模是单服务 + worker，docker-compose 足够；上 K8s 是运维成本先于收益 |
+| **消息队列（Kafka / RabbitMQ / NATS）** | Outbox + Redis 已够。**引入 MQ 会带来"MQ 与 DB 的一致性问题"，而 Outbox 模式本身就是为解决它而生** |
+| **Service Mesh / Istio** | 单服务，无必要 |
+| **gRPC** | 对外是 HTTP / OAuth2 生态。若未来用户中心要求 gRPC，在 `accountclient` 单独加实现即可 |
+| **依赖注入框架（wire / fx）** | `bootstrap` 手写装配更透明、易调试。**若 `bootstrap` 超过 300 行再评估 wire** |
+| **分布式事务框架（Seata 等）** | 架构已用「三阶段独立事务 + 幂等 + 补偿」解决跨服务一致性（§7.3），不需要额外框架 |
+| **配置中心（Nacos / Apollo）** | 配置变更用「DB + Redis Pub/Sub 广播」已实现（§9.2）。第四期再评估 |
+| **自研 JWT / 自研加密** | 永远不自己实现密码学 |
+| **`context.TODO()`** | lint 规则禁止；所有链路必须传递 context |
+
+---
+
+## 6. 开发环境
+
+### 6.1 ⚠️ 当前环境缺少 Go（阻塞编码）
 
 ```
 $ go version
 bash: go: command not found
 ```
 
-**编码前必须先安装 Go**（当前工作机未装）。两种方式：
+**编码前必须先安装 Go：**
 
 ```bash
-# 方式一：官方安装包（推荐）
-# https://go.dev/dl/  下载 go1.23.x.windows-amd64.msi 安装
-
-# 方式二：包管理器
+# 方式一：包管理器（推荐）
 winget install GoLang.Go
 # 或 choco install golang
+
+# 方式二：官方安装包 https://go.dev/dl/
 ```
 
-安装后确认：
+安装后确认并设置国内代理（否则拉依赖会超时）：
 
 ```bash
 go version && go env GOPATH GOMODCACHE GOPROXY
-```
-
-**国内环境建议设置模块代理**（否则拉依赖会超时）：
-
-```bash
 go env -w GOPROXY=https://goproxy.cn,direct
 go env -w GOSUMDB=sum.golang.google.cn
 ```
 
-### 3.2 本地依赖服务
+### 6.2 本地依赖服务
 
-不要求开发机装 PG/Redis，用容器：
+不要求开发机装 PG / Redis，用容器：
 
 ```bash
 docker compose -f deployments/docker-compose.dev.yml up -d
 ```
 
-包含：PostgreSQL 16、Redis 7、MailHog（若要测邮件验证码）。
+包含：PostgreSQL 16、Redis 7。
 
-### 3.3 开发提效
+### 6.3 开发提效
 
 | 用途 | 工具 | 说明 |
 | --- | --- | --- |
 | 热重载 | **air** | 改代码自动重启 |
-| Mock 三方平台 | `testserver/` 下的假平台 | 本地不依赖真实微信/支付宝 |
+| Mock 三方平台 | `testserver/fake_oauth2` | 本地不依赖真实微信 / 支付宝，也是集成测试依赖 |
 | 调试 | Delve（`dlv`） | VS Code / GoLand 直接接 |
 
-**假平台（fake provider）是第一期的关键交付物**：第一期还没有真实渠道，需要 `testserver/fake_oauth2` 提供标准的授权码流程，才能端到端验证。它同时也是集成测试的依赖。
+**假平台（fake provider）是第一期的关键交付物**：第一期还没有真实渠道，需要它提供标准授权码流程才能端到端验证。
 
 ---
 
-## 4. 依赖管理策略
+## 7. 依赖管理策略
 
 | 项 | 约定 |
 | --- | --- |
-| 模块路径 | **待确认**（见下方说明） |
+| 模块路径 | **待确认**（见 §7.1） |
 | 版本锁定 | `go.mod` + `go.sum` 全部入库 |
-| vendor | **不提交**（默认已 `.gitignore`）。若需要完全离线构建再执行 `go mod vendor` 并删除忽略规则 |
+| vendor | **不提交**（默认已 `.gitignore`）。若需完全离线构建再执行 `go mod vendor` 并删除忽略规则 |
 | Go 版本声明 | `go.mod` 中写 `go 1.23`，不使用 `toolchain` 指令强制升级 |
 | 依赖引入审批 | **核心链路禁止引入新依赖**（授权流程、合并流程、加解密）；辅助工具类可放宽 |
-| 依赖数量上限 | 目标 ≤ 25 个直接依赖。每引入一个需在 PR 说明"为什么标准库或现有依赖做不到" |
+| 依赖数量上限 | 目标 ≤ 30 个直接依赖。每引入一个需在 PR 说明"为什么标准库或现有依赖做不到" |
 
-### ⚠️ 待确认：Go module 路径
+### 7.1 ⚠️ 待确认：Go module 路径
 
-架构文档中用的是占位符 `github.com/xxx/social-login`。**编码前需要确定真实的仓库地址**，例如：
+架构文档中用的是占位符 `github.com/xxx/social-login`。**编码前需要确定真实仓库地址**：
 
 ```
-github.com/17track/social-login      ← 按实际仓库填
+github.com/<你的组织>/social-login
 ```
 
-确认方式：
-
-```bash
-# 若已创建远程仓库
-git remote add origin <你的仓库地址>
-go mod edit -module=$(basename $(git remote get-url origin) .git) ...
-```
-
-**这个路径一旦定下，后续所有 `import` 都依赖它，改动成本随文件数线性增长**，所以要在写第一行代码前确定。
+**这个路径一旦定下，后续所有 `import` 都依赖它，改动成本随文件数线性增长**，必须在写第一行代码前确认。
 
 ---
 
-## 5. 仓库结构
+## 8. 仓库结构
 
 ```
 social-login/
@@ -374,11 +485,11 @@ social-login/
 │   └── worker/main.go             ← 后台任务：补偿 + Outbox 投递（§12）
 ├── internal/
 │   ├── bootstrap/                 ← 配置加载、依赖装配、优雅退出
-│   ├── config/                    ← 配置结构体定义（koanf 绑定）
+│   ├── config/                    ← 配置结构体（viper 绑定）
 │   ├── interfaces/http/
-│   │   ├── handler/               ← 业务端 /v1/*
+│   │   ├── handler/               ← 业务端 /v1/*（gin）
 │   │   ├── handler/admin/         ← 管理端 /admin/v1/*（§15 的 A~K 组）
-│   │   ├── middleware/            ← app 鉴权、限流、trace、恢复
+│   │   ├── middleware/            ← app 鉴权、限流、trace、Recovery（zap）
 │   │   ├── middleware/adminmw/    ← 管理员 RBAC、IP 白名单、高危操作审计
 │   │   └── dto/
 │   ├── application/               ← 用例编排（事务边界）
@@ -386,24 +497,22 @@ social-login/
 │   ├── domain/
 │   │   ├── identitysource/        ← D8 留口
 │   │   ├── provider/              ← SPI + Registry
-│   │   ├── identity/  binding/  ticket/  account/
+│   │   └── identity/  binding/  ticket/  account/
 │   ├── infrastructure/
 │   │   ├── provider/adapters/     ← wechat/ alipay/ apple/ generic_oauth2/
-│   │   ├── persistence/           ← pgx + sqlcgen
-│   │   ├── cache/                 ← redis + lua/
+│   │   ├── persistence/           ← GORM models + Repository（含 app_id 全局 Callback）
+│   │   ├── cache/                 ← go-redis + lua/
 │   │   ├── crypto/                ← 凭据加密、claim 哈希、KMS 客户端
 │   │   ├── accountclient/         ← HTTPAccountProvider
 │   │   └── eventbus/              ← outbox 投递
-│   └── pkg/                       ← errs / log / httpclient / jwtkit
-├── migrations/                    ← goose SQL
+│   └── pkg/                       ← errs / logx(zap) / httpclient(resty) / jwtkit
+├── migrations/                    ← 手写 SQL（DDL 唯一真相源）
 ├── configs/
 │   ├── config.yaml
 │   └── config.example.local.yaml  ← 提交示例，真实 local 配置被忽略
 ├── deployments/
 │   ├── docker-compose.dev.yml
 │   └── Dockerfile
-├── queries/                       ← sqlc 输入（*.sql）
-├── sqlc.yaml
 ├── testserver/
 │   └── fake_oauth2/               ← 假三方平台，第一期关键交付物
 └── scripts/
@@ -411,32 +520,17 @@ social-login/
 
 ---
 
-## 6. 明确不引入的东西（避免过度工程）
-
-| 不引入 | 原因 |
-| --- | --- |
-| **Kubernetes / Helm** | 当前规模是单服务 + worker，docker-compose 或直接二进制足够。上 K8s 是运维成本先于收益 |
-| **消息队列（Kafka/RabbitMQ/NATS）** | Outbox + Redis 已能满足事件投递与后台任务。**引入 MQ 会带来"MQ 与 DB 的一致性问题"，而 Outbox 模式本身就是为解决它而生的** |
-| **Service Mesh / Istio** | 单服务，无必要 |
-| **gRPC** | 对外是 HTTP/OAuth2 生态，管理端也无高频内部调用。若未来用户中心要求 gRPC，在 `accountclient` 单独加实现即可 |
-| **依赖注入框架（wire/fx）** | 项目规模可控，`bootstrap` 手写装配更透明、易调试。**若 `bootstrap` 超过 300 行再评估 wire** |
-| **ORM（GORM/ent）** | 见 §2.2 |
-| **分布式事务框架（Seata 等）** | 架构已用「三阶段独立事务 + 幂等 + 补偿」解决跨服务一致性（§7.3），不需要额外框架 |
-| **全链路配置中心（Nacos/Apollo）** | 配置变更用「DB + Redis Pub/Sub 广播」已实现（§9.2）。配置中心是第四期再评估项 |
-| **自研 JWT / 自研加密** | 永远不自己实现密码学 |
-| **`context.TODO()`** | lint 规则禁止；所有链路必须传递 context |
-
----
-
-## 7. 与架构文档的对应关系
+## 9. 与架构文档的对应关系
 
 | 架构设计中的关键机制 | 由哪些技术栈支撑 |
 | --- | --- |
-| Provider SPI + 编译期注册（D1/D7） | 纯标准库 + `init()` 注册，无框架依赖 |
-| 部分唯一索引兜底并发绑定（§5.2） | **PostgreSQL 部分唯一索引** + pgx 精确捕获 `23505` |
-| 三次独立事务 + 补偿（P0-3） | **pgx 显式事务控制** + `FOR UPDATE SKIP LOCKED` + `event_outbox` 表 |
-| JWKS 与密钥轮换（P0-2/§8.3） | **jwx**（JWK 生成与序列化）+ KMS/环境变量 |
-| Apple 验签与 client_secret 签发（C2） | **jwx**（JWKS 解析）+ **golang-jwt**（ES256 签名） |
-| 配置化合并行为（R2/§7.5） | **koanf** 读配置 + **JSONB** 存储 + `adminops/policy_validator` |
-| 管理端与业务端隔离（§15.2） | **chi 的路由分组与独立中间件链** + 网关按路径分流 |
-| 可观测性（§11） | **OpenTelemetry** + **prometheus/client_golang** + **slog** |
+| Provider SPI + 编译期注册（D1 / D7） | 纯标准库 + `init()` 注册，无框架依赖 |
+| 部分唯一索引兜底并发绑定（§5.2） | **PostgreSQL 部分唯一索引** + GORM 经 `errors.As` 取 `*pgconn.PgError.ConstraintName` |
+| `app_id` 强制隔离（§9.1） | **GORM 全局 Callback 自动注入**（比手写 SQL 更可靠） |
+| 三次独立事务 + 补偿（P0-3） | GORM 显式事务 + `clause.Locking{Options:"SKIP LOCKED"}` + `event_outbox` 表 |
+| JWKS 与密钥轮换（P0-2 / §8.3） | 手写 JWK 序列化（约 30 行）+ KMS / 环境变量 |
+| Apple 验签与 client_secret 签发（C2） | **golang-jwt + keyfunc**（JWKS 拉取与轮换）+ ES256 签名 |
+| 配置化合并行为（R2 / §7.5） | **viper** 读配置 + **JSONB** 存储 + `adminops/policy_validator` |
+| 管理端与业务端隔离（§15.2） | **gin RouteGroup + 独立中间件链** + 网关按路径分流 |
+| 可观测性（§11） | **otelgin + otelhttp** + **prometheus/client_golang** + **zap** |
+| 三方调用差异处理（§4.3） | **resty**（每渠道独立 client，默认关重试） |
