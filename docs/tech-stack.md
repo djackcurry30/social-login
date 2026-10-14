@@ -297,17 +297,31 @@ resp, err := httpClient.Do(ctx, req)   // 一次失败即失败
 | go-kit/kit/circuitbreaker | ❌ 本质是对 gobreaker 的封装，多一层无收益 |
 | 自研 | ❌ 状态迁移与并发边界容易写错 |
 
-**三条实现纪律（详见架构 §5.6）：**
+**四条实现纪律（详见架构 §5.6）：**
 
 | # | 纪律 | 后果 |
 | --- | --- | --- |
 | 1 | **只有 `retryable` 的错误计入熔断**，`PROVIDER.REJECTED`（code 无效）**绝不计数** | 否则攻击者用无效 code 高频打回调即可熔断整个微信渠道 —— 从"平台保护"变成**服务级拒绝服务** |
-| 2 | **慢请求也计入失败**（超过 `slow_threshold_ms` 的成功请求） | 平台响应 2.9s（低于 3s 超时）会被判成功，但体验上已等同故障 |
-| 3 | **配置放服务级**，不放 `applications.policy` | 熔断保护的是所有应用**共享**的连接池；做成应用级等于"一个应用能为全体关掉保护" |
+| 2 | **超时率与慢请求率独立统计、独立阈值** | 只看错误率防不住平台"半死"（高延迟 + 低错误率）。超时是**慢失败**，占满整个超时窗口；5xx 是**快失败**，几乎不占资源。两者混在一起算会严重延误熔断 |
+| 3 | **慢请求率只统计【成功】的慢请求** | 业务拒绝（code 无效）也是可被攻击者构造的。若把它计入慢请求率，攻击者就能远程触发熔断 —— 与第 1 条是同一条攻击路径 |
+| 4 | **配置放服务级**，不放 `applications.policy` | 熔断保护的是所有应用**共享**的连接池；做成应用级等于"一个应用能为全体关掉保护" |
+
+**⚠️ 一个实现约束（gobreaker 的能力边界）**：`gobreaker.Settings.ReadyToTrip(counts Counts)` **拿不到失败分类**——它只提供 `Requests / TotalSuccesses / TotalFailures / ConsecutiveSuccesses / ConsecutiveFailures`。因此：
+
+| 组件 | 职责 |
+| --- | --- |
+| **gobreaker** | 只负责**状态机**（三态并发安全迁移、Half-Open 放行控制） |
+| **自维护的分类滑动窗口**（`internal/pkg/guards/breaker`，每 platform 一个 60s/6 桶环形计数器） | 负责**失败分类统计**（`success` / `slow` / `timeout` / `conn_err` / `server_err` / `business_reject`） |
+| `Settings.IsSuccessful` | 把 retryable 错误、超时、慢请求判为 failure，使 gobreaker 自身 counts 正确 |
+| `Settings.ReadyToTrip` | 回调里读取**自维护窗口**，按四类阈值判定 |
+
+**不引入第三方滑动窗口库** —— 分类计数与熔断判定耦合紧密，自己写更可控，且只存计数器、内存开销可忽略。
 
 **与 `HealthChecker` 的分工**：熔断器（被动统计真实调用）是**唯一的熔断决策来源**；`HealthChecker`（主动探测）只用于管理台展示与告警。**不能用主动探测决定熔断**——探测走的不是真实业务路径，可能探测正常而业务接口异常。
 
 **多副本限制**：熔断器是进程内状态，N 个副本 = N 个独立熔断器。初期接受（各自熔断、探针放大 N 倍、状态可能不同步）。**不引入 Redis 共享状态**——熔断是降级保护机制，不应有强外部依赖，否则 Redis 故障时保护也失效。副本数 > 20 后再考虑"熔断事件广播"。
+
+**入站超时是另一回事**（架构 §5.7）：渠道熔断是**出站**（保护我们不被平台拖垮），入站超时是**入站**（保护我们不被慢请求拖垮），机制不同、互补但不可互相替代。入站用 `http.Server` 三段超时 + gin 中间件按路由分组（授权链路 8s / 管理端 30s / 导出 10s），并保证超时后通过 `context` 真正取消下游。
 
 
 
@@ -597,4 +611,5 @@ social-login/
 | 可观测性（§11） | **otelgin + otelhttp** + **prometheus/client_golang** + **zap** |
 | 三方调用差异处理（§4.3） | **net/http** + `pkg/httpx`（每渠道独立 client 与超时，不重试） |
 | 重试边界（C6 / §5.5） | `pkg/httpx` 不提供重试选项；错误映射为 `retryable` 供接入方判断 |
-| 渠道熔断（§5.6） | **sony/gobreaker/v2**（按 `platform` 粒度，服务级配置，仅 `retryable` 错误计数） |
+| 渠道熔断（§5.6） | **sony/gobreaker/v2**（状态机）+ 自维护分类滑动窗口（四类独立阈值） |
+| 入站超时保护（§5.7） | `http.Server` 三段超时 + gin 路由分组超时中间件 + `context` 向下传递 |

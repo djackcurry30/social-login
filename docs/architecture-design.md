@@ -1,6 +1,6 @@
 # 三方登录统一接入服务 · 架构设计
 
-> 版本 v0.11 · 目标：一个通用的、多应用多平台的社交登录接入网关（Social Login Gateway）
+> 版本 v0.12 · 目标：一个通用的、多应用多平台的社交登录接入网关（Social Login Gateway）
 > 技术栈：Go 1.22+ / MySQL 或 PostgreSQL / Redis
 >
 > 变更记录：
@@ -14,6 +14,7 @@
 > - v0.9 **新增 §15 管理端接口设计（Admin API）**：v0.8 及之前全文有 12 处提及"管理台/管理员"但只有 2 个具体接口，其余均为悬空需求。本节补齐 11 组共 52 个管理端接口、管理员身份与 RBAC 模型、管理端与业务端的隔离约定、高危操作二次确认机制与分期落地
 > - v0.10 新增约束 **C6「调用外部渠道不做网络重试，重试责任归接入方」**，新增 §5.5 重试边界与失败语义（含 `retryable` 错误契约、分层超时、渠道熔断、`context.WithoutCancel` 取消隔离）；§5.3 错误响应新增 `retryable` 字段；熔断与超时从第四期提前至第二期
 > - v0.11 **新增 §5.6 渠道熔断设计**：v0.10 有 5 处提及"熔断"但无落地设计（同类悬空需求）。补齐选型（`sony/gobreaker/v2`）、粒度（按 `platform`）、关键规则（**只有 `retryable` 错误计入熔断**，否则可被无效 code 攻击触发服务级拒绝服务）、服务级配置（不下放应用级）、与 `HealthChecker` 的职责分离、多副本一致性限制、熔断后行为与管理端复位接口
+> - v0.12 **熔断判定信号扩展为四类独立统计**（§5.6.4b）：v0.11 用单一 `failure_ratio` 统计所有失败，丢了区分度——超时（慢失败）与 5xx（快失败）对资源的消耗差一个量级，且平台"半死"时典型表现是高延迟+低错误率，只看错误率永远触发不了熔断。现拆为 `failure_ratio` / `timeout_ratio` / `slow_ratio` / `consecutive_timeouts` 四类独立阈值；新增 §5.6.4c 说明 gobreaker 的能力边界（分类统计需自维护滑动窗口）；新增 §5.7 入站请求超时保护（与渠道熔断的概念区分）
 
 ---
 
@@ -1065,7 +1066,7 @@ C6 决定不重试，但**不重试本身不减少对故障平台的调用量**�
 
 保留细化能力：`provider_guard.circuit_breaker.granularity = platform | platform_scene`，**默认 `platform`**。仅当某平台的不同场景确实落在独立故障域时才改为 `platform_scene`。
 
-#### 5.6.4 ⚠️ 关键规则：只有 `retryable` 的错误才计入熔断
+#### 5.6.4 ⚠️ 关键规则一：只有 `retryable` 的错误才计入熔断
 
 **这条写错会造成服务级拒绝服务，必须写死。**
 
@@ -1079,7 +1080,62 @@ C6 决定不重试，但**不重试本身不减少对故障平台的调用量**�
 
 **反例（必须避免）**：如果把 `PROVIDER.REJECTED` 计入熔断，那么**攻击者只要用无效的 `code` 高频打我们的回调接口，就能把整个微信渠道熔断掉**——这就从"平台故障保护"变成了"服务级拒绝服务"。这不是理论风险，是很直接的攻击路径。
 
-**慢请求也必须计入**：平台响应耗时 2.9s（略低于 3s 超时）会被判为"成功"，但对用户体验已经等同于故障。因此 `slow_threshold_ms` 以上的**成功**请求也应计为失败。
+#### 5.6.4b ⚠️ 关键规则二：超时与慢请求必须独立计权
+
+> **本小节的由来（v0.12）**：v0.11 用单一的 `failure_ratio` 统计所有失败，虽然已把超时与慢请求计入，但**丢了区分度**——这不够，需要独立统计、独立阈值。
+
+**为什么超时不能与 5xx 混在一起算**
+
+两者对资源的消耗不是一个量级：
+
+| 失败类型 | 是否占用连接与 goroutine | 典型耗时 | 性质 |
+| --- | --- | --- | --- |
+| 连接失败 / 三方 5xx | ❌ 快速返回，几乎不占 | < 100 ms | **快失败** |
+| **请求超时** | ✅ **占满整个超时窗口**（微信 3s / Apple 5s） | 3~5 s | **慢失败** |
+| 慢但成功 | ✅ 占满响应时间 | 2~3 s | **慢失败** |
+
+**平台"半死"状态的典型表现是高延迟 + 低错误率。** 如果只看错误率，这种情况下熔断永远不会触发——错误率可能只有 5%，但每个请求都拖满 3 秒，连接池照样被打满。**只看错误率的熔断，防不住平台变慢。**
+
+**决策：四类信号独立统计、独立阈值，任一触发即 Open。**
+
+| 信号 | 定义 | 默认阈值 | 作用 |
+| --- | --- | --- | --- |
+| **错误率** `failure_ratio` | 连接失败 + 三方 5xx / 窗口内总请求 | ≥ 50% | 平台宕机的直接信号 |
+| **超时率** `timeout_ratio` | `PROVIDER.TIMEOUT` / 窗口内总请求 | ≥ 30% | **慢失败的独立信号**，比错误率更早暴露问题 |
+| **慢请求率** `slow_ratio` | 成功且耗时 > `slow_threshold_ms` / 窗口内总请求 | ≥ 50% | 平台拥塞的最早期信号，早于报错出现 |
+| **连续超时** `consecutive_timeouts` | 连续超时次数 | ≥ 5 | **低流量渠道兜底** |
+
+`min_requests` 只作用于比率类阈值（防止低流量下 1 个请求失败就熔断）；`consecutive_timeouts` 专门解决"流量小到比率阈值永不触发，但每次都在超时"的场景。
+
+**超时率的阈值故意低于错误率**（30% vs 50%）：因为超时的资源消耗是 5xx 的数十倍，容忍度应该更低。
+
+**⚠️ 慢请求统计的限定（容易被忽略的攻击面）**
+
+**只统计【成功】的慢请求。** `PROVIDER.REJECTED` 这类业务拒绝**即使耗时 3s 也不计入**慢请求率。
+
+原因：业务拒绝是**可被攻击者构造**的（用无效 code 触发平台的慢路径）。如果把它计入慢请求率，攻击者就能**远程触发我们的熔断**——和 §5.6.4 是同一条攻击路径，只是换了个入口。
+
+**超时则没有这个问题**——超时是网络层事实，攻击者无法伪造。
+
+#### 5.6.4c 实现要点：gobreaker 的能力边界
+
+需要说清楚一个实现约束：**`gobreaker` 的 `ReadyToTrip(counts Counts)` 回调里拿不到失败分类**。它只提供：
+
+```
+Counts{ Requests, TotalSuccesses, TotalFailures,
+        ConsecutiveSuccesses, ConsecutiveFailures }
+```
+
+因此分工如下：
+
+| 组件 | 职责 |
+| --- | --- |
+| **gobreaker** | **只负责状态机** —— Closed / Open / Half-Open 的并发安全迁移、Half-Open 的请求放行控制 |
+| **我们自己的滑动窗口**（`internal/pkg/guards/breaker`，每个 platform 一个环形计数器） | **负责失败分类统计** —— 按 `Success / Slow / Timeout / ConnErr / ServerErr / BusinessReject` 分类计数 |
+| `Settings.IsSuccessful` | 把 `retryable` 错误、超时、慢请求都判为 failure，让 gobreaker 自身的 counts 也正确 |
+| `Settings.ReadyToTrip` | 回调里读取**我们自己的分类窗口**，按 §5.6.4b 的四类阈值判定 |
+
+**自维护窗口的规模**：每个 platform 一个固定长度的环形缓冲（`window_seconds / bucket_seconds` 个桶，默认 60s / 6 桶），只存计数器，内存开销可忽略。**不引入第三方滑动窗口库**——分类计数逻辑与熔断判定耦合紧密，自己写更可控。
 
 #### 5.6.5 配置：服务级，不放 `applications.policy`
 
@@ -1090,10 +1146,17 @@ provider_guard:
     enabled: true
     granularity: platform          # platform | platform_scene
     window_seconds: 60             # 统计窗口
+    bucket_seconds: 10             # 滑动窗口桶宽（60/10 = 6 个桶）
     min_requests: 20               # 窗口内最少请求数，不足不判熔断（防低流量误判）
-    failure_ratio: 0.5             # 失败率阈值
-    consecutive_failures: 10       # 或：连续失败次数达阈值即熔断
-    slow_threshold_ms: 2000        # 超过此耗时的"成功"请求也计为失败
+
+    # ---- 四类独立阈值，任一触发即 Open（§5.6.4b）----
+    failure_ratio: 0.5             # 连接失败 + 三方 5xx
+    timeout_ratio: 0.3             # ★ 超时（慢失败，阈值为何更低见 §5.6.4b）
+    slow_ratio: 0.5                # ★ 成功但耗时 > slow_threshold_ms
+    slow_threshold_ms: 2000        #   慢请求的判定线
+    consecutive_timeouts: 5        # ★ 连续超时（低流量渠道兜底）
+    consecutive_failures: 10       #   连续失败
+
     open_seconds: 30               # Open 状态持续时长，之后转 Half-Open
     half_open_requests: 3          # Half-Open 允许放行的探测请求数
 ```
@@ -1162,10 +1225,61 @@ C6：不重试                      →  一次失败就是失败
       ↓ 必须有
 渠道熔断（本节）                 →  避免故障平台的请求持续占用共享资源
       ↓ 必须有
+四类信号独立判定（§5.6.4b）      →  错误率 / 超时率 / 慢请求率 / 连续超时
+                                    只看错误率防不住"平台变慢"
+      ↓ 必须有
 快速失败 + retryable 契约        →  接入方据此决定是否重开授权流程
 ```
 
-**四者缺一不可**：只有"不重试"而没有超时和熔断，等于把重试的责任推给接入方的同时，把自己变成了一个会被故障平台拖死的服务。
+**缺一不可**：只有"不重试"而没有超时和熔断，等于把重试的责任推给接入方的同时，把自己变成了一个会被故障平台拖死的服务；而只有熔断而没有超时率/慢请求率的独立判定，则防不住平台"半死"（高延迟、低错误率）这种最典型的故障形态。
+
+### 5.7 入站请求的超时保护（与渠道熔断的区别）
+
+**概念澄清**：§5.6 的熔断是**出站**方向的——保护我们不被故障的**三方平台**拖垮。本节讨论**入站**方向的——保护我们不被**慢请求**拖垮。两者机制不同，不可互相替代：
+
+| | 渠道熔断（§5.6） | 入站超时保护（本节） |
+| --- | --- | --- |
+| 保护对象 | 不被故障**平台**拖垮 | 不被**慢请求**拖垮 |
+| 方向 | 出站（我们调别人） | 入站（别人调我们） |
+| 机制 | 熔断器（三态状态机） | 超时中间件 + `context` deadline |
+| 触发后 | 快速失败，**不再调用平台** | 立即返回 `504`，**释放连接与 goroutine** |
+| 是否自愈 | 是（Half-Open 自动探测） | 否（每次请求独立判定） |
+
+**三段超时配置**：
+
+```go
+// 1. HTTP Server 层（gin 之上）
+srv := &http.Server{
+    ReadHeaderTimeout: 5 * time.Second,   // 防 Slowloris（慢速 header 攻击）
+    ReadTimeout:       15 * time.Second,
+    WriteTimeout:      15 * time.Second,
+    IdleTimeout:       60 * time.Second,
+}
+
+// 2. 中间件层：按路由分组设置业务超时
+r.Group("/v1",        timeoutMW(8*time.Second))           // 授权链路预算 8s（§5.5 ①）
+r.Group("/admin/v1",  timeoutMW(30*time.Second))          // 管理端普通接口
+r.Group("/admin/v1/exports", timeoutMW(10*time.Second))   // 导出类：只提交任务，不等结果
+
+// 3. 依赖调用层：DB / Redis 各自超时，不继承请求的全额预算
+ctx, cancel := context.WithTimeout(ctx, 2*time.Second)    // 单次 DB 查询
+```
+
+**三条设计要点**：
+
+**① 长任务必须异步，不能靠放大超时** —— 审计导出（§15.4 H 组）这类操作若同步等待，会长时间占住连接。正确做法是提交任务立即返回 `task_id`，由后台 worker 执行。**这是 `/admin/v1/audit-logs:export` 设计成异步接口的原因。**
+
+**② 超时后必须真正取消下游，否则等于没超时** —— 中间件返回 504 但 goroutine 仍在跑、DB 查询仍在执行，连接与 CPU 照样被占。所有超时都必须通过 `context` 向下传递。
+
+**③ 例外：`Exchange` / `Refresh` 不随入站超时被取消** —— 这两类"已发出即不可撤销"的调用使用 `context.WithoutCancel` 脱离入站 context（§5.5 ③）。入站超时到了可以先给接入方返回 `504` + `retryable: true`，但**三方调用本身要继续跑完并落库结果**，避免授权码被消费却拿不到 token。
+
+**三种保护机制的分工（互补，不可互相替代）**：
+
+| 机制 | 保护什么 | 位置 |
+| --- | --- | --- |
+| 入站限流（§6.3） | **请求速率** | 中间件，入站 |
+| 入站超时（本节） | **单请求时长** | 中间件，入站 |
+| 渠道熔断（§5.6） | **下游可用性** | 出站调用点 |
 
 ---
 
@@ -1960,8 +2074,12 @@ Admin API 更新配置
 | `circuit_breaker_state{platform,instance}` | Gauge | 熔断器状态（0 closed / 1 half_open / 2 open）。**按实例打 label，可直接观测多副本状态分歧程度**（§5.6.7） |
 | `circuit_breaker_rejected_total{platform}` | Counter | 被熔断快速拒绝的请求数。与 `provider_failure_total` 对比可估算熔断挽回的无效调用量 |
 | `circuit_breaker_transition_total{platform,from,to}` | Counter | 状态迁移次数。**`open → half_open` 频繁抖动说明平台在"半死"状态**，需人工介入 |
-| `provider_slow_total{platform,op}` | Counter | 耗时超过 `slow_threshold_ms` 但**成功**的请求（这类请求也计入熔断失败，见 §5.6.4） |
+| `provider_slow_total{platform,op}` | Counter | 耗时超过 `slow_threshold_ms` 但**成功**的请求（计入 `slow_ratio`，见 §5.6.4b） |
+| `provider_outcome_total{platform,outcome}` | Counter | **按熔断分类维度统计**（`success` / `slow` / `timeout` / `conn_err` / `server_err` / `business_reject`）。**四类阈值中任一被触发时，可直接从本指标看出是哪一类的问题** |
+| `circuit_breaker_trip_total{platform,reason}` | Counter | 熔断触发次数与**触发原因**（`failure_ratio` / `timeout_ratio` / `slow_ratio` / `consecutive_timeouts`）。用于校准阈值——若总是 `slow_ratio` 先触发，说明平台在变慢而非宕机 |
 | `httpclient_timeout_total{platform,stage}` | Counter | 超时分布（连接 / 读写），用于校准超时配置 |
+| `http_server_duration_seconds{route,status}` | Histogram | **入站请求耗时**（§5.7），用于定位"是我们的接口慢，还是下游慢" |
+| `http_server_timeout_total{route}` | Counter | **入站请求被超时中间件终止的次数**。与 `http_server_duration_seconds` 对照可判断超时设置是否合理——若大量请求卡在超时线上，说明超时值过紧或下游确实慢 |
 
 ### 11.2 追踪
 
@@ -2016,7 +2134,7 @@ Admin API 更新配置
 - **Apple（约束 C2，必做）** —— client_secret JWT 自动签发与续期、JWKS 验签与轮换应对、nonce 防重放、首次授权才有的 name/email 落库、`/v1/oauth/notify/{platform}` 处理 `consent-revoked` / `account-delete`
 - **小程序 `session_key` 生命周期管理**（修正 P1-2：这是 `getPhoneNumber` 解密的前提，直接决定 R4 红线 1 能否成立）
 - 各渠道的 capability 差异处理
-- **超时分层 + 渠道熔断（约束 C6 的配套前提，§5.5 / §5.6）** —— `HealthChecker` 实现（仅管理台展示）+ **`sony/gobreaker/v2` 熔断器（按 `platform` 粒度，服务级配置）** + `context.WithoutCancel` 的取消隔离。**这一项从原第四期提前到第二期**：C6 决定不重试后，熔断与超时成为正确性的组成部分，不再是"生产化优化项"。**实现时必须写死"只有 `retryable` 错误计入熔断"**（§5.6.4）
+- **超时分层 + 渠道熔断（约束 C6 的配套前提，§5.5 / §5.6 / §5.7）** —— `HealthChecker` 实现（仅管理台展示）+ **`sony/gobreaker/v2` 熔断器（按 `platform` 粒度，服务级配置）** + **四类独立阈值的分类滑动窗口**（§5.6.4b/4c）+ `context.WithoutCancel` 的取消隔离 + **入站三段超时中间件**（§5.7）。**这一项从原第四期提前到第二期**：C6 决定不重试后，超时与熔断成为正确性的组成部分，不再是"生产化优化项"。**实现时必须写死两条**：只有 `retryable` 错误计入熔断（§5.6.4）；慢请求率只统计成功的慢请求（§5.6.4b）
 - **管理端（§15）**：G 组（事件与死信重投）+ H 组（审计查询与异步导出）。渠道一接入，排查就只能靠管理端，这两个必须同期交付
 - **验收标准**：同一业务应用下的 iOS、Android、小程序均可完成微信登录；其中 iOS 与 Android 因共用 `wechat:app` 场景而归为同一账号；小程序能成功解密并写入 `source = wechat_phone` 的 claim
 
