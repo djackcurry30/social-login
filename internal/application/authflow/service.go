@@ -142,10 +142,24 @@ func (s *Service) Authorize(ctx context.Context, in AuthorizeInput) (*AuthorizeO
 		return nil, err
 	}
 
-	// 开放重定向防护：回跳地址必须命中白名单。白名单为空时拒绝，
-	// 不做"没配就放行"的默认——那等于把本服务变成开放重定向器。
+	// 开放重定向防护：回跳地址必须命中白名单。
+	//
+	// 这里刻意区分两种失败，因为它们指向完全不同的责任方与处置动作：
+	//
+	//	白名单为空        → 是【我们的配置问题】，返回 5xx 并要求运维介入
+	//	地址不在白名单内  → 是【调用方的请求问题】，返回 4xx，调用方自己改参数
+	//
+	// 把后者也报成 5xx 会让每一次调用方拼错参数都变成一次值班告警，
+	// 真实故障反而被噪声淹没。反过来，把前者报成 4xx 会让"应用没配白名单"
+	// 这个必须我们修的配置缺陷被当成调用方的问题而被忽略。
 	if !app.Policy.IsRedirectURIAllowed(in.RedirectURI) {
-		return nil, errs.New(errs.CodeAuthInvalidConfig, "redirect_uri 不在应用白名单内").
+		if len(app.Policy.AllowedRedirectURIs) == 0 {
+			return nil, errs.New(errs.CodeAuthInvalidConfig,
+				"该应用未配置 redirect_uri 白名单，出于安全考虑拒绝所有授权请求").
+				WithDetail("app_id", app.AppCode).
+				WithDetail("hint", "请在 applications.policy.allowed_redirect_uris 中配置允许的回跳地址")
+		}
+		return nil, errs.New(errs.CodeInvalidRequest, "redirect_uri 不在应用白名单内").
 			WithDetail("app_id", app.AppCode)
 	}
 

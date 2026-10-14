@@ -634,6 +634,13 @@ func TestAppIsolation(t *testing.T) {
 }
 
 // TestAuthorizationRejectsUnlistedRedirectURI 验证开放重定向防护。
+//
+// 断言两件事，缺一不可：
+//  1. 不在白名单的地址被拒绝，且【不返回 302】——一旦回跳，本服务就成了
+//     开放重定向器，攻击者可把一次性 auth_code 骗到自己的域名。
+//  2. 错误码是 REQUEST.INVALID（4xx）而不是 AUTH.INVALID_CONFIG（5xx）：
+//     该应用【已配置】白名单，所以这是调用方的参数问题，不该触发值班告警。
+//     只有"应用完全没配白名单"才属于我们的配置缺陷（见下面的反向用例）。
 func TestAuthorizationRejectsUnlistedRedirectURI(t *testing.T) {
 	h := newHarness(t)
 
@@ -652,9 +659,44 @@ func TestAuthorizationRejectsUnlistedRedirectURI(t *testing.T) {
 	if resp.StatusCode == http.StatusFound {
 		t.Fatalf("未在白名单内的 redirect_uri 必须被拒绝，实际返回了 302")
 	}
-	if !strings.Contains(string(raw), "AUTH.INVALID_CONFIG") {
-		t.Fatalf("期望 AUTH.INVALID_CONFIG，实际 %s", raw)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("调用方参数问题应返回 4xx，实际 %d：%s", resp.StatusCode, raw)
 	}
+	if !strings.Contains(string(raw), "REQUEST.INVALID") {
+		t.Fatalf("期望 REQUEST.INVALID，实际 %s", raw)
+	}
+
+	// 反向用例：应用完全没配白名单时，属于我们的配置缺陷，必须是 5xx。
+	if err := h.clearRedirectWhitelist(); err != nil {
+		t.Fatalf("清空白名单失败: %v", err)
+	}
+	resp2, err := h.http.Get(h.serverURL + "/v1/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	raw2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("未配置白名单属于服务端配置问题，应返回 5xx，实际 %d：%s", resp2.StatusCode, raw2)
+	}
+	if !strings.Contains(string(raw2), "AUTH.INVALID_CONFIG") {
+		t.Fatalf("期望 AUTH.INVALID_CONFIG，实际 %s", raw2)
+	}
+}
+
+// clearRedirectWhitelist 把应用的白名单清空，构造"配置缺失"的场景。
+func (h *harness) clearRedirectWhitelist() error {
+	ctx := context.Background()
+	appRepo := postgres.NewAppRepository(h.app.DB())
+	app, err := appRepo.FindByID(ctx, h.appID)
+	if err != nil {
+		return err
+	}
+	app.Policy.AllowedRedirectURIs = nil
+	// 注意：白名单为空时 Validate 本身是合法的（它校验的是合并策略），
+	// 拦截发生在 Authorize 阶段——这正是"失败关闭"的落点。
+	_, err = appRepo.Upsert(ctx, app)
+	return err
 }
 
 // TestAppScopeCallbackEnforced 验证 §9.1 的隔离机制本身。

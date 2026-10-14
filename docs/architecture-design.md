@@ -876,6 +876,17 @@ Apple 会推送授权状态变更事件，必须提供接收端点 `POST /v1/oau
 
 **state 是服务端票据。** 回调 URL 只需要 `/v1/oauth/callback/{platform}` 一个，全部上下文（`appId`、`platform`、`scene`、`redirectUri`、`mode`、绑定目标 `external_user_id`、Apple `nonce`）凭 state 从 Redis 反查。前端无法篡改 flow 参数，也无法伪造 redirectUri 做开放重定向。
 
+**`redirect_uri` 白名单（编码期补入）**：票据机制解决了"回调时上下文被篡改"，但**没有**解决"`/v1/authorize` 首次发起时的 `redirect_uri` 是否可信"——该参数由业务方前端直接传入。若不做校验，本服务就是一个开放重定向器：攻击者可构造指向自己域名的授权链接，把用户引导过去，回调时一次性 `auth_code` 就落到了攻击者手里。
+
+因此 `applications.policy.allowed_redirect_uris` 是**必需项**，且遵循失败关闭原则：
+
+| 情况 | 行为 | 理由 |
+| --- | --- | --- |
+| 白名单为空 | **拒绝所有授权请求**（`AUTH.INVALID_CONFIG`，5xx） | 这是【我们的配置缺陷】，需要运维介入；不做"没配就放行"的宽松默认 |
+| 地址不在白名单内 | 拒绝（`REQUEST.INVALID`，4xx） | 这是【调用方的参数错误】，不该触发值班告警 |
+
+两者刻意用不同的错误码与状态码区分：把调用方拼错参数报成 5xx，会让真实故障被噪声淹没；把"应用没配白名单"报成 4xx，会让必须我们修的缺陷被忽略。匹配规则：以 `/` 结尾的条目按前缀匹配（覆盖站点内多路径），其余按完整 URL 精确匹配（防止 `https://h5.example.com.evil.com/` 这类相似域名绕过）。
+
 **并发绑定安全。** 两个请求同时为同一个 identity 建绑定，靠数据库唯一索引兜底，捕获冲突后转为"已存在"语义返回，而不是加分布式锁（更轻、更可靠）。
 
 **未绑定身份的分支（约束 C4 带来的新增路径）。** `remote` 模式下本服务无法自己产出账号，因此回调后若 identity 无活跃绑定，流程会分叉为：
@@ -1726,6 +1737,13 @@ CREATE INDEX idx_audit_client ON auth_audit_logs (app_id, platform, client, crea
 {
   // 首次三方登录但无绑定时的处置（见 D3）
   "on_unbound_login": "need_register",        // need_register | auto_create | session_only
+
+  // ★ 回跳地址白名单（必需项，缺失即拒绝所有授权请求）
+  // 以 "/" 结尾的条目按前缀匹配，其余按完整 URL 精确匹配。
+  "allowed_redirect_uris": [
+    "https://app1.example.com/callback",
+    "https://h5.example.com/"
+  ],
 
   // ★ 合并行为（需求 R2 的核心配置）
   "merge": {
