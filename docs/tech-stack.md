@@ -8,6 +8,11 @@
 > 但**团队熟悉度是一阶因素，不是可以忽略的偏好**——一个团队不熟的"更优"技术栈，
 > 长期维护成本和踩坑概率都高于一个"够用但大家都会"的栈。
 > v2 按「**主流优先，只在主流方案真的会出错时才偏离**」的原则重选，偏离处均标注理由与缓解措施。
+>
+> **v2 复盘修正（第二轮）**：v2 初稿把 HTTP 客户端从「标准库 + 轻量封装」改成 resty，属**过度纠正**——
+> `net/http` 本身就是主流，把它换成第三方库只为"看起来一致"是不成立的。
+> 已回退至「标准库 + 轻量封装」，并更正初稿中一处**不实警告**：resty 的 `retryCount` 默认即为 `0`，
+> 不存在"必须手动关闭否则会重试非幂等接口"的坑——那是我为变更找理由时写错的。
 
 ---
 
@@ -82,7 +87,7 @@
 | 认证 | JWT 签发与校验 | **golang-jwt/jwt** v5 | ★★★★★ |
 | 认证 | JWKS 拉取与验签（Apple） | **MicahParks/keyfunc** v3 | ★★★★ |
 | 认证 | 通用 OAuth2 客户端 | **golang.org/x/oauth2** | ★★★★★ |
-| HTTP 客户端 | 三方平台调用 | **resty** v2 | ★★★★ |
+| HTTP 客户端 | 三方平台调用 | **标准库 net/http** + 轻量封装（每渠道独立 client） | ★★★★★（标准库） |
 | 校验 | 请求 DTO | **go-playground/validator** v10 | ★★★★★ |
 | 日志 | 结构化日志 | **zap** v1 + lumberjack 轮转 | ★★★★★ |
 | 可观测 | 链路追踪 | **OpenTelemetry** + `otelgin` + `otelhttp` | ★★★★★ |
@@ -216,38 +221,55 @@ db.Callback().Query().Before("gorm:query").Register("inject_app_scope", func(tx 
 · 轮转交给 lumberjack，不自研
 ```
 
-### 3.5 HTTP 客户端：resty v2（v1 用标准库 + 自研封装）
+### 3.5 HTTP 客户端：标准库 net/http + 轻量封装（**v2 一度改为 resty，已回退**）
 
-**改为 resty v2**，主流度高、团队熟悉。
+> **回退说明**：v2 初稿把这一项从"标准库 + 自研封装"改成了 resty，理由是"整体转向主流"。
+> 复盘后确认**这是一次过度纠正**，已回退。理由见下。
 
-**但必须配置三条纪律**，否则会真的出错：
+**结论：用 `net/http` + 一个约 150 行的轻量封装，不引入第三方 HTTP 客户端库。**
 
-**① 默认关闭自动重试**
+**核心判断：`net/http` 本身就是主流。** 在"团队熟悉度优先"这条原则下，`net/http` 是唯一一个**熟悉度必然为 100%** 的选项——任何 Go 开发者都会用它。为了"看起来和其他选型一致"而换成第三方库，反而凭空增加了一个依赖。
+
+**曾为本次变更列出的理由，逐条复核后都不成立：**
+
+| v2 初稿的理由 | 复核结果 |
+| --- | --- |
+| resty "官方配置"后即可规避非幂等重试 | **⚠️ 我写错了**。resty v2 的 `retryCount` **默认就是 0**，不存在"必须手动关掉"的危险默认值。初稿里 `SetRetryCount(0). // ★ 关键` 的写法会让人误以为有个需要防的坑——**这个坑不存在** |
+| resty 便于保留原始响应（`profile_snapshot` 需存） | 标准库同样能拿到原始 body，**无差异** |
+| resty 便于接入 OTel | **反而更差**：`otelhttp.NewTransport()` 是 **OpenTelemetry 官方**的 `http.RoundTripper`，一行接入；resty 生态里的 `otelresty` 是**社区维护**，多一层维护风险 |
+| resty 减少样板代码 | ✅ 成立，但收益不足以换掉标准库、多一个依赖 |
+
+**自研封装需要提供的 5 项能力**（`internal/pkg/httpx`，约 150 行）：
 
 ```go
-r := resty.New().
-    SetRetryCount(0).        // ★ 关键：全局默认不重试
-    SetTimeout(3 * time.Second)
+// 每渠道一个 Client，独立超时；Transport 用官方 OTel 中间件
+wechat := httpx.New(httpx.Config{
+    Name:    "wechat",
+    Timeout: 3 * time.Second,
+    Transport: otelhttp.NewTransport(http.DefaultTransport), // 官方，一行
+})
+apple := httpx.New(httpx.Config{Name: "apple", Timeout: 5 * time.Second, ...})
 ```
 
-原因：`code2session`、微信 `Exchange`（换 token）这类接口**不是幂等的**——授权码用掉就失效，重试只会拿到"code 已使用"，还可能触发平台风控。v1 否决 resty 的主要理由就是这一条，而它**可以通过配置规避**。
+| 能力 | 实现要点 |
+| --- | --- |
+| **每渠道独立超时** | 微信 3s / Apple 5s / 支付宝 3s，可配 |
+| **重试仅限幂等请求** | **默认不实现重试**；调用方显式传 `httpx.WithRetry(2)` 才生效。**fail-safe 优于 fail-dangerous**——标准库不写就没有，不会有人"忘了关" |
+| **OpenTelemetry 埋点** | 官方 `otelhttp.NewTransport()` + `otelhttp.NewHandler`，不自研 |
+| **响应体大小上限** | `io.LimitReader(resp.Body, maxBodyBytes)`，防三方返回超大 body 打爆内存 |
+| **保留原始响应** | 读取 body 后同时返回字节切片与反序列化结果，原始字节供 `profile_snapshot` 落库 |
+| **敏感字段脱敏** | 对 `access_token` / `secret` / `code` 在日志与 trace attributes 中做掩码 |
 
-**② 每渠道独立 client，独立超时**
+**调用方的幂等性声明是强制的**：
 
 ```go
-wechatClient := resty.New().SetRetryCount(0).SetTimeout(3 * time.Second)
-appleClient  := resty.New().SetRetryCount(0).SetTimeout(5 * time.Second)  // Apple 更慢
+httpClient.Do(ctx, req)                                  // 默认：不重试
+httpClient.Do(ctx, req, httpx.WithRetry(2))              // 仅幂等接口显式开启
 ```
 
-**重试的幂等性由调用方显式声明**：`UserInfo`（拉用户信息，幂等）可显式 `.SetRetryCount(2)`；`Exchange` 永不重试。
+`UserInfo`（拉用户信息，幂等）可开重试；**`Exchange`（换 token）与 `code2session` 永不重试**——授权码一次性，重试只会拿到"code 已使用"，还可能触发平台风控。
 
-**③ 保留原始响应**
-
-`profile_snapshot` 需要存平台原始响应供排障（§6.2）。resty 用 `SetResult()` 会自动反序列化，但**原始 body 仍可通过 `resp.String()` 取到**，两者并存。
-
-**④ 可观测与脱敏**
-
-用 resty 的 `OnBeforeRequest` / `OnAfterResponse` 钩子注入 OTel span 与脱敏逻辑，不必额外包一层中间件。
+**若团队确实在用 resty**：改回去是 10 分钟的事（封装层换实现，调用方不变）。但**需要团队明确表态**——这是我唯一没有依据的推断。
 
 ### 3.6 认证：golang-jwt v5 + keyfunc v3（v1 用 golang-jwt + jwx）
 
@@ -450,7 +472,7 @@ docker compose -f deployments/docker-compose.dev.yml up -d
 | vendor | **不提交**（默认已 `.gitignore`）。若需完全离线构建再执行 `go mod vendor` 并删除忽略规则 |
 | Go 版本声明 | `go.mod` 中写 `go 1.23`，不使用 `toolchain` 指令强制升级 |
 | 依赖引入审批 | **核心链路禁止引入新依赖**（授权流程、合并流程、加解密）；辅助工具类可放宽 |
-| 依赖数量上限 | 目标 ≤ 30 个直接依赖。每引入一个需在 PR 说明"为什么标准库或现有依赖做不到" |
+| 依赖数量上限 | 目标 ≤ 25 个直接依赖。每引入一个需在 PR 说明"为什么标准库或现有依赖做不到" |
 
 ### 7.1 ⚠️ 待确认：Go module 路径
 
@@ -505,7 +527,7 @@ social-login/
 │   │   ├── crypto/                ← 凭据加密、claim 哈希、KMS 客户端
 │   │   ├── accountclient/         ← HTTPAccountProvider
 │   │   └── eventbus/              ← outbox 投递
-│   └── pkg/                       ← errs / logx(zap) / httpclient(resty) / jwtkit
+│   └── pkg/                       ← errs / logx(zap) / httpx(net/http 封装) / jwtkit
 ├── migrations/                    ← 手写 SQL（DDL 唯一真相源）
 ├── configs/
 │   ├── config.yaml
@@ -533,4 +555,4 @@ social-login/
 | 配置化合并行为（R2 / §7.5） | **viper** 读配置 + **JSONB** 存储 + `adminops/policy_validator` |
 | 管理端与业务端隔离（§15.2） | **gin RouteGroup + 独立中间件链** + 网关按路径分流 |
 | 可观测性（§11） | **otelgin + otelhttp** + **prometheus/client_golang** + **zap** |
-| 三方调用差异处理（§4.3） | **resty**（每渠道独立 client，默认关重试） |
+| 三方调用差异处理（§4.3） | **net/http** + `pkg/httpx`（每渠道独立 client 与超时，重试需调用方显式声明） |
