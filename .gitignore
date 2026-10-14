@@ -23,6 +23,8 @@ configs/*.local.yml
 configs/secrets*.yaml
 secrets/
 **/kms-material/
+# make keygen 的输出目录（内含 ES256 私钥）
+/keys/
 
 # ---------- 构建产物 ----------
 /bin/

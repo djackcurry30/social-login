@@ -1,0 +1,82 @@
+# 三方登录统一接入服务 · 本地开发配置
+#
+# ⚠️ 本文件【不得包含任何真实密钥】。密钥类配置一律通过环境变量注入：
+#     SOCIAL_LOGIN_SECURITY_MASTER_KEY / SOCIAL_LOGIN_SECURITY_CLAIM_SALT 等
+#   （环境变量优先级高于本文件，见 internal/bootstrap/config.go 的 Load）
+#
+# 生产环境请复制为 configs/config.prod.yaml 并交由配置管理系统渲染，
+# .gitignore 已忽略 configs/local*.yaml 与 configs/*.prod.yaml。
+
+server:
+  addr: "0.0.0.0:8080"
+  # debug 会放宽若干"生产必须项"校验（允许临时密钥、允许自动迁移）。
+  mode: "debug"
+  # 本服务对外可访问的基地址，用于拼三方回调地址：
+  #   {callback_base_url}/v1/oauth/callback/{platform}
+  # 必须与三方平台后台配置的回调地址完全一致，否则平台侧会拒绝授权。
+  callback_base_url: "http://localhost:8080"
+  issuer: "http://localhost:8080"
+  shutdown_timeout: "15s"
+
+database:
+  dsn: "postgres://postgres:postgres@127.0.0.1:5432/social_login?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "1h"
+  slow_threshold: "200ms"
+  # true 会打印每条 SQL，仅开发环境开启。
+  log_sql: false
+
+cache:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  pool_size: 20
+
+security:
+  # 信封加密主密钥（Base64，32 字节）。留空时开发模式会临时生成并打印警告。
+  # 生成方式：go run ./cmd/keygen
+  master_key: ""
+  kek_id: "local-kek-v1"
+  # 身份凭证哈希的静态盐。⚠️ 必须保持稳定：
+  # 变更它会导致已入库的 claim 哈希全部无法匹配，即"按手机号归并"能力整体失效。
+  claim_salt: "dev-claim-salt-do-not-use-in-prod"
+  app_secret_salt: "dev-app-secret-salt-do-not-use-in-prod"
+
+jwt:
+  access_token_ttl: "15m"
+  refresh_token_ttl: "720h"
+  # 签名密钥。留空时开发模式会临时生成（重启即更换 kid）。
+  # 生成方式：go run ./cmd/keygen
+  signing_keys: []
+  # 配置示例：
+  # signing_keys:
+  #   - kid: "k-2026-10"
+  #     private_key_file: "/etc/social-login/keys/k-2026-10.pem"
+
+account:
+  # stub = 内存桩（仅开发/测试）；http = 真实用户中心（第三期交付）。
+  provider: "stub"
+  http:
+    base_url: ""
+    timeout: "3s"
+
+auth:
+  # 用于筛选 app_provider_configs.env。
+  env: "prod"
+  # Exchange + UserInfo 的独立超时（架构 §5.7）：
+  # 入站请求可能被调用方取消，但这期间三方调用必须跑完并落库，
+  # 否则会出现"授权码已被平台消费、我们却拿不到令牌"。
+  exchange_timeout: "5s"
+
+log:
+  level: "debug"
+  format: "console"
+  file: ""
+  max_size_mb: 128
+  max_backups: 10
+  max_age_days: 30
+
+migrate:
+  # 启动时自动执行迁移。生产必须为 false（由发布流程单独执行）。
+  enabled: true
