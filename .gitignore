@@ -1,0 +1,87 @@
+# ============================================================
+#  三方登录统一接入服务 · Git 忽略规则
+#  注意：本项目会接触平台凭据（微信 appSecret、支付宝私钥、
+#  Apple .p8 私钥、KMS 材料），凭据相关规则放在文件最前面，
+#  任何情况下都不得被提交。
+# ============================================================
+
+# ---------- 🔴 凭据与密钥（最高优先级） ----------
+*.p8
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+!configs/*.example.*
+.env
+.env.*
+!.env.example
+configs/local*.yaml
+configs/local*.yml
+configs/*.local.yaml
+configs/*.local.yml
+configs/secrets*.yaml
+secrets/
+**/kms-material/
+
+# ---------- 构建产物 ----------
+/bin/
+/dist/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.a
+*.test
+*.out
+__debug_bin*
+
+# ---------- 测试与覆盖率 ----------
+coverage.out
+coverage.html
+coverage.txt
+*.cover
+/reports/
+
+# ---------- 运行时本地数据 ----------
+/data/
+/tmp/
+/logs/
+*.log
+*.pid
+
+# ---------- 依赖 ----------
+# 是否 vendor 由团队决定：
+#   提交 vendor/ 可获得完全可复现的构建，代价是仓库体积增大；
+#   不提交则依赖 GOPROXY 与 go.sum。
+# 默认不提交，如需锁定请删除下面这行并执行 go mod vendor。
+vendor/
+
+# ---------- 工具与工作区状态 ----------
+# AI 助手的工作记忆（非项目源码）；如需团队共享决策背景可删除本行
+.workbuddy/
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.history/
+
+# ---------- 操作系统 ----------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ---------- 临时与备份 ----------
+*.bak
+*.tmp
+*.orig
+*.rej
