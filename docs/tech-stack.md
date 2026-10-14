@@ -253,21 +253,33 @@ apple := httpx.New(httpx.Config{Name: "apple", Timeout: 5 * time.Second, ...})
 
 | 能力 | 实现要点 |
 | --- | --- |
-| **每渠道独立超时** | 微信 3s / Apple 5s / 支付宝 3s，可配 |
-| **重试仅限幂等请求** | **默认不实现重试**；调用方显式传 `httpx.WithRetry(2)` 才生效。**fail-safe 优于 fail-dangerous**——标准库不写就没有，不会有人"忘了关" |
+| **每渠道独立超时** | 微信 3s / Apple 5s / 支付宝 3s，可配；连接超时统一 1s |
+| **不做重试**（约束 C6） | 不提供任何重试选项。**fail-safe 优于 fail-dangerous**——不实现就不会有人用错 |
+| **取消隔离** | 对"已发出即不可撤销"的调用提供 `httpx.Detached(ctx)`，内部用 `context.WithoutCancel` + 独立超时 |
 | **OpenTelemetry 埋点** | 官方 `otelhttp.NewTransport()` + `otelhttp.NewHandler`，不自研 |
 | **响应体大小上限** | `io.LimitReader(resp.Body, maxBodyBytes)`，防三方返回超大 body 打爆内存 |
 | **保留原始响应** | 读取 body 后同时返回字节切片与反序列化结果，原始字节供 `profile_snapshot` 落库 |
 | **敏感字段脱敏** | 对 `access_token` / `secret` / `code` 在日志与 trace attributes 中做掩码 |
+| **失败分类** | 把三方错误映射为 `retryable: true/false`（架构 §5.5），供接入方决定是否重开授权流程 |
 
-**调用方的幂等性声明是强制的**：
+**调用方不做任何自动重试（约束 C6）**：
 
 ```go
-httpClient.Do(ctx, req)                                  // 默认：不重试
-httpClient.Do(ctx, req, httpx.WithRetry(2))              // 仅幂等接口显式开启
+// httpClient 不提供 WithRetry 之类的选项——不重试是设计约束，不是配置项
+resp, err := httpClient.Do(ctx, req)   // 一次失败即失败
 ```
 
-`UserInfo`（拉用户信息，幂等）可开重试；**`Exchange`（换 token）与 `code2session` 永不重试**——授权码一次性，重试只会拿到"code 已使用"，还可能触发平台风控。
+`UserInfo`、`Exchange`、`code2session`、`Refresh`、`Unbind` **全部不重试**。
+
+**为什么连 `UserInfo`（幂等接口）也不重试**：见 `architecture-design.md` §5.5。核心原因是**"按接口逐个判断幂等性"是个必然出错的抽象**——只要有例外，就有人判断错。而且重试单位应当是「整个授权流程」而非「单个 HTTP 请求」，接入方重开一次授权比我们重放一个已发出的请求语义更清楚。
+
+**不重试就必须补上的三件事**（详见架构 §5.5）：
+
+| 事项 | 要求 |
+| --- | --- |
+| **分层超时** | 连接 1s / 读写 2~3s / 单渠道总超时（微信 3s、Apple 5s）。**不重试 + 无超时 = 连接与 goroutine 被耗尽** |
+| **渠道熔断** | 依赖 `HealthChecker`（P2-3）做健康探测，连续失败达阈值后快速失败。**没有熔断，"不重试"就变成了纯粹的慢** |
+| **取消隔离** | `Exchange` / `Refresh` 这类"已发出即不可撤销"的调用，**必须用 `context.WithoutCancel` 脱离调用方 context**，避免客户端断开导致 code 被消费但结果丢失 |
 
 **若团队确实在用 resty**：改回去是 10 分钟的事（封装层换实现，调用方不变）。但**需要团队明确表态**——这是我唯一没有依据的推断。
 
