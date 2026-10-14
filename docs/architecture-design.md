@@ -1,6 +1,6 @@
 # 三方登录统一接入服务 · 架构设计
 
-> 版本 v0.10 · 目标：一个通用的、多应用多平台的社交登录接入网关（Social Login Gateway）
+> 版本 v0.11 · 目标：一个通用的、多应用多平台的社交登录接入网关（Social Login Gateway）
 > 技术栈：Go 1.22+ / MySQL 或 PostgreSQL / Redis
 >
 > 变更记录：
@@ -13,6 +13,7 @@
 > - v0.8 **依据 `docs/design-review.md` 完成审查修复**：修复 16 处文档内冲突、6 项 P0 缺陷（`identity_claims` 部分唯一索引、JWKS 端点、三次独立事务合并、`Merge` 幂等键、jti 撤销黑名单、手机号权威源）、12 项 P1/P2 问题，并补齐 E1/E3/E10 三项架构扩展留口
 > - v0.9 **新增 §15 管理端接口设计（Admin API）**：v0.8 及之前全文有 12 处提及"管理台/管理员"但只有 2 个具体接口，其余均为悬空需求。本节补齐 11 组共 52 个管理端接口、管理员身份与 RBAC 模型、管理端与业务端的隔离约定、高危操作二次确认机制与分期落地
 > - v0.10 新增约束 **C6「调用外部渠道不做网络重试，重试责任归接入方」**，新增 §5.5 重试边界与失败语义（含 `retryable` 错误契约、分层超时、渠道熔断、`context.WithoutCancel` 取消隔离）；§5.3 错误响应新增 `retryable` 字段；熔断与超时从第四期提前至第二期
+> - v0.11 **新增 §5.6 渠道熔断设计**：v0.10 有 5 处提及"熔断"但无落地设计（同类悬空需求）。补齐选型（`sony/gobreaker/v2`）、粒度（按 `platform`）、关键规则（**只有 `retryable` 错误计入熔断**，否则可被无效 code 攻击触发服务级拒绝服务）、服务级配置（不下放应用级）、与 `HealthChecker` 的职责分离、多副本一致性限制、熔断后行为与管理端复位接口
 
 ---
 
@@ -647,9 +648,11 @@ type CallbackVerifier interface {
     VerifyCallback(ctx context.Context, raw *CallbackPayload) error
 }
 
-// HealthChecker 由需要平台健康探测的适配器实现（可选，见 P2-3）。
+// HealthChecker 由需要平台健康探测的适配器实现（可选，见 §5.6.6）。
+// 注意职责边界：HealthChecker 只用于【管理台展示与告警】，
+// 【不参与熔断决策】——熔断完全基于真实业务调用的被动统计（§5.6）。
 type HealthChecker interface {
-    // Ping 探测三方平台可达性，用于熔断与告警
+    // Ping 探测三方平台可达性
     Ping(ctx context.Context) error
 }
 
@@ -997,7 +1000,9 @@ Apple 会推送授权状态变更事件，必须提供接收端点 `POST /v1/oau
 
 **② 快速失败：渠道熔断**
 
-三方平台持续故障时，不做重试但也不能让每个请求都白等 3 秒。用 `HealthChecker`（P2-3）做健康探测 + 熔断：连续失败达阈值 → 直接快速返回 `PROVIDER.UNAVAILABLE`，不再发起真实调用。**这是"不重试"设计能够成立的配套前提**——没有熔断，不重试就变成了纯粹的慢。
+三方平台持续故障时，不做重试但也不能让每个请求都白等 3 秒。熔断器连续失败达阈值后直接快速返回 `PROVIDER.UNAVAILABLE`，不再发起真实调用。**这是"不重试"设计能够成立的配套前提**——没有熔断，不重试就变成了纯粹的慢。
+
+> 完整设计见 **§5.6 渠道熔断设计**。
 
 **③ 取消语义：`Exchange` 不能被调用方断开取消**
 
@@ -1023,6 +1028,144 @@ Apple 会推送授权状态变更事件，必须提供接收端点 `POST /v1/oau
 要么重试无意义（retryable: false）。请勿对回调 URL 做重放——
 回调携带的 code 是一次性的。
 ```
+
+### 5.6 渠道熔断设计（Provider Circuit Breaker）
+
+> **本节的由来（v0.11）**：v0.10 引入约束 C6（不重试）后，全文有 5 处提及"熔断"，但都只有动作描述、没有落地设计。本节补齐。
+
+#### 5.6.1 为什么熔断是必需的，不是可选项
+
+C6 决定不重试，但**不重试本身不减少对故障平台的调用量**。没有熔断时，平台故障期间每个登录请求都会：
+
+```
+占住一个 goroutine → 占住一个连接 → 白等满超时（最长 5s）→ 失败
+```
+
+并发稍高，连接池与 goroutine 就会被耗尽。**而连接池是全局共享的**——微信挂了会连带把 Apple、支付宝的登录也拖垮，甚至影响不涉及任何三方平台的接口。
+
+**熔断的作用就是把"平台故障"限制在单个渠道内，阻止其扩散为服务级故障。**
+
+#### 5.6.2 选型：`sony/gobreaker/v2`
+
+| 候选 | 结论 |
+| --- | --- |
+| **sony/gobreaker/v2** | ✅ **选用**。Go 生态最主流的熔断库，经典三态模型（Closed / Open / Half-Open），v2 支持泛型，API 简洁，无额外依赖 |
+| afex/hystrix-go | ❌ 已长期不活跃 |
+| go-kit/kit/circuitbreaker | ❌ 本质是对 gobreaker 的封装，多一层无收益 |
+| 自研 | ❌ 熔断的状态迁移与并发边界容易写错，不值得自研 |
+
+#### 5.6.3 熔断粒度：按 `platform`，不是 `platform:scene`
+
+**故障域 = 平台侧集群。** 微信的 `code2session`、`sns/oauth2/access_token`、`sns/qrconnect` 都在 `api.weixin.qq.com` 同一域名下，一个接口不可达通常意味着整站异常。
+
+按 `platform` 熔断的好处：
+
+- **最快止损**——不必等每个场景各自熔断
+- **避免无效流量**——若按场景熔断，`mini_program` 已熔断但 `app` 场景仍会持续打同一个故障域名
+
+保留细化能力：`provider_guard.circuit_breaker.granularity = platform | platform_scene`，**默认 `platform`**。仅当某平台的不同场景确实落在独立故障域时才改为 `platform_scene`。
+
+#### 5.6.4 ⚠️ 关键规则：只有 `retryable` 的错误才计入熔断
+
+**这条写错会造成服务级拒绝服务，必须写死。**
+
+| 错误分类 | 是否计入熔断 | 说明 |
+| --- | --- | --- |
+| `PROVIDER.TIMEOUT` | ✅ 计入 | 网络超时，平台侧问题 |
+| `PROVIDER.UNAVAILABLE` | ✅ 计入 | 连接失败、三方 5xx |
+| **`PROVIDER.REJECTED`**（code 无效 / 已使用） | ❌ **不计入** | 这是**业务语义的正常返回**，不是平台故障 |
+| `AUTH.INVALID_STATE` / `AUTH.INVALID_NONCE` | ❌ 不计入 | 本服务的校验失败，与平台无关 |
+| `AUTH.INVALID_CONFIG`（凭据失效） | ⚠️ 计入，但**单独告警** | 是我们的配置错误，不是平台故障，需运维介入而非等待自愈 |
+
+**反例（必须避免）**：如果把 `PROVIDER.REJECTED` 计入熔断，那么**攻击者只要用无效的 `code` 高频打我们的回调接口，就能把整个微信渠道熔断掉**——这就从"平台故障保护"变成了"服务级拒绝服务"。这不是理论风险，是很直接的攻击路径。
+
+**慢请求也必须计入**：平台响应耗时 2.9s（略低于 3s 超时）会被判为"成功"，但对用户体验已经等同于故障。因此 `slow_threshold_ms` 以上的**成功**请求也应计为失败。
+
+#### 5.6.5 配置：服务级，不放 `applications.policy`
+
+```yaml
+# configs/config.yaml
+provider_guard:
+  circuit_breaker:
+    enabled: true
+    granularity: platform          # platform | platform_scene
+    window_seconds: 60             # 统计窗口
+    min_requests: 20               # 窗口内最少请求数，不足不判熔断（防低流量误判）
+    failure_ratio: 0.5             # 失败率阈值
+    consecutive_failures: 10       # 或：连续失败次数达阈值即熔断
+    slow_threshold_ms: 2000        # 超过此耗时的"成功"请求也计为失败
+    open_seconds: 30               # Open 状态持续时长，之后转 Half-Open
+    half_open_requests: 3          # Half-Open 允许放行的探测请求数
+```
+
+**为什么是服务级配置而不是应用级**（重要）：
+
+熔断保护的是**所有应用共享的资源**——进程的连接池与 goroutine。平台故障也是全局的，不区分应用。
+
+如果做成应用级配置，就会出现：App1 配了熔断、App2 配了"不熔断"。平台挂掉时 App2 的流量持续打在故障平台上，**消耗的是两个应用共享的连接池** —— 等于**一个应用可以为所有应用关掉保护**。所以这个开关不能下放到应用。
+
+`count_only_retryable` 不暴露为配置项，**在代码中写死为 `true`**（见 §5.6.4，这是安全红线）。
+
+#### 5.6.6 熔断与 `HealthChecker` 的分工（不要混用）
+
+| 机制 | 类型 | 职责 |
+| --- | --- | --- |
+| **熔断器**（gobreaker） | **被动统计真实业务调用** | **唯一的熔断决策来源** |
+| **`HealthChecker`**（P2-3） | 主动探测（定时 Ping） | **仅用于管理台展示与告警**，不参与熔断决策 |
+
+**为什么不能用 HealthChecker 替代熔断**：主动探测走的**不是真实业务路径**——探测用的接口可能正常，而业务接口异常（限流、特定 appid 被拒等），用探测结果决定熔断必然误判。而且探测本身有开销，高频探测反而增加平台压力。
+
+#### 5.6.7 ⚠️ 多副本的一致性限制（必须知晓）
+
+**熔断器是进程内状态。** N 个副本 = N 个互相独立的熔断器，后果：
+
+| 现象 | 影响 | 是否可接受 |
+| --- | --- | --- |
+| 各副本在略有偏差的时刻各自熔断 | 多失败几个请求 | ✅ 可接受 |
+| `half_open_requests` 被放大为 N × 3 个探针 | 恢复瞬间对平台多打少量请求 | ✅ 副本数不大时可接受 |
+| 状态不同步（A 已恢复、B 仍熔断） | 最坏多等一个 `open_seconds` | ✅ 可接受 |
+
+**决策：初期用进程内熔断，不引入 Redis 共享状态。**
+
+理由：**熔断是"降级保护"机制，不应有强外部依赖**。若把熔断状态放 Redis，那么 Redis 故障时熔断失效，保护也就没了——用一个可能故障的组件去保护对另一个组件的故障，逻辑上是错位的。
+
+**需要记录的限制**：副本数超过约 20 后，探针放大与状态分歧会变明显。届时的正确演进是**熔断事件广播**（某副本熔断后通过 Redis Pub/Sub 通知其他副本在本地熔断），而**不是**每次调用都去读 Redis 共享状态。指标 `circuit_breaker_state` 按实例打 label，可直接观测分歧程度。
+
+#### 5.6.8 熔断后的行为
+
+```jsonc
+HTTP 503
+{
+  "code": "PROVIDER.UNAVAILABLE",
+  "message": "三方平台暂时不可用，请稍后重试",
+  "retryable": true,
+  "retry_after_ms": 30000,          // Open 状态的剩余时长，供接入方退避
+  "details": { "platform": "wechat", "circuit": "open" }
+}
+```
+
+关键：**不发起真实调用、不占连接、不等超时**，立即返回。
+
+#### 5.6.9 管理端支持
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/admin/v1/providers/health` | **扩展**：返回中增加 `circuit_state`（`closed` / `open` / `half_open`）、`opened_at`、`recent_failure_ratio`、`half_open_probes_left` |
+| POST | `/admin/v1/providers/{platform}:circuit-reset` | **新增**（§15.4 I 组）：手工复位熔断器。用于**误熔断**场景（如我们自己配置错导致的连续失败）。需 `reason`，写管理审计 |
+
+#### 5.6.10 与 C6 的关系总结
+
+```
+C6：不重试                      →  一次失败就是失败
+      ↓ 必须有
+分层超时（§5.5 ①）              →  避免单个请求无限等待
+      ↓ 必须有
+渠道熔断（本节）                 →  避免故障平台的请求持续占用共享资源
+      ↓ 必须有
+快速失败 + retryable 契约        →  接入方据此决定是否重开授权流程
+```
+
+**四者缺一不可**：只有"不重试"而没有超时和熔断，等于把重试的责任推给接入方的同时，把自己变成了一个会被故障平台拖死的服务。
 
 ---
 
@@ -1814,7 +1957,10 @@ Admin API 更新配置
 | `token_revoked_total{reason}` | Counter | 撤销量与原因（`logout` / `hijack` / `merge` / `account_closed`） |
 | `jwks_kid_miss_total` | Counter | 业务方验签时 `kid` 未命中次数，用于评估密钥轮换是否平滑 |
 | `provider_failure_total{platform,scene,retryable}` | Counter | **按 `retryable` 维度切分失败**（§5.5）——`retryable=true` 占比高说明网络/平台问题，`false` 占比高说明配置或调用方式有问题 |
-| `circuit_breaker_state{platform}` | Gauge | 熔断器状态（0 关闭 / 1 半开 / 2 打开）。**这是 C6 生效后判断"失败是网络抖动还是平台故障"的主要依据** |
+| `circuit_breaker_state{platform,instance}` | Gauge | 熔断器状态（0 closed / 1 half_open / 2 open）。**按实例打 label，可直接观测多副本状态分歧程度**（§5.6.7） |
+| `circuit_breaker_rejected_total{platform}` | Counter | 被熔断快速拒绝的请求数。与 `provider_failure_total` 对比可估算熔断挽回的无效调用量 |
+| `circuit_breaker_transition_total{platform,from,to}` | Counter | 状态迁移次数。**`open → half_open` 频繁抖动说明平台在"半死"状态**，需人工介入 |
+| `provider_slow_total{platform,op}` | Counter | 耗时超过 `slow_threshold_ms` 但**成功**的请求（这类请求也计入熔断失败，见 §5.6.4） |
 | `httpclient_timeout_total{platform,stage}` | Counter | 超时分布（连接 / 读写），用于校准超时配置 |
 
 ### 11.2 追踪
@@ -1837,7 +1983,9 @@ Admin API 更新配置
 - **灰度**：渠道配置带 version，可按 appId 维度灰度启用新渠道
 - **后台任务必须独立部署**：补偿任务（扫描 `merge_operations` 待处理）与 Outbox 投递 worker 建议独立进程/独立副本部署，避免与在线请求争抢资源；多副本时必须用分布式锁或 `SELECT ... FOR UPDATE SKIP LOCKED` 保证不重复处理
 - **平台配额保护**：按 provider 维度限流（§6.3），微信等有日调用量上限的平台需设置预留水位（如用量达 80% 告警、95% 拒绝新请求），**不要让一个应用的行为影响其他应用**
-- **超时与熔断是 C6 的配套前提（§5.5）**：本服务对三方渠道不重试，因此**超时配置与熔断器不是优化项而是必需项**——不重试 + 无超时会让连接与 goroutine 被耗尽；不重试 + 无熔断会让平台故障期间每个请求都白等满超时。上线前必须实测超时值并配置熔断阈值
+- **超时与熔断是 C6 的配套前提（§5.5 / §5.6）**：本服务对三方渠道不重试，因此**超时配置与熔断器不是优化项而是必需项**——不重试 + 无超时会让连接与 goroutine 被耗尽；不重试 + 无熔断会让平台故障期间每个请求都白等满超时。上线前必须实测超时值并配置熔断阈值
+- **熔断配置与配置中心**：`provider_guard` 是**服务级配置**（`configs/config.yaml`），变更需灰度与重启，**不走 §9.2 的应用级热更新**——因为它的变更会立即改变所有应用的调用行为。若后续要支持动态调整，需单独设计带审计的配置通道
+- **多副本熔断状态分歧的观测**：`circuit_breaker_state{platform,instance}` 必须按实例打 label 上报，否则无法发现"部分副本熔断、部分未熔断"的分歧（§5.6.7）
 - **上下文取消隔离**：`Exchange` / `Refresh` 等不可撤销调用使用 `context.WithoutCancel`（§5.5 ③），避免客户端断开导致授权码被消费但结果丢失
 - **JWKS 与密钥轮换**：密钥从 KMS 统一获取，服务无本地密钥状态；轮换按 §8.3 的四步执行，建议做成管理台一键操作 + 轮换后的平滑性校验（观察 `jwks_kid_miss_total`）
 - **补偿任务滞后监控**：`merge_compensation_lag_seconds` 是唯一的孤儿风险探针，必须配告警
@@ -1868,7 +2016,7 @@ Admin API 更新配置
 - **Apple（约束 C2，必做）** —— client_secret JWT 自动签发与续期、JWKS 验签与轮换应对、nonce 防重放、首次授权才有的 name/email 落库、`/v1/oauth/notify/{platform}` 处理 `consent-revoked` / `account-delete`
 - **小程序 `session_key` 生命周期管理**（修正 P1-2：这是 `getPhoneNumber` 解密的前提，直接决定 R4 红线 1 能否成立）
 - 各渠道的 capability 差异处理
-- **超时分层 + 渠道熔断（约束 C6 的配套前提，§5.5）** —— `HealthChecker` 实现 + 熔断器 + `context.WithoutCancel` 的取消隔离。**这一项从原第四期提前到第二期**：C6 决定不重试后，熔断与超时成为正确性的组成部分，不再是"生产化优化项"
+- **超时分层 + 渠道熔断（约束 C6 的配套前提，§5.5 / §5.6）** —— `HealthChecker` 实现（仅管理台展示）+ **`sony/gobreaker/v2` 熔断器（按 `platform` 粒度，服务级配置）** + `context.WithoutCancel` 的取消隔离。**这一项从原第四期提前到第二期**：C6 决定不重试后，熔断与超时成为正确性的组成部分，不再是"生产化优化项"。**实现时必须写死"只有 `retryable` 错误计入熔断"**（§5.6.4）
 - **管理端（§15）**：G 组（事件与死信重投）+ H 组（审计查询与异步导出）。渠道一接入，排查就只能靠管理端，这两个必须同期交付
 - **验收标准**：同一业务应用下的 iOS、Android、小程序均可完成微信登录；其中 iOS 与 Android 因共用 `wechat:app` 场景而归为同一账号；小程序能成功解密并写入 `source = wechat_phone` 的 claim
 
@@ -2167,8 +2315,9 @@ CREATE INDEX idx_admin_audit_target  ON admin_audit_logs (target_type, target_id
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
 | GET | `/admin/v1/providers` | 已注册渠道清单：`platform:scene`、`capabilities`、`api_version`、启用状态 | `config:read` |
-| GET | `/admin/v1/providers/health` | **各渠道健康探测结果**（调 `HealthChecker.Ping`），含响应耗时 | `config:read` |
-| GET | `/admin/v1/health/overview` | 关键指标摘要：授权成功率、合并积压、outbox 积压、claim 不一致数 | `app:read` |
+| GET | `/admin/v1/providers/health` | **各渠道健康探测结果**（调 `HealthChecker.Ping`），含响应耗时；**扩展返回熔断状态** `circuit_state` / `opened_at` / `recent_failure_ratio`（§5.6.9） | `config:read` |
+| POST | `/admin/v1/providers/{platform}:circuit-reset` | **手工复位熔断器**（§5.6.9）。用于误熔断场景（如配置错误导致的连续失败）。需 `reason`，写管理审计 | `config:write` |
+| GET | `/admin/v1/health/overview` | 关键指标摘要：授权成功率、合并积压、outbox 积压、claim 不一致数、各平台熔断状态 | `app:read` |
 
 #### J 组 · 凭证一致性运维
 
