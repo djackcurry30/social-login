@@ -45,9 +45,23 @@ vet:
 lint: fmt vet
 
 ## 构建与运行
+#
+# 注意：管理端前端在 web/ 下构建；前端产物需要"复制"一份到
+# internal/embedweb/dist 才能被 go:embed 嵌入。
+# - web-dist       同步（先 npm run build，再 cp 到 embedweb/dist）
+# - build          只构建 Go 后端二进制（前端用 fallback 到 node 自服务）
 build:
 	@mkdir -p $(dir $(BINARY))
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/server
+
+web-build:
+	cd web && npm install --no-audit --no-fund
+	cd web && npm run build
+
+web-sync: web-build
+	rm -rf internal/embedweb/dist
+	cp -r web/dist internal/embedweb/dist
+	@echo "前端已同步到 internal/embedweb/dist"
 
 run:
 	$(GO) run ./cmd/server -config $(CONFIG)

@@ -30,6 +30,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/embedweb"
 	adminhandler "github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	adminhttp "github.com/djackcurry30/social-login/internal/interfaces/http/admin"
 )
@@ -282,6 +283,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		SecretHasher: appSecretHasher,
 		Logger:       logger,
 		Admin:        adminDeps,
+		WebFS:        embedweb.FS(),
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 

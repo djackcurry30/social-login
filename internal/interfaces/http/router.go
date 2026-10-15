@@ -11,6 +11,7 @@
 package httpapi
 
 import (
+	"io/fs"
 	"net/http"
 	"time"
 
@@ -49,6 +50,9 @@ type RouterDeps struct {
 	Logger       *zap.Logger
 	// Admin 是 admin 路由的可选依赖。
 	Admin *admin.RouterDeps
+	// WebFS 是 admin SPA 静态资源（前端 dist）。
+	// nil 时不挂，由前端 vite dev 自服务。
+	WebFS fs.FS
 }
 
 // NewRouter 构造 gin 引擎。
@@ -139,6 +143,12 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// 不为 nil 时把 admin 子引擎 Mount 到 /admin 前缀。
 	if deps.Admin != nil {
 		admin.MountAdmin(r, *deps.Admin)
+	}
+
+	// 管理端 SPA 静态资源：可选；由 embedweb.FS() 提供。
+	// webFS 为 nil 时不挂（开发模式由 vite dev 提供前端）。
+	if deps.WebFS != nil {
+		admin.MountStatic(r, deps.WebFS)
 	}
 
 	return r

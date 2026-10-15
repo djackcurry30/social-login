@@ -61,6 +61,18 @@ coverage.txt
 # 默认不提交，如需锁定请删除下面这行并执行 go mod vendor。
 vendor/
 
+# 前端依赖与产物
+web/node_modules/
+web/dist/
+web/.vite/
+# tsc --incremental 的缓存文件
+**/tsconfig.tsbuildinfo
+# 前端 embed 缓存（cp -r web/dist internal/embedweb/dist 由 build 时生成）。
+# 跟踪 .gitkeep 占位文件；忽略下层全部产物。
+# 注：必须把白名单放在最后一行，否则 `**` 会再次覆盖。
+internal/embedweb/dist/**
+!internal/embedweb/dist/.gitkeep
+
 # ---------- 工具与工作区状态 ----------
 # AI 助手的工作记忆（非项目源码）；如需团队共享决策背景可删除本行
 .workbuddy/
