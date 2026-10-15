@@ -25,6 +25,13 @@ import (
 	// blank import 触发各渠道适配器的编译期注册（决策 D7）。
 	// 新增渠道时改这一行即可，装配代码与核心编排都不需要动。
 	_ "github.com/djackcurry30/social-login/internal/infrastructure/provider/adapters"
+
+	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
+	"github.com/djackcurry30/social-login/internal/application/adminapp"
+	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	adminhandler "github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
+	adminhttp "github.com/djackcurry30/social-login/internal/interfaces/http/admin"
 )
 
 // Version 由构建时通过 -ldflags 注入。
@@ -138,6 +145,13 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	auditRepo := postgres.NewAuditRepository(db)
 	ticketStore := cache.NewTicketStore(rdb)
 
+	// 管理端仓储（admin_users / admin_sessions / admin_audit_logs）。
+	adminUserRepo := postgres.NewAdminUserRepository(db)
+	adminSessionRepo := postgres.NewAdminSessionRepository(db)
+	adminAuditRepo := postgres.NewAdminAuditWriter(db)
+	// ListAppIDs 把 adminapp 用到的"按 ID 倒序取 N 个"能力挂上。
+	adminListAppIDs := appRepo.ListIDs
+
 	// --- 应用服务 ---
 	tenantSvc := tenantconfig.New(tenantconfig.Options{Env: cfg.Auth.Env},
 		appRepo, configRepo, keyManager)
@@ -187,6 +201,57 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:   logger,
 	})
 
+	// --- 管理端 services（A 组 + B 组 + I 组 + LoginService）---
+	//
+	// 注意：adminapp.HashSecret 用 adminapp.defaultHashSecret 占位实现；
+	// 装配时不传 crypto.AppSecretHasher，等下一期 adminapp 改造后挂入。
+	adminAppSvc := adminapp.New(adminapp.Deps{
+		TenantApps:  appRepo,
+		AdminAudit:  adminAuditRepo,
+		Logger:      logger,
+		ListAppIDs:  adminListAppIDs,
+		HashSecret:  nil, // 用 adminapp 默认实现
+	})
+
+	// adminchan 的 EncryptSecret 注入 keymanager。
+	// KeyManager 当前是单 KEK，把 KEKID 作为 dekID 写入 secret_dek_id 列；
+	// 真正的 DEK 信封加密（kek → dek → secret）是第二期再扩。
+	adminChanSvc := adminchan.New(adminchan.Deps{
+		TenantConfigs: configRepo,
+		TenantSecrets: keyManager,
+		EncryptSecret: func(plain string) ([]byte, string, error) {
+			ct, err := keyManager.Encrypt(plain)
+			return ct, keyManager.KEKID(), err
+		},
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+		VerifyHTTP: adminchan.VerifyHTTPDefault(),
+	})
+
+	adminObsSvc := adminobs.New(adminobs.Deps{
+		// ProviderLister / OverviewGetter 不注入：用 adminobs 默认实现。
+		// 下一期 OverviewGetter 接 admin_app_repo + providerconfig_repo 后再补。
+		Logger: logger,
+	})
+
+	adminLoginSvc := adminhandler.NewLoginService(adminhandler.LoginServiceDeps{
+		Users:    adminUserRepo,
+		Sessions: adminSessionRepo,
+		Logger:   logger,
+	})
+
+	// 管理端被用来"启用"才会挂上路由；为保持简洁第一期默认挂上。
+	adminDeps := &adminhttp.RouterDeps{
+		Logger:       logger,
+		AuthSessions: adminSessionRepo,
+		AuthUsers:    adminUserRepo,
+		AuthLogin:    adminLoginSvc,
+		AdminApp:     adminAppSvc,
+		AdminChan:    adminChanSvc,
+		AdminObs:     adminObsSvc,
+	}
+	_ = adminDeps
+
 	// --- 接入层 ---
 	h := handler.New(handler.Deps{
 		Tenant:       tenantSvc,
@@ -216,6 +281,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Tokens:       tokenSvc,
 		SecretHasher: appSecretHasher,
 		Logger:       logger,
+		Admin:        adminDeps,
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 

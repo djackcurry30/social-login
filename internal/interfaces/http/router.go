@@ -20,6 +20,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/application/token"
 	"github.com/djackcurry30/social-login/internal/infrastructure/crypto"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/admin"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
@@ -37,12 +38,17 @@ const (
 )
 
 // RouterDeps 是装配路由所需的依赖。
+//
+// Admin 是可选依赖：nil 时不挂 /admin/v1（便于分阶段上线），
+// 不为 nil 时用 admin.MountAdmin() 合并到同一进程。
 type RouterDeps struct {
 	Handler      *handler.Handler
 	Tenant       *tenantconfig.Service
 	Tokens       *token.Service
 	SecretHasher *crypto.AppSecretHasher
 	Logger       *zap.Logger
+	// Admin 是 admin 路由的可选依赖。
+	Admin *admin.RouterDeps
 }
 
 // NewRouter 构造 gin 引擎。
@@ -127,6 +133,13 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		httputil.Fail(c, deps.Logger,
 			errs.Newf(errs.CodeNotFound, "不支持的方法: %s %s", c.Request.Method, c.Request.URL.Path))
 	})
+
+	// 管理端（/admin/v1/*）：可选装配。
+	// Admin 为 nil 时跳过，便于第一期分阶段上线；
+	// 不为 nil 时把 admin 子引擎 Mount 到 /admin 前缀。
+	if deps.Admin != nil {
+		admin.MountAdmin(r, *deps.Admin)
+	}
 
 	return r
 }

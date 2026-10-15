@@ -55,6 +55,15 @@ const (
 	CodeAccountUnavailable  Code = "ACCOUNT.UNAVAILABLE"
 	CodeAccountNotFound     Code = "ACCOUNT.NOT_FOUND"
 	CodeAccountNotSupported Code = "ACCOUNT.NOT_SUPPORTED"
+
+	// 管理端专用（§15）。CodeAuthAdmin* 与 CodeAuth* 业务端解耦：
+	// 管理端请求的鉴权失败走 CodeUnauthorized 与 CodeForbidden 即可，
+	// 业务语义错误（如 token 过期、token 撤销）才有必要单列。
+	CodeAdminSessionExpired Code = "ADMIN.SESSION_EXPIRED"
+	CodeAdminSessionRevoked Code = "ADMIN.SESSION_REVOKED"
+	CodeAdminReasonRequired Code = "ADMIN.REASON_REQUIRED"
+	CodeAdminVerifyFailed   Code = "ADMIN.VERIFY_FAILED"
+	CodeAdminConflict       Code = "ADMIN.CONFLICT"
 )
 
 // meta 是错误码的默认元信息。默认值可以被具体错误实例覆盖。

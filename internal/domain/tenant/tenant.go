@@ -318,6 +318,11 @@ type ApplicationRepository interface {
 	FindByAppCode(ctx context.Context, appCode string) (*Application, error)
 	// FindByID 按主键查找。
 	FindByID(ctx context.Context, id int64) (*Application, error)
+	// Upsert 插入或更新应用（admin 端用）。
+	//
+	// 之所以在端口里声明：Create / Update / RotateSecret / SavePolicy 都要写库，
+	// 没有统一的 Upsert 就要重复声明 Create + Update，组合爆炸。
+	Upsert(ctx context.Context, app *Application) (*Application, error)
 }
 
 // ProviderConfigRepository 是渠道配置的持久化端口。
@@ -326,4 +331,16 @@ type ProviderConfigRepository interface {
 	Find(ctx context.Context, appID int64, platform, scene, configKey, env string) (*ProviderConfig, error)
 	// ListByApp 列出某应用的全部渠道配置（管理端与引导绑定页需要）。
 	ListByApp(ctx context.Context, appID int64) ([]ProviderConfig, error)
+	// Upsert 插入或更新（admin 端用）。
+	Upsert(ctx context.Context, cfg *ProviderConfig) (*ProviderConfig, error)
+	// FindByID 按主键查（admin 端用）。
+	FindByID(ctx context.Context, id int64) (*ProviderConfig, error)
+	// UpdateStatus 启停（admin 端用）。
+	UpdateStatus(ctx context.Context, id int64, status int16) error
+	// SoftDelete 软删（admin 端用，等价于 status=0）。
+	SoftDelete(ctx context.Context, id int64) error
+	// UpdateSecretRotation 轮换凭据：当前 → prev，新 → 当前（admin 端用）。
+	UpdateSecretRotation(ctx context.Context, id int64, newCipher []byte, dekID string) error
+	// FinalizeSecret 结束轮换过渡期：清空 prev（admin 端用）。
+	FinalizeSecret(ctx context.Context, id int64) error
 }

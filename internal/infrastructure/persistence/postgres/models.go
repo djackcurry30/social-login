@@ -208,3 +208,32 @@ type adminAuditLogModel struct {
 }
 
 func (adminAuditLogModel) TableName() string { return "admin_audit_logs" }
+
+// 管理员账号（00002_admin.sql）。
+type adminUserModel struct {
+	ID           int64      `gorm:"column:id;primaryKey"`
+	Username     string     `gorm:"column:username"`
+	PasswordHash string     `gorm:"column:password_hash"`
+	DisplayName  string     `gorm:"column:display_name"`
+	Role         string     `gorm:"column:role"`
+	Status       int16      `gorm:"column:status"`
+	LastLoginAt  *time.Time `gorm:"column:last_login_at"`
+	CreatedAt    time.Time  `gorm:"column:created_at"`
+	UpdatedAt    time.Time  `gorm:"column:updated_at"`
+}
+
+func (adminUserModel) TableName() string { return "admin_users" }
+
+// 管理员会话（00002_admin.sql）。
+type adminSessionModel struct {
+	ID        int64      `gorm:"column:id;primaryKey"`
+	UserID    int64      `gorm:"column:user_id"`
+	TokenHash string     `gorm:"column:token_hash"`
+	ClientIP  *string    `gorm:"column:client_ip;type:inet"`
+	UserAgent string     `gorm:"column:user_agent"`
+	ExpiresAt time.Time  `gorm:"column:expires_at"`
+	RevokedAt *time.Time `gorm:"column:revoked_at"`
+	CreatedAt time.Time  `gorm:"column:created_at"`
+}
+
+func (adminSessionModel) TableName() string { return "admin_sessions" }
