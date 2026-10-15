@@ -1,5 +1,6 @@
 .PHONY: help tools tidy fmt vet lint build run test test-unit test-acceptance test-all \
-        mock seed keygen migrate-up migrate-down migrate-status clean docker-up docker-down
+        mock seed keygen migrate-up migrate-down migrate-status clean docker-up docker-down \
+        compose-up compose-down compose-reset compose-logs image
 
 # Go 参数。构建信息通过 -ldflags 注入，便于线上用 /healthz 确认部署版本。
 GO              ?= go
@@ -22,6 +23,10 @@ help:
 	@echo "  make test-unit       只跑单元测试（不依赖外部服务）"
 	@echo "  make test-acceptance 跑第一期验收（需要 PG 与 Redis）"
 	@echo "  make docker-up       用容器起本地 PG 与 Redis"
+	@echo "  make compose-up      一条命令起全栈（app + pg + redis）"
+	@echo "  make compose-down    停止全栈容器"
+	@echo "  make compose-reset   停止全栈并清空数据卷"
+	@echo "  make compose-logs    跟踪 app 容器日志"
 	@echo "  make keygen          生成主密钥与签名密钥"
 	@echo "  make mock            启动自建 OAuth2 测试服务"
 	@echo "  make seed            写入本地联调数据（应用 + 渠道配置）"
@@ -99,6 +104,31 @@ docker-up:
 
 docker-down:
 	-docker rm -f $(PG_CONTAINER) $(REDIS_CONTAINER)
+
+## 全栈容器化（app + pg + redis，一条命令起）
+#
+# 与上面的 docker-up 的区别：
+#   docker-up      只起 PG 与 Redis 两个依赖，app 在宿主机用 go run 跑
+#   compose-up     把 app 也打进镜像，连同依赖一起编排
+# 访问入口：http://localhost:8080/admin（admin / admin12345）
+image:
+	docker build -t social-login:local .
+
+compose-up:
+	docker compose up -d --build
+	@echo ""
+	@echo "管理端: http://localhost:8080/admin  (admin / admin12345)"
+	@echo "日志:   make compose-logs"
+
+compose-down:
+	docker compose down
+
+# 连数据卷一起清掉，下次 up 是一套全新环境
+compose-reset:
+	docker compose down -v
+
+compose-logs:
+	docker compose logs -f app
 
 ## 密钥与本地数据
 keygen:

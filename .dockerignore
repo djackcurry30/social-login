@@ -1,0 +1,68 @@
+# ============================================================
+#  Docker 构建上下文排除规则
+#
+#  目标：把上下文压到最小，并确保【绝不】把密钥类文件带进镜像。
+#  注意：本文件只影响 docker build 的上下文，不影响 git 跟踪。
+# ============================================================
+
+# ---------- 版本控制与工作区 ----------
+.git
+.gitignore
+.gitattributes
+.workbuddy
+.idea
+.vscode
+*.swp
+*.swo
+.history
+
+# ---------- 🔴 密钥与本地凭据（绝不进镜像） ----------
+key
+keys
+*.p8
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+.env
+.env.*
+configs/local*.yaml
+configs/local*.yml
+configs/*.local.yaml
+configs/*.local.yml
+configs/secrets*.yaml
+configs/*.prod.yaml
+secrets
+
+# ---------- 构建产物（镜像内会重新构建） ----------
+bin
+dist
+build
+reports
+coverage.out
+coverage.html
+coverage.txt
+*.log
+*.pid
+*.exe
+*.test
+*.out
+
+# ---------- 前端：依赖与产物都在 Docker 内重建 ----------
+web/node_modules
+web/dist
+web/.vite
+**/tsconfig.tsbuildinfo
+
+# ---------- 嵌入目录：强制由 web-builder 阶段重新填充 ----------
+# 若不清空，本地残留的旧 bundle 会与新构建的产物混在一起。
+internal/embedweb/dist
+
+# ---------- 文档与杂项 ----------
+*.md
+!README.md
+Makefile
+docker-compose.yml
+Dockerfile
+.dockerignore
