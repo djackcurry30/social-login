@@ -297,8 +297,15 @@ func (a *Adapter) code2Session(ctx context.Context, base string, req provider.Ex
 			WithDetail("platform", provider.PlatformWeChat)
 	}
 
-	// session_key 的生命周期由微信决定（通常与登录态一致），这里按 2 小时保守设置；
-	// 它【不进 Raw、不落库、不打日志】，只在本次调用链内用于解密手机号。
+	// 落共享存储，供【后续独立请求】解密手机号用。
+	//
+	// 微信不返回 session_key 的过期时间，传 0 表示用默认 TTL。
+	// 失败不阻断登录（putSessionKey 内部已处理）：本次登录有效，只是
+	// "另一个请求、另一个实例"的解密路径不可用。
+	putSessionKey(ctx, req.AppID, out.OpenID, out.SessionKey, 0)
+
+	// 密钥只进 Redis（信封加密后），【不进 Raw、不落库、不打日志】：
+	// 它是能解开用户手机号的材料，Raw 会被脱敏入库供排障，绝不能带上它。
 	return &provider.TokenSet{
 		SessionKey: out.SessionKey,
 		ExpiresIn:  2 * 3600,
@@ -336,7 +343,7 @@ func (a *Adapter) UserInfo(ctx context.Context, req provider.UserInfoRequest) (*
 			OpenID: openID,
 			Raw:    map[string]any{"openid": openID},
 		}
-		if err := a.fillPhone(ctx, req.Creds, req.Extra, req.Token.SessionKey, user); err != nil {
+		if err := a.fillPhone(ctx, req.AppID, req.Creds, req.Extra, req.Token.SessionKey, user); err != nil {
 			return nil, err
 		}
 		return user, nil
@@ -406,7 +413,7 @@ type phoneResponse struct {
 //
 // 都没有时保持"只有 openid"的身份：手机号是可选的归并依据，
 // 不是登录的前提，强制要求会让所有没接 getPhoneNumber 的小程序无法登录。
-func (a *Adapter) fillPhone(ctx context.Context, creds provider.Credentials, extra map[string]string, sessionKey string, user *provider.ExternalUser) error {
+func (a *Adapter) fillPhone(ctx context.Context, appID string, creds provider.Credentials, extra map[string]string, sessionKey string, user *provider.ExternalUser) error {
 	code := extra["phone_code"]
 	encrypted := extra["encrypted_data"]
 	iv := extra["iv"]
@@ -442,10 +449,33 @@ func (a *Adapter) fillPhone(ctx context.Context, creds provider.Credentials, ext
 	}
 
 	if encrypted != "" && iv != "" {
+		// 先用本次 code2Session 的密钥解：同一次请求里 code 与 encrypted_data
+		// 通常来自同一次登录，这条路最快也最准。
 		phone, pure, err := decryptPhone(sessionKey, encrypted, iv, creds.ProviderAppID)
 		if err != nil {
-			return err
+			// 本次密钥解不开，说明 encrypted_data 是【上一次登录】加密的：
+			// 业务方先拿 code 换登录态、再单独上报手机号，两次请求在负载均衡
+			// 下可能落在不同实例。此时必须回查共享存储里上一次的 session_key，
+			// 而不是直接失败——只上 Redis 但不想这一步，照样会失败。
+			if cached := loadSessionKey(ctx, appID, user.OpenID); cached != "" && cached != sessionKey {
+				if p2, pu2, e2 := decryptPhone(cached, encrypted, iv, creds.ProviderAppID); e2 == nil {
+					phone, pure, err = p2, pu2, nil
+				}
+			}
 		}
+		if err != nil {
+			// 必须显式失败，不能降级成"没有手机号"：否则下游会拿一个未经
+			// 校验的号码继续用，R4 红线 1 就被悄悄绕过了。
+			return errs.Wrap(errs.CodeAuthInvalidState,
+				"手机号解密失败：会话密钥已失效，请重新调用 getPhoneNumber 获取加密数据", err).
+				WithDetail("platform", provider.PlatformWeChat).
+				WithDetail("scene", a.scene).
+				WithDetail("hint", "encrypted_data 必须是最近一次登录之后产生的")
+		}
+
+		// 解密成功即丢弃密钥，缩小它在共享存储里的存活窗口。
+		dropSessionKey(ctx, appID, user.OpenID)
+
 		if pure != "" {
 			user.Phone = pure
 		} else {

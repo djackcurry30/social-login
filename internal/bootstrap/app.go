@@ -20,22 +20,23 @@ import (
 	"github.com/djackcurry30/social-login/internal/infrastructure/cache"
 	"github.com/djackcurry30/social-login/internal/infrastructure/persistence/postgres"
 	"github.com/djackcurry30/social-login/internal/infrastructure/providerguard"
-	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 	httpapi "github.com/djackcurry30/social-login/internal/interfaces/http"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 
 	// blank import 触发各渠道适配器的编译期注册（决策 D7）。
 	// 新增渠道时改这一行即可，装配代码与核心编排都不需要动。
 	_ "github.com/djackcurry30/social-login/internal/infrastructure/provider/adapters"
+	wechatadapter "github.com/djackcurry30/social-login/internal/infrastructure/provider/adapters/wechat"
 
 	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/embedweb"
-	adminhandler "github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	adminhttp "github.com/djackcurry30/social-login/internal/interfaces/http/admin"
+	adminhandler "github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 )
 
 // Version 由构建时通过 -ldflags 注入。
@@ -133,6 +134,14 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return nil, errs.Wrap(errs.CodeInternal, "连接 Redis 失败", err)
 	}
 	app.rdb = rdb
+
+	// 小程序会话密钥的跨请求共享。
+	//
+	// 必须在服务开始接流量之前注入：业务方常见接法是"先换登录态、再单独
+	// 上报加密手机号"，两次请求在负载均衡下可能落到不同实例，进程内缓存
+	// 会让第二次请求解不开（概率性失败，单实例本地复现不了）。
+	// 值走信封加密，与渠道凭据同一把 KEK：拿到 Redis 快照不等于拿到手机号。
+	wechatadapter.ConfigureSessionStore(cache.NewSessionKeyStore(rdb, keyManager), logger)
 
 	accounts, err := buildAccountProvider(cfg, logger)
 	if err != nil {

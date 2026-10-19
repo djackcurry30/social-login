@@ -321,17 +321,15 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 | 通知必须校验 `aud` | `apple.TestParseCallbackRejectsAudMismatch` |
 | 平台重投必须幂等 | `oauthnotify.TestIdempotentWhenAlreadyUnbound`、`TestIdentityNotFoundIsNotError` |
 
-### 10.4 尚未闭环的三处
+### 10.4 尚未闭环的两处
 
-1. **小程序 `session_key` 未落 Redis**：目前只在一次请求内从 `TokenSet` 传到 `UserInfo`。
-   如果手机号解密发生在后续独立请求里（业务方先拿 code 换登录态、再单独上报加密手机号），
-   就取不到 `session_key`。补法是给 `authflow` 增加一个按 `(app_id, open_id)` 索引的 Redis 缓存，
-   TTL 取微信返回值。
-2. **管理端观测页未展示熔断状态**：后端 `providers/health` 已返回
+> 原先的"小程序 `session_key` 未落 Redis"已在 §10.6 闭环。
+
+1. **管理端观测页未展示熔断状态**：后端 `providers/health` 已返回
    `circuit_state` / `recent_failure_ratio` / `recent_timeout_ratio`，
    且对"熔断器尚未惰性创建"的情况默认填 `closed`（`breaker.StateClosedName`），
    但前端观测看板仍只显示通/不通。
-3. **通知入口没有限流**：`/v1/oauth/notify/{platform}` 是公开端点，验签前会做一次 RSA 运算。
+2. **通知入口没有限流**：`/v1/oauth/notify/{platform}` 是公开端点，验签前会做一次 RSA 运算。
    当前靠 64 KiB body 上限与 `Timeout(15s)` 保护，缺少按 IP 的限流（限流中间件整体未实现，见 §6）。
 
 ### 10.5 顺带修复的第二个落库缺陷（联调时发现）
@@ -358,3 +356,72 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 
 后两处是同类潜在缺陷（平台什么都没返回时 Profile 为空、并非每条审计都有 detail），
 尚未被触发但一定会触发。
+
+---
+
+## 10.6 小程序 `session_key` 跨请求共享（R4 红线 1 的前提）
+
+### 10.6.1 问题
+
+`getPhoneNumber` 有两条路径，只有一条需要 `session_key`：
+
+| 路径 | 服务端依赖 | 跨请求是否可行 |
+| --- | --- | --- |
+| `phone_code` → `wxa/business/getuserphonenumber` | 仅 `access_token`（已有进程内缓存） | 天然可行，**与 `session_key` 无关** |
+| `encrypted_data` + `iv` → 本地 AES-128-CBC | `code2Session` 返回的 `session_key` | **不可行**，除非把密钥跨请求保存 |
+
+业务方常见的接法是"先拿 code 换登录态，再单独上报加密手机号"。第二次请求若被
+负载均衡打到另一个实例，原来的进程内实现就取不到密钥——表现为**概率性**解密失败，
+单实例本地永远复现不了，滚动发布、扩缩容、进程重启都会触发。
+
+### 10.6.2 方案
+
+| 项 | 决定 |
+| --- | --- |
+| 端口 | `internal/domain/sessionkey.Store`（`Put` / `Get` / `Delete`） |
+| 生产实现 | `internal/infrastructure/cache.SessionKeyStore`（Redis） |
+| 测试/单机实现 | `internal/domain/sessionkey.MemoryStore` |
+| 注入方式 | `bootstrap` 调 `wechat.ConfigureSessionStore(store, logger)`，**未注入时安静跳过** |
+| 键 | `mp:sk:{app_code}:{open_id}` |
+| 值 | `base64(KeyManager.Encrypt(session_key))` —— 与渠道凭据同一把 KEK |
+| TTL | `sessionkey.DefaultTTL`（2h）。微信不返回过期时间，取与登录态同量级 |
+| 丢弃 | 解密成功后立即 `Delete` |
+
+为什么适配器不直接连 Redis：适配器由 `init()` 在包加载时注册（决策 D7），那一刻
+配置与 Redis 都不存在，构造函数拿不到依赖。因此只声明端口，由 `bootstrap` 注入，
+与 `Registry.SetWrapper` 的处理方式一致。这样单测不必起 Redis，适配器也不绑定基础设施。
+
+### 10.6.3 只上 Redis 还不够的三处
+
+1. **读取时必须允许回退**：跨请求场景下，本次 `code2Session` 返回的是**新**密钥，
+   它解不开上一次的密文。所以要"先用本次密钥解，失败再回查共享存储"。
+   只把密钥存进 Redis、不做这一步，照样失败。
+2. **写入必须在响应返回之前**：否则客户端拿到登录态立刻发第二个请求，另一个实例
+   可能还读不到。这是纯粹的时序约定，Redis 本身不保证。
+3. **必须覆盖写，不能并存**：`session_key` 每次登录都会变。两份并存等于多留了一份
+   能解开历史密文的密钥，`Delete` 也就失去了意义。
+
+### 10.6.4 失败语义（R4 红线 1）
+
+`sessionkey.ErrNotFound` 表示"密钥不可用"，**不能**当成"用户没有手机号"。
+后者是正常业务结果，前者必须返回 `AUTH.INVALID_STATE` 并明确提示
+"重新调用 getPhoneNumber"，否则下游会拿一个未经校验的号码继续用，红线就被绕过了。
+
+同理，`Get` 在**密文解不开**（KEK 轮换、值被写坏）时也返回 `ErrNotFound` 而不是
+内部错误：正确处置是让该用户重新授权，不是让登录 500。
+
+### 10.6.5 测试
+
+| 用例 | 断言 |
+| --- | --- |
+| `wechat.TestCrossRequestUsesStoredSessionKey` | 本次密钥为空时回查存储成功，且解密后密钥被删除 |
+| `wechat.TestSessionKeyScopedPerApp` | 跨应用不复用（约束 C1），返回 `AUTH.INVALID_STATE` |
+| `wechat.TestMissingSessionKeyFailsLoudly` | 密钥缺失必须报错，不得静默返回空手机号 |
+| `wechat.TestSameRequestStillPreferred` | 同请求密钥优先于存储里的旧密钥 |
+| `wechat.TestNoStoreKeepsSameRequestWorking` | 未注入存储时同请求解密照常工作 |
+| `sessionkey.TestMemoryStore*` | 覆盖写、TTL 过期、跨应用隔离、重复删除幂等 |
+| `cache.TestSessionKeyStoreEncryptsAtRest` | Redis 里的值**不含**明文密钥 |
+| `cache.TestSessionKeyStoreWrongKEKIsNotFound` | KEK 轮换后按"不可用"处理，不报内部错误 |
+
+`cache` 包的 7 个用例是集成用例：默认连 `127.0.0.1:16379`（`docker-compose.yml` 里
+redis 的回环端口映射），连不上则 `t.Skip` 而不是假通过。
