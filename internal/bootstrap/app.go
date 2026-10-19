@@ -12,12 +12,15 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/application/token"
 	"github.com/djackcurry30/social-login/internal/domain/identitysource"
 	"github.com/djackcurry30/social-login/internal/domain/provider"
 	"github.com/djackcurry30/social-login/internal/infrastructure/cache"
 	"github.com/djackcurry30/social-login/internal/infrastructure/persistence/postgres"
+	"github.com/djackcurry30/social-login/internal/infrastructure/providerguard"
+	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 	httpapi "github.com/djackcurry30/social-login/internal/interfaces/http"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
@@ -165,6 +168,34 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	logger.Info("渠道适配器已注册",
 		zap.Int("count", len(sources.List())))
 
+	// 渠道熔断（架构 §5.6）：用装饰器包住所有出站调用。
+	//
+	// 装配在 Lookup 时生效，而不是改适配器的注册方式——这样"新增渠道 =
+	// 新增一个包 + 一行 import"（D7）保持不变，渠道实现完全不知道熔断的存在。
+	guard := breaker.New(breaker.Config{
+		Enabled:             cfg.ProviderGuard.CircuitBreaker.Enabled,
+		Granularity:         cfg.ProviderGuard.CircuitBreaker.Granularity,
+		WindowSeconds:       cfg.ProviderGuard.CircuitBreaker.WindowSeconds,
+		BucketSeconds:       cfg.ProviderGuard.CircuitBreaker.BucketSeconds,
+		MinRequests:         cfg.ProviderGuard.CircuitBreaker.MinRequests,
+		FailureRatio:        cfg.ProviderGuard.CircuitBreaker.FailureRatio,
+		TimeoutRatio:        cfg.ProviderGuard.CircuitBreaker.TimeoutRatio,
+		SlowRatio:           cfg.ProviderGuard.CircuitBreaker.SlowRatio,
+		SlowThreshold:       cfg.ProviderGuard.CircuitBreaker.SlowThreshold,
+		ConsecutiveTimeouts: cfg.ProviderGuard.CircuitBreaker.ConsecutiveTimeouts,
+		ConsecutiveFailures: cfg.ProviderGuard.CircuitBreaker.ConsecutiveFailures,
+		OpenDuration:        cfg.ProviderGuard.CircuitBreaker.OpenDuration,
+		HalfOpenRequests:    cfg.ProviderGuard.CircuitBreaker.HalfOpenRequests,
+	}, logger)
+	sources.SetWrapper(func(p provider.Provider) provider.Provider {
+		return providerguard.Wrap(p, guard)
+	})
+	logger.Info("渠道熔断已装配",
+		zap.Bool("enabled", guard.Enabled()),
+		zap.String("granularity", guard.Config().Granularity),
+		zap.Int("min_requests", guard.Config().MinRequests),
+		zap.Duration("open_duration", guard.Config().OpenDuration))
+
 	authflowSvc := authflow.New(authflow.Config{
 		CallbackBaseURL: cfg.Server.CallbackBaseURL,
 		ExchangeTimeout: cfg.Auth.ExchangeTimeout,
@@ -202,16 +233,47 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:   logger,
 	})
 
+	// 平台服务端通知（Apple 解约 / 支付宝异步通知）。
+	//
+	// 复用 authflow 的三个依赖（sources / identityRepo / bindingRepo）而不是
+	// 另建一套：通知要做的事是"按 openid 找到身份 → 解绑"，与授权链路
+	// 写的是同样两张表，必须走同一批仓储实例，否则事务边界与 GORM 的
+	// app_id 注入回调会出现不一致。
+	notifySvc := oauthnotify.New(oauthnotify.Deps{
+		Tenant:     tenantSvc,
+		Sources:    sources,
+		Identities: identityRepo,
+		Bindings:   bindingRepo,
+		Audit:      auditRepo,
+		Logger:     logger,
+	})
+
 	// --- 管理端 services（A 组 + B 组 + I 组 + LoginService）---
 	//
-	// 注意：adminapp.HashSecret 用 adminapp.defaultHashSecret 占位实现；
-	// 装配时不传 crypto.AppSecretHasher，等下一期 adminapp 改造后挂入。
+	// ⚠️ HashSecret 必须注入 crypto.AppSecretHasher。
+	//
+	// 早期版本这里传 nil，落到 adminapp.defaultHashSecret 的占位实现
+	// （`"placeholder:" + 明文`），造成两个后果：
+	//  1. 管理端创建的应用在业务端【永远验签失败】——业务端
+	//     middleware.AuthenticateApp 用 HMAC 比对，与 placeholder 前缀永不相等，
+	//     即前后台链路是断的；
+	//  2. app_secret 以明文形式落在 applications.app_secret_hash。
+	//
+	// 这里做的是"同一把哈希器"：管理端写入、业务端校验，必须共用同一个盐与算法，
+	// 否则写入与校验的对端永远对不上。
 	adminAppSvc := adminapp.New(adminapp.Deps{
-		TenantApps:  appRepo,
-		AdminAudit:  adminAuditRepo,
-		Logger:      logger,
-		ListAppIDs:  adminListAppIDs,
-		HashSecret:  nil, // 用 adminapp 默认实现
+		TenantApps: appRepo,
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+		ListAppIDs: adminListAppIDs,
+		HashSecret: func(plain string) (string, error) {
+			// AppSecretHasher.Hash 是纯函数（HMAC-SHA256 + 固定盐），不会失败；
+			// 适配成 error 返回只是为了保持 Deps 签名对测试友好。
+			if plain == "" {
+				return "", errs.New(errs.CodeInvalidRequest, "app_secret 不能为空")
+			}
+			return appSecretHasher.Hash(plain), nil
+		},
 	})
 
 	// adminchan 的 EncryptSecret 注入 keymanager。
@@ -230,8 +292,23 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	})
 
 	adminObsSvc := adminobs.New(adminobs.Deps{
-		// ProviderLister / OverviewGetter 不注入：用 adminobs 默认实现。
-		// 下一期 OverviewGetter 接 admin_app_repo + providerconfig_repo 后再补。
+		// 熔断状态与复位：直接接 guard，管理端看到的就是进程内的真实状态。
+		CircuitStates: guard.States,
+		ResetCircuit:  guard.Reset,
+		AdminAudit:    adminAuditRepo,
+		// 健康探测优先走适配器的 HealthChecker：它知道该平台真正的
+		// 健康端点（微信的稳定 token、Apple 的 JWKS），比通用 HTTP 猜测准确。
+		PingSource: func(ctx context.Context, platform, scene string) error {
+			src, err := sources.Lookup(platform, scene)
+			if err != nil {
+				return err
+			}
+			// Ping 是可选能力（identitysource.HealthChecker），不是 Source 的必选方法。
+			if hc, ok := src.(identitysource.HealthChecker); ok {
+				return hc.Ping(ctx)
+			}
+			return provider.NotSupported("health_check")
+		},
 		Logger: logger,
 	})
 
@@ -259,6 +336,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AuthFlow:     authflowSvc,
 		Tokens:       tokenSvc,
 		Bindings:     bindingSvc,
+		Notify:       notifySvc,
 		Signer:       signer,
 		SecretHasher: appSecretHasher,
 		Issuer:       cfg.Server.Issuer,

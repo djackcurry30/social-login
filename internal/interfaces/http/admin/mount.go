@@ -84,5 +84,11 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		api.GET("/providers", adminmw.Require("config:read"), obsH.ListProviders)
 		api.GET("/providers/health", adminmw.Require("config:read"), obsH.PingProviders)
 		api.GET("/health/overview", adminmw.Require("app:read"), obsH.Overview)
+		// 熔断复位（§5.6.9）。高危写操作：config:write + reason 必填 + 审计。
+		//
+		// 路径用 /providers/:platform/circuit-reset 而不是文档里的
+		// /providers/{platform}:circuit-reset：gin 的 :param 占满整段，
+		// 无法与后缀共用一段。项目内 secret:rotate 等也已统一为 /secret/rotate。
+		api.POST("/providers/:platform/circuit-reset", adminmw.Require("config:write"), obsH.ResetCircuit)
 	}
 }

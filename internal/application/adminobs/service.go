@@ -11,26 +11,39 @@ package adminobs
 import (
 	"context"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/djackcurry30/social-login/internal/domain/admin"
 	"github.com/djackcurry30/social-login/internal/domain/provider"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 	"github.com/djackcurry30/social-login/internal/pkg/httpx"
 )
 
 // ProviderHealth 是单渠道的健康结果。
 type ProviderHealth struct {
-	Platform  string        `json:"platform"`
-	Scene     string        `json:"scene"`
-	DisplayName string      `json:"display_name"`
-	APIVersion string        `json:"api_version"`
-	OK         bool          `json:"ok"`
-	LatencyMs  int64         `json:"latency_ms"`
-	Error      string        `json:"error,omitempty"`
-	// CircuitState / OpenedAt / RecentFailureRatio 留到 §5.6 第四期联动实现。
+	Platform    string `json:"platform"`
+	Scene       string `json:"scene"`
+	DisplayName string `json:"display_name"`
+	APIVersion  string `json:"api_version"`
+	OK          bool   `json:"ok"`
+	LatencyMs   int64  `json:"latency_ms"`
+	Error       string `json:"error,omitempty"`
+
+	// 熔断状态（架构 §5.6.9 的扩展要求）。
+	//
+	// 健康探测与熔断是两套机制：探测是主动的、仅用于展示；熔断是被动统计
+	// 真实业务调用。放在同一个响应里只是为了让运维一屏看到全貌，
+	// 绝不意味着探测结果参与熔断决策。
+	CircuitState       string     `json:"circuit_state,omitempty"`
+	CircuitOpenedAt    *time.Time `json:"circuit_opened_at,omitempty"`
+	RecentFailureRatio float64    `json:"recent_failure_ratio"`
+	RecentTimeoutRatio float64    `json:"recent_timeout_ratio"`
 }
 
 // Deps 是用例依赖。
@@ -38,11 +51,21 @@ type Deps struct {
 	// Provider 列表用 provider.Global() 拿，但允许测试注入。
 	ProviderLister func() []provider.Metadata
 	// PingHTTP 是单渠道 ping 的 HTTP 入口。
-	// 默认实现 ping token_url 的 client_credentials（同 adminchan.VerifyHTTPDefault）。
 	PingHTTP func(ctx context.Context, p provider.Metadata) (latency time.Duration, err error)
+	// PingSource 走适配器自己的 HealthChecker（推荐）。
+	//
+	// 与 PingHTTP 的分工：PingSource 知道该平台的真实健康端点与协议
+	// （微信的稳定 token、Apple 的 JWKS 端点），而通用 PingHTTP 只能猜。
+	PingSource func(ctx context.Context, platform, scene string) error
 	// Overview 摘要是简单的"渠道数 + 注册应用数"，由调用方注入。
 	OverviewGetter func(ctx context.Context) (OverviewStats, error)
-	Logger         *zap.Logger
+	// CircuitStates 返回熔断器快照（nil 表示未启用熔断）。
+	CircuitStates func() []breaker.State
+	// ResetCircuit 手工复位某个平台的熔断器。
+	ResetCircuit func(platform string) bool
+	// AdminAudit 写管理审计（circuit-reset 是写操作，必须留痕）。
+	AdminAudit admin.AuditWriter
+	Logger     *zap.Logger
 }
 
 // Service 是 I 组用例入口。
@@ -93,6 +116,10 @@ func (s *Service) PingProviders(ctx context.Context) (*HealthResult, error) {
 	if ping == nil {
 		ping = defaultPingHTTP()
 	}
+	// 优先走适配器自己的 HealthChecker：它知道该平台真正的健康端点。
+	// PingHTTP 只作为兜底（配置驱动的通用渠道没有固定端点可探测）。
+	pingSource := s.deps.PingSource
+
 	var (
 		mu sync.Mutex
 		wg sync.WaitGroup
@@ -104,7 +131,16 @@ func (s *Service) PingProviders(ctx context.Context) (*HealthResult, error) {
 			defer wg.Done()
 			pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			lat, err := ping(pingCtx, p)
+
+			started := time.Now()
+			var err error
+			if pingSource != nil {
+				err = pingSource(pingCtx, p.Platform, p.Scene)
+			} else {
+				_, err = ping(pingCtx, p)
+			}
+			lat := time.Since(started)
+
 			item := ProviderHealth{
 				Platform:    p.Platform,
 				Scene:       p.Scene,
@@ -116,6 +152,28 @@ func (s *Service) PingProviders(ctx context.Context) (*HealthResult, error) {
 			if err != nil {
 				item.Error = err.Error()
 			}
+			// 熔断器是【首次调用时惰性创建】的（架构 D7：注册在 init，建表在运行期），
+			// 因此服务刚启动、还没任何业务流量时，States() 返回空列表。
+			// 这时如果直接照抄空结果，运维会看到"熔断状态字段缺失"，误以为没装配。
+			// 正确的默认值是 closed：没有失败记录，等价于闭合。
+			if states := s.circuitStates(); states != nil {
+				item.CircuitState = breaker.StateClosedName
+				for _, cs := range states {
+					if cs.Platform != p.Platform {
+						continue
+					}
+					// 按场景粒度时只取同场景的那条；平台粒度时 Scene 为空。
+					if cs.Scene != "" && cs.Scene != p.Scene {
+						continue
+					}
+					item.CircuitState = cs.CircuitState
+					item.CircuitOpenedAt = cs.OpenedAt
+					item.RecentFailureRatio = cs.FailureRatio
+					item.RecentTimeoutRatio = cs.TimeoutRatio
+					break
+				}
+			}
+
 			mu.Lock()
 			out.Items = append(out.Items, item)
 			mu.Unlock()
@@ -172,8 +230,93 @@ func (s *Service) Overview(ctx context.Context) (OverviewStats, error) {
 	return stats, nil
 }
 
-// defaultPingHTTP 是默认的渠道 ping：调一次 token_url 的 client_credentials。
+// ResetCircuitInput 是 POST /admin/v1/providers/{platform}:circuit-reset 的入参。
+type ResetCircuitInput struct {
+	Platform  string
+	Reason    string
+	Principal *admin.Principal
+	ClientIP  string
+}
+
+// ResetCircuit 手工复位熔断器（架构 §5.6.9）。
 //
+// 适用场景是【误熔断】：比如我们自己的凭据配错了，导致连续失败被判定为
+// 平台故障。修好配置后不必等 open_seconds 自然过期。
+//
+// 复位会同时清空统计窗口——只替换状态机而保留窗口的话，复位后窗口里的
+// 旧失败会立刻把它重新熔断，"复位"就成了摆设。
+func (s *Service) ResetCircuit(ctx context.Context, in ResetCircuitInput) error {
+	if strings.TrimSpace(in.Platform) == "" {
+		return errs.New(errs.CodeInvalidRequest, "缺少 platform").
+			WithDetail("field", "platform")
+	}
+	// 与其它高危写操作一致：reason ≥ 4 字符，否则审计里只是一句空话。
+	reason := strings.TrimSpace(in.Reason)
+	if len(reason) < 4 {
+		return errs.New(errs.CodeAdminReasonRequired, "高危操作必须填写 reason（至少 4 个字符）").
+			WithDetail("field", "reason")
+	}
+	if s.deps.ResetCircuit == nil {
+		return errs.New(errs.CodeProviderNotSupported, "熔断器未启用（provider_guard.circuit_breaker.enabled=false）")
+	}
+
+	before := s.circuitStateOf(in.Platform)
+	if !s.deps.ResetCircuit(in.Platform) {
+		// 从未被调用过的渠道没有熔断器实例。这不是错误，但也没有可复位的东西，
+		// 需要明确告知，否则运维会以为"点了没反应"。
+		return errs.Newf(errs.CodeProviderNotFound,
+			"渠道 %s 尚未建立熔断器（可能是从未被调用过），无需复位", in.Platform).
+			WithDetail("platform", in.Platform)
+	}
+
+	if s.deps.AdminAudit != nil {
+		ev := &admin.AuditEvent{
+			Action:     "provider.circuit.reset",
+			TargetType: "provider",
+			TargetID:   in.Platform,
+			Reason:     reason,
+			BeforeState: map[string]any{
+				"circuit_state": before,
+			},
+			AfterState: map[string]any{
+				"circuit_state": "closed",
+			},
+			Result:   "success",
+			ClientIP: in.ClientIP,
+		}
+		if in.Principal != nil && in.Principal.User != nil {
+			ev.SubjectID = "admin:" + strconv.FormatInt(in.Principal.User.ID, 10)
+		} else {
+			ev.SubjectID = "admin:anonymous"
+		}
+		if err := s.deps.AdminAudit.Write(ctx, ev); err != nil && s.deps.Logger != nil {
+			// 审计是旁路：写失败不阻断操作，但必须留日志。
+			s.deps.Logger.Error("写管理审计失败", zap.String("action", ev.Action), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// CircuitStates 返回全部熔断器快照（供 /providers/health 与管理端展示）。
+func (s *Service) CircuitStates() []breaker.State { return s.circuitStates() }
+
+func (s *Service) circuitStates() []breaker.State {
+	if s.deps.CircuitStates == nil {
+		return nil
+	}
+	return s.deps.CircuitStates()
+}
+
+func (s *Service) circuitStateOf(platform string) string {
+	for _, cs := range s.circuitStates() {
+		if cs.Platform == platform {
+			return cs.CircuitState
+		}
+	}
+	return "unknown"
+}
+
+// defaultPingHTTP 是默认的渠道 ping：调一次 token_url 的 client_credentials。//
 // 这里不解析 access_token——只看 HTTP 200/401/4xx/5xx 区分"通了但凭据错"和"根本没通"。
 func defaultPingHTTP() func(ctx context.Context, p provider.Metadata) (time.Duration, error) {
 	c := httpx.New(httpx.Config{

@@ -53,7 +53,8 @@ func (r *IdentityRepository) Upsert(ctx context.Context, in identity.UpsertInput
 		OpenID:          in.OpenID,
 		UnionID:         in.UnionID,
 		IdentityKey:     in.IdentityKey,
-		ProfileSnapshot: JSONMap(in.Profile),
+		// NOT NULL 列：平台什么都没返回时 Profile 为空，不能写 NULL。
+		ProfileSnapshot: jsonNotNull(in.Profile),
 		ProfileSyncedAt: &at,
 		FirstSeenAt:     at,
 		LastLoginAt:     &at,

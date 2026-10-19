@@ -9,6 +9,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/application/token"
 	"github.com/djackcurry30/social-login/internal/infrastructure/crypto"
@@ -21,9 +22,12 @@ type Deps struct {
 	AuthFlow *authflow.Service
 	Tokens   *token.Service
 	Bindings *binding.Service
-	Signer   *jwtkit.Signer
+	// Notify 处理平台服务端通知（Apple 解约 / 支付宝异步通知）。
+	Notify *oauthnotify.Service
+	Signer *jwtkit.Signer
 	// SecretHasher 用于校验 /v1/token 请求体里携带的 client_secret
-	// （该接口不挂 AppAuth 中间件，见 token.go 的说明）。
+	// （该接口不挂 AppAuth 中间件，见 token.go 的说明），
+	// 以及 AppAuth 中间件校验应用凭据。
 	SecretHasher *crypto.AppSecretHasher
 	// Issuer 是 OIDC Discovery 中对外声明的 issuer。
 	Issuer string

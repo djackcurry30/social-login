@@ -82,6 +82,16 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	r.GET("/v1/authorize", middleware.Timeout(TimeoutAuth), h.Authorize)
 	r.GET("/v1/oauth/callback/:platform", middleware.Timeout(TimeoutAuth), h.Callback)
 
+	// /v1/oauth/notify/:platform 是【平台服务端的通知入口】（S2S）：
+	// Apple 的 consent-revoked / account-delete、支付宝的异步通知都打这里。
+	//
+	// 与 callback 的区别是信任基础——通知没有 state 票据，也不带 app_id，
+	// 唯一凭证是报文签名。因此：
+	//   - 必须允许 POST（Apple 用 POST，且默认 application/x-www-form-urlencoded）；
+	//   - 不挂 AppAuth / UserAuth：调用方是平台的服务器，不是我们的业务方或用户；
+	//   - app_id / scene 由平台侧注册的通知地址携带，用于定位渠道凭据做验签。
+	r.POST("/v1/oauth/notify/:platform", middleware.Timeout(TimeoutNormal), h.Notify)
+
 	// JWKS 与 discovery 是公开的：公钥本来就是要给业务方用的。
 	r.GET("/v1/jwks", h.JWKS)
 	r.GET("/.well-known/openid-configuration", h.Discovery)

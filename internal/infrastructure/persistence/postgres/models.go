@@ -30,6 +30,28 @@ func (m JSONMap) Value() (driver.Value, error) {
 	return json.Marshal(m)
 }
 
+// jsonNotNull 把可能为 nil 的 map 转成可直接写 NOT NULL jsonb 列的 JSONMap。
+//
+// 为什么需要它：JSONMap.Value() 对 nil 返回 SQL NULL（这是可空列
+// before_state / after_state 需要的语义——NULL 表示"没记录快照"），
+// 但 NOT NULL 的 jsonb 列（applications.policy / app_provider_configs.extra /
+// oauth_identities.profile_snapshot / 审计 detail）收到 NULL 会直接触发
+//
+//	ERROR: null value in column "extra" violates not-null constraint (23502)
+//
+// 这类错误只会在"某个调用方恰好没填 extra"时出现，靠 review 很难发现，
+// 因此把判定收到一个函数里：写 NOT NULL 列一律走它。
+func jsonNotNull(m map[string]any) JSONMap {
+	if len(m) == 0 {
+		return JSONMap{}
+	}
+	out := make(JSONMap, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // Scan 实现 sql.Scanner。
 func (m *JSONMap) Scan(src any) error {
 	if src == nil {

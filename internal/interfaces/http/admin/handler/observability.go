@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/adminmw"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
 )
 
@@ -67,4 +68,36 @@ func (h *ObservabilityHandler) Overview(c *gin.Context) {
 		return
 	}
 	httputil.OK(c, http.StatusOK, out)
+}
+
+// resetCircuitRequest 是 circuit-reset 的请求体。
+type resetCircuitRequest struct {
+	// Reason 必填：熔断复位会立刻恢复对该平台的流量，
+	// 若平台实际仍在故障中，这是一次有风险的操作，必须留下动机。
+	Reason string `json:"reason" binding:"required"`
+}
+
+// ResetCircuit POST /admin/v1/providers/:platform/circuit-reset
+//
+// 架构 §15.4 I 组。属于高危写操作：需要 config:write 权限、reason 必填、写管理审计。
+func (h *ObservabilityHandler) ResetCircuit(c *gin.Context) {
+	var req resetCircuitRequest
+	if !httputil.BindJSON(c, &req, h.logger) {
+		return
+	}
+	err := h.svc.ResetCircuit(c.Request.Context(), adminobs.ResetCircuitInput{
+		Platform:  c.Param("platform"),
+		Reason:    req.Reason,
+		Principal: adminmw.Principal(c),
+		ClientIP:  c.ClientIP(),
+	})
+	if err != nil {
+		httputil.Fail(c, h.logger, err)
+		return
+	}
+	httputil.OK(c, http.StatusOK, gin.H{
+		"platform":      c.Param("platform"),
+		"circuit_state": "closed",
+		"reset":         true,
+	})
 }

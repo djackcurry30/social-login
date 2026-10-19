@@ -317,6 +317,37 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (*CallbackOutp
 	return failed, nil
 }
 
+// exchangeExtraKeys 是允许透传给适配器的平台私有回调参数白名单。
+//
+// 为什么不把整个 Query 塞进 Extra：
+//  1. 回调里还有 state / code 等敏感值，适配器不需要、也不该看到；
+//  2. 白名单让"谁能读到什么"是显式的，新增平台时需要主动登记，
+//     而不是被动接收一切（那种设计迟早会把某平台的 token 带进另一平台的日志）。
+var exchangeExtraKeys = []string{
+	// 微信小程序 getPhoneNumber：旧版加密数据 + 新版一次性 code
+	"encrypted_data", "iv", "phone_code",
+	// Apple / OIDC：id_token 与首次授权才返回的 user（含 name / email）
+	"id_token", "user",
+	// 公众号网页授权可能回传的 scope
+	"scope",
+}
+
+func exchangeExtras(q url.Values) map[string]string {
+	if len(q) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(exchangeExtraKeys))
+	for _, k := range exchangeExtraKeys {
+		if v := q.Get(k); v != "" {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (s *Service) handleCallback(ctx context.Context, tc *ticket.Context, in CallbackInput) (*CallbackOutput, error) {
 	meta := reqmeta.From(ctx)
 	started := time.Now()
@@ -373,7 +404,8 @@ func (s *Service) handleCallback(ctx context.Context, tc *ticket.Context, in Cal
 		State:        tc.State,
 		RedirectURI:  s.callbackURL(tc.Platform),
 		CodeVerifier: tc.CodeChallenge, // PKCE 的 verifier 由接入层在回调入参中带上
-		Extra:        nil,
+		Nonce:        tc.Nonce,
+		Extra:        exchangeExtras(in.Query),
 	})
 	if err != nil {
 		s.auditLogin(ctx, app.ID, 0, "", tc, audit.ResultFailure, errs.CodeOf(err), meta, started)

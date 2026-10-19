@@ -25,6 +25,8 @@ type Config struct {
 	Auth     AuthConfig     `mapstructure:"auth"`
 	Log      LogConfig      `mapstructure:"log"`
 	Migrate  MigrateConfig  `mapstructure:"migrate"`
+	// ProviderGuard 是渠道熔断配置（服务级，不能下放到应用）。
+	ProviderGuard ProviderGuardConfig `mapstructure:"provider_guard"`
 }
 
 // ServerConfig 是 HTTP 服务配置。
@@ -139,6 +141,35 @@ type MigrateConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 }
 
+// ProviderGuardConfig 是渠道熔断配置（架构 §5.6.5）。
+//
+// 为什么是【服务级】而不是 applications.policy：
+// 熔断保护的是所有应用共享的连接池与 goroutine，平台故障也是全局的。
+// 一旦允许按应用配置，就会出现"App1 关了熔断、消耗的是两个应用共享的资源"，
+// 等于一个应用可以替所有应用关掉保护。
+type ProviderGuardConfig struct {
+	CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
+}
+
+// CircuitBreakerConfig 对应 §5.6.5 的 YAML。
+type CircuitBreakerConfig struct {
+	Enabled     bool   `mapstructure:"enabled"`
+	Granularity string `mapstructure:"granularity"` // platform | platform_scene
+	WindowSeconds int  `mapstructure:"window_seconds"`
+	BucketSeconds int  `mapstructure:"bucket_seconds"`
+	MinRequests   int  `mapstructure:"min_requests"`
+
+	FailureRatio        float64       `mapstructure:"failure_ratio"`
+	TimeoutRatio        float64       `mapstructure:"timeout_ratio"`
+	SlowRatio           float64       `mapstructure:"slow_ratio"`
+	SlowThreshold       time.Duration `mapstructure:"slow_threshold"`
+	ConsecutiveTimeouts int           `mapstructure:"consecutive_timeouts"`
+	ConsecutiveFailures int           `mapstructure:"consecutive_failures"`
+
+	OpenDuration     time.Duration `mapstructure:"open_seconds"`
+	HalfOpenRequests uint32        `mapstructure:"half_open_requests"`
+}
+
 // Load 读取配置：默认值 → 配置文件 → 环境变量（SOCIAL_LOGIN_ 前缀，下划线分层）。
 func Load(path string) (*Config, error) {
 	v := viper.New()
@@ -205,6 +236,21 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log.max_age_days", 30)
 
 	v.SetDefault("migrate.enabled", true)
+
+	// 渠道熔断默认值：与架构 §5.6.5 完全一致。
+	v.SetDefault("provider_guard.circuit_breaker.enabled", true)
+	v.SetDefault("provider_guard.circuit_breaker.granularity", "platform")
+	v.SetDefault("provider_guard.circuit_breaker.window_seconds", 60)
+	v.SetDefault("provider_guard.circuit_breaker.bucket_seconds", 10)
+	v.SetDefault("provider_guard.circuit_breaker.min_requests", 20)
+	v.SetDefault("provider_guard.circuit_breaker.failure_ratio", 0.5)
+	v.SetDefault("provider_guard.circuit_breaker.timeout_ratio", 0.3)
+	v.SetDefault("provider_guard.circuit_breaker.slow_ratio", 0.5)
+	v.SetDefault("provider_guard.circuit_breaker.slow_threshold", "2s")
+	v.SetDefault("provider_guard.circuit_breaker.consecutive_timeouts", 5)
+	v.SetDefault("provider_guard.circuit_breaker.consecutive_failures", 10)
+	v.SetDefault("provider_guard.circuit_breaker.open_seconds", "30s")
+	v.SetDefault("provider_guard.circuit_breaker.half_open_requests", 3)
 }
 
 // normalizeAndValidate 做归一化与启动期校验。

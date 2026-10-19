@@ -474,16 +474,17 @@ func generateAppSecret() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// defaultHashSecret 是本期占位：把 app_secret 当密码用 bcrypt 哈希。
+// defaultHashSecret 是【故意失败】的兜底实现。
 //
-// TODO(下一期): 把 app_secret 改回 SHA-256 + 全局 salt（与业务端一致），
-// 把业务端的 appsecret.Hasher 抽出到 infrastructure/crypto，
-// 让 adminapp 与 authflow 复用同一个哈希器。
-func defaultHashSecret(plain string) (string, error) {
-	// 退化为对 hex(64) 做明文 base64——开发期足够，生产必须改。
-	// 真实场景会改：见上 TODO。
-	if len(plain) < 16 {
-		return "", errs.New(errs.CodeInvalidRequest, "secret 长度过短")
-	}
-	return "placeholder:" + plain, nil
+// 历史上这里是 `return "placeholder:" + plain`，把明文直接拼在哈希位，
+// 造成两个后果（已于 2026-10-19 修复）：
+//  1. 管理端建的应用在业务端验签永远失败（HMAC 结果与 placeholder 前缀不等）；
+//  2. app_secret 明文落库。
+//
+// 现在改为显式报错，而不是悄悄退化成可用但错误的实现：
+// 一个"能跑但前后台对不上"的默认值，比直接失败危险得多——它会让问题
+// 推迟到联调甚至上线后才暴露。调用方必须在 Deps 里注入 crypto.AppSecretHasher。
+func defaultHashSecret(_ string) (string, error) {
+	return "", errs.New(errs.CodeInternal,
+		"adminapp 未注入 HashSecret：必须传入 crypto.AppSecretHasher，否则管理端写入的 app_secret 无法被业务端校验")
 }

@@ -175,6 +175,11 @@ type ExchangeRequest struct {
 	RedirectURI string
 	// CodeVerifier 是 PKCE 的 verifier。
 	CodeVerifier string
+	// Nonce 是授权发起时生成的一次性随机串（当前仅 Apple 使用）。
+	//
+	// 必须在这里回传而不是只留在票据里：id_token 里的 nonce 声明要与之比对，
+	// 这是防重放的唯一手段——没有它，被截获的 id_token 可以无限次重放登录。
+	Nonce string
 	// Extra 承载平台私有入参（如支付宝的 auth_code、Apple 的 code + id_token）。
 	Extra map[string]string
 }
@@ -195,6 +200,13 @@ type UserInfoRequest struct {
 	ConfigKey string
 	Creds     Credentials
 	Token     *TokenSet
+	// Extra 与 ExchangeRequest.Extra 同源，承载平台私有入参。
+	//
+	// 为什么必须补这一项：微信小程序的手机号需要 phone_code / encrypted_data+iv，
+	// 它们是【回调入参】而不是 Exchange 的产出。若只让 Exchange 看到它们，
+	// UserInfo 就得从 TokenSet.Raw 里捞——那等于把入参伪装成平台返回，
+	// 排障时分不清某个键是谁写的。
+	Extra map[string]string
 }
 
 // RefreshRequest 是刷新三方令牌的入参。
@@ -228,6 +240,13 @@ type CallbackPayload struct {
 	Query    url.Values
 	Body     []byte
 	Header   http.Header
+	// Audience 是"本报文应当属于哪个客户端"，由调用方从渠道配置填入
+	// （ProviderAppID）。适配器在验签时必须校验报文的 aud 与它一致。
+	//
+	// 为什么必须传而不是让适配器自己查：通知报文本身不含 app_id，
+	// 适配器无法知道该跟哪个 client_id 比对；而若不比对，任何人都能把
+	// 别家 App 的通知转发到我们的端点。
+	Audience string
 }
 
 // TokenSet 是三方令牌集合。除标准 OAuth2 字段外，必须能承载平台私有会话态。

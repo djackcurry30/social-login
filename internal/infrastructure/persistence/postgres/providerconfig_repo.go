@@ -125,7 +125,8 @@ func (r *ProviderConfigRepository) Upsert(ctx context.Context, cfg *tenant.Provi
 		SecretRotatedAt:  cfg.SecretRotatedAt,
 		SecretDEKID:      cfg.SecretDEKID,
 		Env:              cfg.Env,
-		Extra:            cfg.Extra,
+		// NOT NULL 列：管理员建渠道时通常不填 extra，nil 会触发 23502。
+		Extra:            jsonNotNull(cfg.Extra),
 		Version:          1,
 		Status:           1,
 		CreatedAt:        now,

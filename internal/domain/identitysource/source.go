@@ -57,6 +57,22 @@ type CallbackVerifier interface {
 	VerifyCallback(ctx context.Context, raw *provider.CallbackPayload) error
 }
 
+// CallbackParser 由能解析服务端通知的来源实现（Apple / 支付宝）。
+type CallbackParser interface {
+	ParseCallback(ctx context.Context, raw *provider.CallbackPayload) (*provider.CallbackEvent, error)
+}
+
+// CallbackCapability 报告来源是否【真的】具备验签与解析能力。
+//
+// 为什么需要它：VerifyCallback 对"无需验签"返回 nil，对"未实现"也返回 nil。
+// 在授权回调（/v1/oauth/callback）里这是合理的宽容，但在服务端通知
+// （/v1/oauth/notify）里是致命的——通知入口没有 state 票据兜底，验签是唯一
+// 信任基础，必须显式确认能力存在，不能靠 nil 推断。
+type CallbackCapability interface {
+	SupportsCallbackVerify() bool
+	SupportsCallbackParse() bool
+}
+
 // HealthChecker 由支持健康探测的来源实现（可选）。
 //
 // 仅用于管理台展示与告警，【不参与熔断决策】（架构 §5.6.6）。
@@ -67,6 +83,13 @@ type HealthChecker interface {
 // Registry 是编排层看到的路由表。
 type Registry struct {
 	inner *provider.Registry
+	// wrap 是可选的渠道装饰器（当前用于套熔断器）。
+	//
+	// 放在查找时应用而不是注册时：注册发生在各适配器的 init()，
+	// 那时配置与 logger 都还不存在；而 Lookup 发生在请求路径上，
+	// 依赖已经装配完毕。这个时机差是"编译期注册、运行期查找"（D7）
+	// 必然带来的，绕开它反而要改注册模型。
+	wrap func(provider.Provider) provider.Provider
 }
 
 // NewRegistry 包装一个渠道注册表。
@@ -79,11 +102,19 @@ func GlobalRegistry() *Registry {
 	return &Registry{inner: provider.Global()}
 }
 
+// SetWrapper 设置渠道装饰器。必须在服务开始处理请求前调用。
+func (r *Registry) SetWrapper(w func(provider.Provider) provider.Provider) {
+	r.wrap = w
+}
+
 // Lookup 按 (平台, 场景) 查找身份来源。
 func (r *Registry) Lookup(platform, scene string) (Source, error) {
 	p, err := r.inner.Lookup(platform, scene)
 	if err != nil {
 		return nil, err
+	}
+	if r.wrap != nil {
+		p = r.wrap(p)
 	}
 	return NewProviderSource(p), nil
 }

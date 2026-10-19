@@ -55,7 +55,8 @@ func (r *AuditRepository) Write(ctx context.Context, e *audit.Event) error {
 		ErrorCode:      e.ErrorCode,
 		UserAgent:      e.UserAgent,
 		TraceID:        e.TraceID,
-		Detail:         JSONMap(e.Detail),
+		// NOT NULL 列：不是每条审计都有 detail。
+		Detail:         jsonNotNull(e.Detail),
 		CreatedAt:      at,
 	}
 	if e.ClientIP != "" {
