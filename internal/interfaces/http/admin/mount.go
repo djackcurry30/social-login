@@ -65,6 +65,9 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		api.GET("/apps/:appId/policy", adminmw.Require("app:read"), appH.GetPolicy)
 		api.PUT("/apps/:appId/policy", adminmw.Require("app:write"), appH.SavePolicy)
 		api.POST("/apps/:appId/policy/validate", adminmw.Require("app:read"), appH.ValidatePolicy)
+		// A 组补充：事件投递目标（§5.4）。webhook 密钥是明文可解的密钥材料，
+		// 与 name/status 的敏感级别不同，因此单独端点。
+		api.PUT("/apps/:appId/webhook", adminmw.Require("app:write"), appH.UpdateWebhook)
 
 		// B 组：渠道配置
 		chanH := handler.NewProviderConfigsHandler(deps.AdminChan, deps.Logger)
@@ -90,5 +93,17 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		// /providers/{platform}:circuit-reset：gin 的 :param 占满整段，
 		// 无法与后缀共用一段。项目内 secret:rotate 等也已统一为 /secret/rotate。
 		api.POST("/providers/:platform/circuit-reset", adminmw.Require("config:write"), obsH.ResetCircuit)
+
+		// G 组：事件与死信（§15.4）
+		//
+		// 只读与重投分开授权：读是 viewer 也有的能力，
+		// 重投/丢弃会改变外发事实，必须 event:write。
+		if deps.AdminEvent != nil {
+			evH := handler.NewEventsHandler(deps.AdminEvent, deps.Logger)
+			api.GET("/events/outbox", adminmw.Require("event:read"), evH.List)
+			api.GET("/events/outbox/:id", adminmw.Require("event:read"), evH.Get)
+			api.POST("/events/outbox/:id/retry", adminmw.Require("event:write"), evH.Retry)
+			api.POST("/events/outbox/:id/discard", adminmw.Require("event:write"), evH.Discard)
+		}
 	}
 }

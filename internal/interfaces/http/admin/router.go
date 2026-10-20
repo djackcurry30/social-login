@@ -24,6 +24,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/adminmw"
@@ -38,6 +39,9 @@ type Deps struct {
 	AdminApp     *adminapp.Service
 	AdminChan    *adminchan.Service
 	AdminObs     *adminobs.Service
+	// AdminEvent 是 G 组（事件与死信）用例。为 nil 时不注册该组路由，
+	// 便于只关心 A/B 组的测试。
+	AdminEvent *adminevent.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。

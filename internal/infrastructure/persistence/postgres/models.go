@@ -199,6 +199,27 @@ type auditLogModel struct {
 
 func (auditLogModel) TableName() string { return "auth_audit_logs" }
 
+// eventOutboxModel 是 Webhook 事件的 Transactional Outbox 表。
+//
+// payload 用 JSONMap 而不是 []byte：事件体是业务方直接消费的 JSON，
+// 用 map 便于管理端详情页原样展示，也避免"二次编码成字符串"的坑。
+type eventOutboxModel struct {
+	ID            int64      `gorm:"column:id;primaryKey"`
+	AppID         int64      `gorm:"column:app_id"`
+	EventID       string     `gorm:"column:event_id"`
+	EventType     string     `gorm:"column:event_type"`
+	SchemaVersion int        `gorm:"column:schema_version"`
+	Payload       JSONMap    `gorm:"column:payload;type:jsonb"`
+	Status        string     `gorm:"column:status"`
+	Attempts      int        `gorm:"column:attempts"`
+	NextRetryAt   *time.Time `gorm:"column:next_retry_at"`
+	LastError     *string    `gorm:"column:last_error"`
+	CreatedAt     time.Time  `gorm:"column:created_at"`
+	SentAt        *time.Time `gorm:"column:sent_at"`
+}
+
+func (eventOutboxModel) TableName() string { return "event_outbox" }
+
 type adminGrantModel struct {
 	ID         int64      `gorm:"column:id;primaryKey"`
 	SubjectID  string     `gorm:"column:subject_id"`

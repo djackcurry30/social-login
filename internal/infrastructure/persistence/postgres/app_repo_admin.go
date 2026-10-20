@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/djackcurry30/social-login/internal/domain/tenant"
 	"github.com/djackcurry30/social-login/internal/pkg/appctx"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
@@ -89,3 +91,67 @@ func (r *AppRepository) ListIDs(ctx context.Context, limit int) ([]int64, error)
 // 抑制 "imported and not used"——errors 在某些构建配置下被引用。
 var _ = errors.New
 var _ = fmt.Sprintf
+
+// WebhookConfig 读取应用的事件投递配置（管理端与 worker 共用）。
+//
+// 返回的 secretEnc 是【密文】，解密由投递器侧用 KeyManager 完成：
+// 仓储不持有密钥材料，避免"能读库的组件也能拿到明文签名密钥"。
+func (r *AppRepository) WebhookConfig(ctx context.Context, appID int64) (appCode, url string, secretEnc []byte, kid string, err error) {
+	if appID <= 0 {
+		return "", "", nil, "", errs.New(errs.CodeInvalidRequest, "app_id 不合法")
+	}
+	ctx = appctx.WithCrossAppScope(ctx)
+	var row struct {
+		AppCode    string
+		WebhookURL *string
+		SecretEnc  []byte
+		SecretKid  *string
+	}
+	res := r.db.WithContext(ctx).Model(&applicationModel{}).
+		Select("app_code, webhook_url, webhook_secret_enc, webhook_secret_kid").
+		Where("id = ?", appID).
+		Take(&row)
+	if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+		return "", "", nil, "", tenant.ErrNotFound
+	}
+	if res.Error != nil {
+		return "", "", nil, "", errs.Wrap(errs.CodeInternal, "读取应用投递配置失败", res.Error)
+	}
+	if row.WebhookURL != nil {
+		url = *row.WebhookURL
+	}
+	if row.SecretKid != nil {
+		kid = *row.SecretKid
+	}
+	return row.AppCode, url, row.SecretEnc, kid, nil
+}
+
+// SetWebhook 保存事件投递配置。
+//
+// url 为空表示"关闭外发"：此后该应用的事件在 outbox 里会被标记为 skipped，
+// 而不是伪装成 sent。secretEnc 为 nil 时保留原密钥（只改地址的场景不必重传密钥）。
+func (r *AppRepository) SetWebhook(ctx context.Context, appID int64, url string, secretEnc []byte, kid string) error {
+	if appID <= 0 {
+		return errs.New(errs.CodeInvalidRequest, "app_id 不合法")
+	}
+	ctx = appctx.WithCrossAppScope(ctx)
+
+	updates := map[string]any{
+		"webhook_url": url,
+		"updated_at":  time.Now().UTC(),
+	}
+	if len(secretEnc) > 0 {
+		updates["webhook_secret_enc"] = secretEnc
+		updates["webhook_secret_kid"] = kid
+	}
+	res := r.db.WithContext(ctx).Model(&applicationModel{}).
+		Where("id = ?", appID).
+		Updates(updates)
+	if res.Error != nil {
+		return errs.Wrap(errs.CodeInternal, "保存投递配置失败", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return tenant.ErrNotFound
+	}
+	return nil
+}

@@ -114,6 +114,18 @@ var defaults = map[Code]meta{
 	CodeAccountUnavailable:  {http.StatusServiceUnavailable, true},
 	CodeAccountNotFound:     {http.StatusNotFound, false},
 	CodeAccountNotSupported: {http.StatusNotImplemented, false},
+
+	// 管理端错误码。
+	//
+	// 这一段此前【遗漏】：defaults 里没有 ADMIN.* 时，Status 取零值，
+	// httputil.Fail 会把它们统一折算成 500。表现是"管理员少填一个 reason
+	// 却收到 500 INTERNAL"，前端无法把它当成表单校验错误展示——
+	// 而 reason 缺失本就是 4xx 的输入问题。
+	CodeAdminSessionExpired: {http.StatusUnauthorized, false},
+	CodeAdminSessionRevoked: {http.StatusUnauthorized, false},
+	CodeAdminReasonRequired: {http.StatusBadRequest, false},
+	CodeAdminVerifyFailed:   {http.StatusBadRequest, false},
+	CodeAdminConflict:       {http.StatusConflict, false},
 }
 
 // Error 是本服务统一的错误类型。所有跨越层边界的错误都应归一化为它。

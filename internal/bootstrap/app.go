@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -20,6 +21,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/infrastructure/cache"
 	"github.com/djackcurry30/social-login/internal/infrastructure/persistence/postgres"
 	"github.com/djackcurry30/social-login/internal/infrastructure/providerguard"
+	"github.com/djackcurry30/social-login/internal/infrastructure/webhook"
 	httpapi "github.com/djackcurry30/social-login/internal/interfaces/http"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
@@ -33,7 +35,9 @@ import (
 	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/application/outbox"
 	"github.com/djackcurry30/social-login/internal/embedweb"
 	adminhttp "github.com/djackcurry30/social-login/internal/interfaces/http/admin"
 	adminhandler "github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
@@ -50,6 +54,11 @@ type App struct {
 	rdb    *redis.Client
 	router http.Handler
 	server *http.Server
+
+	// dispatcher 是 outbox 投递循环；nil 表示不启用（SkipDatabase 的测试装配）。
+	dispatcher *outbox.Service
+	bgCancel   context.CancelFunc
+	bgWG       sync.WaitGroup
 }
 
 // Options 是装配参数。
@@ -283,6 +292,13 @@ func New(ctx context.Context, opts Options) (*App, error) {
 			}
 			return appSecretHasher.Hash(plain), nil
 		},
+		// webhook 签名密钥必须可解密（HMAC 需要明文），与渠道凭据同一把 KEK。
+		EncryptSecret: func(plain string) ([]byte, string, error) {
+			ct, err := keyManager.Encrypt(plain)
+			return ct, keyManager.KEKID(), err
+		},
+		SetWebhook: appRepo.SetWebhook,
+		GetWebhook: appRepo.WebhookConfig,
 	})
 
 	// adminchan 的 EncryptSecret 注入 keymanager。
@@ -321,6 +337,23 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger: logger,
 	})
 
+	// G 组：事件与死信。
+	eventRepo := postgres.NewEventRepository(db)
+	adminEventSvc := adminevent.New(adminevent.Deps{
+		Events:     eventRepo,
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+	})
+
+	// Outbox 投递 worker：事件外发的唯一出口。
+	//
+	// 与在线请求分离部署是架构 §9 的建议；当前同进程运行，但通过租约
+	// （SELECT ... FOR UPDATE SKIP LOCKED）保证多副本不重复投递，
+	// 因此将来拆成独立进程不需要改代码。
+	webhookDeliverer := webhook.NewDeliverer(
+		&appWebhookTargets{apps: appRepo, keys: keyManager}, logger)
+	outboxDispatcher := outbox.New(eventRepo, webhookDeliverer, outbox.DefaultConfig(), logger)
+
 	adminLoginSvc := adminhandler.NewLoginService(adminhandler.LoginServiceDeps{
 		Users:    adminUserRepo,
 		Sessions: adminSessionRepo,
@@ -336,6 +369,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminApp:     adminAppSvc,
 		AdminChan:    adminChanSvc,
 		AdminObs:     adminObsSvc,
+		AdminEvent:   adminEventSvc,
 	}
 	_ = adminDeps
 
@@ -373,6 +407,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		WebFS:        embedweb.FS(),
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
+	app.dispatcher = outboxDispatcher
 
 	logger.Info("装配完成",
 		zap.String("version", Version),
@@ -387,6 +422,17 @@ func (a *App) Run(ctx context.Context) error {
 	if a.server == nil {
 		return errs.New(errs.CodeInternal, "HTTP 服务未装配")
 	}
+	// 后台投递循环跟随进程生命周期：ctx 结束时退出，Shutdown 里等待它收敛。
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	a.bgCancel = bgCancel
+	if a.dispatcher != nil {
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			a.dispatcher.Run(bgCtx)
+		}()
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		a.log.Info("HTTP 服务启动", zap.String("addr", a.cfg.Server.Addr))
@@ -411,6 +457,13 @@ func (a *App) Run(ctx context.Context) error {
 // 顺序不可颠倒：先关数据库会让正在处理的请求以"连接已关闭"失败，
 // 用户看到的是 500 而不是"服务正在重启"。
 func (a *App) Shutdown(ctx context.Context) error {
+	// 先停后台投递循环：它持有数据库连接，必须在关库之前收敛，
+	// 否则会以"连接已关闭"刷一片错误日志。
+	if a.bgCancel != nil {
+		a.bgCancel()
+		a.bgWG.Wait()
+		a.bgCancel = nil
+	}
 	if a.server != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, a.cfg.Server.ShutdownTimeout)
 		defer cancel()

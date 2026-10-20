@@ -126,6 +126,27 @@ func (h *AppsHandler) RotateSecret(c *gin.Context) {
 	httputil.OK(c, http.StatusOK, out)
 }
 
+// UpdateWebhook PUT /admin/v1/apps/:appId/webhook
+//
+// 配置事件投递目标（架构 §5.4）。url 传空串表示关闭外发；
+// secret 留空表示保留原密钥（只改地址不必重传密钥）。
+func (h *AppsHandler) UpdateWebhook(c *gin.Context) {
+	id, ok := parseIDParam(c, "appId")
+	if !ok {
+		return
+	}
+	var in adminapp.UpdateWebhookInput
+	if !httputil.BindJSON(c, &in, h.logger) {
+		return
+	}
+	in.Principal = adminmw.Principal(c)
+	if err := h.svc.UpdateWebhook(c.Request.Context(), id, in); err != nil {
+		httputil.Fail(c, h.logger, err)
+		return
+	}
+	httputil.OK(c, http.StatusOK, gin.H{"ok": true})
+}
+
 // GetPolicy GET /admin/v1/apps/:id/policy
 func (h *AppsHandler) GetPolicy(c *gin.Context) {
 	id, ok := parseIDParam(c, "appId")

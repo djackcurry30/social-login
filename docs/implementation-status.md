@@ -142,8 +142,8 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 
 ## 4. 管理端 API（§15.4）
 
-已挂载 22 个业务端点 + 3 个 auth 端点（`login` / `me` / `logout`）。
-§15.4 表内共 54 个端点，**未实现 32 个**。
+已挂载 27 个业务端点 + 3 个 auth 端点（`login` / `me` / `logout`）。
+§15.4 表内共 54 个端点，**未实现 27 个**（G 组 4 个已补齐，另新增 1 个 A 组补充端点 `PUT /apps/{id}/webhook`）。
 
 | 组 | 主题 | 规划 | 已实现 | 缺口 |
 | --- | --- | --- | --- | --- |
@@ -153,7 +153,7 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 | D | 合并运维 | 5 | 0 | 全部 |
 | E | 会话与令牌 | 3 | 0 | 全部 |
 | F | 签名密钥管理 | 4 | 0 | 全部 |
-| G | 事件与死信 | 4 | 0 | 全部 |
+| G | 事件与死信 | 4 | 4 | — |
 | H | 审计日志 | 4 | 0 | 全部 |
 | I | 观测与健康 | 4 | 4 | — |
 | J | 凭证一致性 | 3 | 0 | 全部 |
@@ -165,7 +165,7 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 - **D 组**：`merge-operations` 的 list / detail / retry / resolve / impact。与第三期合并功能同批交付。
 - **E 组**：`/tokens`（活跃会话查询）、`/tokens:revoke`（强制下线）、`/revoked-jti`。
 - **F 组**：`/signing-keys` 的 list / rotate / retire / jwks:preview。§8.3 的"四步轮换"目前只能手工改配置文件重启。
-- **G 组**：`/events/outbox` 的 list / detail / retry / discard。
+- ~~**G 组**：`/events/outbox` 的 list / detail / retry / discard。~~ → **已实现**，见 §11。
 - **H 组**：`/audit-logs`（业务审计）、`/audit-logs/admin`（管理审计）、`:export` 与导出任务查询。**审计数据在写、但没有任何查询入口**。
 - **J 组**：`/claims`、`/claims/mismatches`、`/claims/{id}:revoke`。
 - **K 组**：`/admin-grants` 的 list / create / delete。`admin_grants` 表已建但代码中零引用，角色仍硬编码在 `internal/domain/admin/admin.go`。
@@ -425,3 +425,89 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 
 `cache` 包的 7 个用例是集成用例：默认连 `127.0.0.1:16379`（`docker-compose.yml` 里
 redis 的回环端口映射），连不上则 `t.Skip` 而不是假通过。
+
+---
+
+## 11. 事件外发（Transactional Outbox）+ 管理端 G 组
+
+### 11.1 为什么这一批先做它
+
+架构 §13 把 `event_outbox` + 投递 worker 列为**第一期**交付项，实际一直没做；
+而二期又明确要求"G 组必须与渠道同批交付"。两者是同一件事的两端：
+没有 worker，outbox 只是张表；没有 G 组，投递失败就只能翻库。
+三期合并链路（`account.merged`）也压在它上面，所以先补这一块。
+
+### 11.2 新增组件
+
+| 位置 | 职责 |
+| --- | --- |
+| `domain/event` | `Event` / `Status` / `Store` 端口、`Backoff`（§5.4 固定序列）、`PermanentError`、`ErrNoWebhook` |
+| `persistence/postgres/event_repo.go` | `Append`、`ClaimDue`、状态回写、管理端查询与重投 |
+| `infrastructure/webhook` | HMAC 签名、投递、状态码分类 |
+| `application/outbox` | 投递循环与状态机 |
+| `application/adminevent` | G 组用例（list / detail / retry / discard） |
+| `migrations/00003_webhook.sql` | `applications.webhook_url` / `webhook_secret_enc` / `webhook_secret_kid` |
+
+### 11.3 三个关键实现选择
+
+1. **领取用租约，不引入 `sending` 状态**
+   `SELECT ... FOR UPDATE SKIP LOCKED` + 把 `next_retry_at` 推到 `now()+lease`。
+   多副本天然互斥；进程崩溃时租约自然过期，事件自动回到待投递，
+   不需要额外的"超时回收"任务，也不会有卡在 `sending` 的僵尸行。
+2. **4xx 直接死信，5xx/408/429 才重试**
+   对方返回 400/401/403/404 时重试五次只是浪费退避窗口，
+   而且死信里会看不出"是对方拒收"还是"我们没送到"。
+3. **未配置 webhook 落 `skipped`，不是 `sent`**
+   标 `sent` 会让监控以为投递成功；一直 `pending` 会让积压指标永远飘红。
+   `skipped` 让"这个应用没配投递"成为可查询的事实。
+
+### 11.4 状态机
+
+```
+pending ──成功──> sent
+   │
+   ├──4xx（非 408/429）──> dead
+   ├──第 5 次失败─────────> dead
+   ├──未配置 webhook──────> skipped
+   └──可重试──────────────> pending（下次 = now + 1s/10s/1m/10m/1h）
+dead / skipped / discarded ──人工 retry──> pending（event_id 不变）
+```
+
+`discarded` 是人工丢弃，与 `dead`（投递失败）分开，
+便于回答"这条是我们送不到，还是人主动放弃的"。
+
+### 11.5 端到端验证（本地 compose 实测）
+
+1. `PUT /admin/v1/apps/18/webhook` 配一个连不上的地址 → 200；
+2. 直接写一条 `pending` 事件；
+3. 8 秒后 `GET /admin/v1/events/outbox?app_id=18` → `attempts=2`，
+   `next_retry_at` 已按退避推进，`last_error` 记录 `connection refused`；
+4. 对 `pending` 事件调 `retry` → 400 `REQUEST.INVALID`（状态守卫生效）；
+5. `discard` 带合法 reason → 200，详情变为 `discarded`，且 `last_error` **保留**了
+   原来的投递失败原因（丢弃理由只进管理审计，不覆盖排障信息）；
+6. `reason` 过短 → 400 `ADMIN.REASON_REQUIRED`。
+
+### 11.6 顺手修掉的错误码映射缺陷
+
+`errs.defaults` 里**漏了整组 `ADMIN.*`**，导致 `Status` 取零值、
+`httputil.Fail` 统一折算成 **500**。表现是"管理员少填一个 reason 却收到
+500 INTERNAL"，前端无法当表单校验错误处理。已补：
+
+| 错误码 | 修正后 |
+| --- | --- |
+| `ADMIN.REASON_REQUIRED` | 400 |
+| `ADMIN.VERIFY_FAILED` | 400 |
+| `ADMIN.CONFLICT` | 409 |
+| `ADMIN.SESSION_EXPIRED` / `SESSION_REVOKED` | 401 |
+
+这个缺陷影响 A/B 组的全部 reason 校验，不只是 G 组。
+
+### 11.7 尚未闭环
+
+1. **业务侧没有事件发射点**：`binding.created` / `account.merged` 等尚未写入 outbox。
+   原因是当前仓储层没有 unit-of-work，无法让"业务写入 + 事件写入"落在同一事务里，
+   而 outbox 的全部价值正在这个原子性上——**先发射、后补事务等于制造假象**。
+   等三期的合并链路（本身就需要三事务编排）一起引入事务管理器再落。
+2. **worker 与在线请求同进程**：架构建议独立部署。当前靠租约保证多副本不重复，
+   拆进程不需要改代码，但还没有独立进程入口。
+3. **H 组（审计查询）仍未实现**：数据在写，但没有查询入口。

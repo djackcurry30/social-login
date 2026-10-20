@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -36,6 +37,16 @@ type Deps struct {
 	// HashSecret 注入密钥哈希逻辑。生产使用 crypto.AppSecretHasher；
 	// 测试可用伪实现。
 	HashSecret func(plain string) (string, error)
+	// EncryptSecret 加密 webhook 签名密钥（注入 KeyManager，避免本包依赖 infra/crypto）。
+	//
+	// 为什么 webhook 密钥要加密而不是像 app_secret 那样只存哈希：
+	// HMAC 签名需要【明文】密钥参与运算，哈希是单向的，用不了。
+	EncryptSecret func(plain string) (ciphertext []byte, dekID string, err error)
+	// SetWebhook 保存投递配置（仓储方法按需注入，避免撑大 tenant.ApplicationRepository 接口）。
+	SetWebhook func(ctx context.Context, appID int64, url string, secretEnc []byte, kid string) error
+	// GetWebhook 读取当前投递配置，仅用于写审计的 before 快照
+	// （排障时"改之前是哪个地址"往往比"改成什么"更有用）。
+	GetWebhook func(ctx context.Context, appID int64) (appCode, url string, secretEnc []byte, kid string, err error)
 }
 
 // Service 是 A 组用例入口。
@@ -131,9 +142,9 @@ func (s *Service) CreateApp(ctx context.Context, in CreateAppInput) (*CreateAppO
 
 // UpdateAppInput 是 PATCH /admin/v1/apps/{id} 的入参。
 type UpdateAppInput struct {
-	Name      *string          `json:"name,omitempty"`
-	Status    *int16           `json:"status,omitempty"` // 1=enable, 0=disable
-	Reason    string           `json:"reason" binding:"required"`
+	Name      *string `json:"name,omitempty"`
+	Status    *int16  `json:"status,omitempty"` // 1=enable, 0=disable
+	Reason    string  `json:"reason" binding:"required"`
 	Principal *admin.Principal
 }
 
@@ -319,7 +330,7 @@ type ListAppsInput struct {
 	PageSize int
 	// Status 过滤：-1 = 全部，0 = 停用，1 = 启用。
 	Status int
-	Name    string
+	Name   string
 }
 
 // ListAppsOutput 是列表出参。
@@ -487,4 +498,66 @@ func generateAppSecret() (string, error) {
 func defaultHashSecret(_ string) (string, error) {
 	return "", errs.New(errs.CodeInternal,
 		"adminapp 未注入 HashSecret：必须传入 crypto.AppSecretHasher，否则管理端写入的 app_secret 无法被业务端校验")
+}
+
+// UpdateWebhookInput 是 PUT /admin/v1/apps/{id}/webhook 的入参。
+//
+// 为什么单独一个端点而不并进 app.update：
+// webhook 签名密钥是【明文可解】的密钥材料（HMAC 需要），
+// 与 name/status 这类普通字段的敏感级别不同，混在一起会让 A 组的密钥轮换
+// 语义变得含糊。单独端点也便于后续做"只改地址、不重传密钥"。
+type UpdateWebhookInput struct {
+	// URL 为空字符串表示关闭事件外发（此后事件标 skipped，而不是 pending 堆积）。
+	URL string `json:"url"`
+	// Secret 留空表示保留原密钥。
+	Secret    string `json:"secret"`
+	Reason    string `json:"reason" binding:"required"`
+	Principal *admin.Principal
+}
+
+// UpdateWebhook 配置事件投递目标。
+func (s *Service) UpdateWebhook(ctx context.Context, appID int64, in UpdateWebhookInput) error {
+	if appID <= 0 {
+		return errs.New(errs.CodeInvalidRequest, "app_id 不合法")
+	}
+	if in.Reason == "" || len([]rune(in.Reason)) < 4 {
+		return errs.New(errs.CodeAdminReasonRequired,
+			"高危操作（app.webhook）必须填写 reason（≥4 字符）")
+	}
+	if in.URL != "" && !strings.HasPrefix(in.URL, "https://") && !strings.HasPrefix(in.URL, "http://") {
+		return errs.New(errs.CodeInvalidRequest, "webhook url 必须是 http(s) 绝对地址")
+	}
+	if s.deps.SetWebhook == nil {
+		return errs.New(errs.CodeInternal, "adminapp 未注入 SetWebhook")
+	}
+
+	var cipher []byte
+	var kid string
+	if in.Secret != "" {
+		if s.deps.EncryptSecret == nil {
+			return errs.New(errs.CodeInternal, "adminapp 未注入 EncryptSecret")
+		}
+		var err error
+		cipher, kid, err = s.deps.EncryptSecret(in.Secret)
+		if err != nil {
+			return errs.Wrap(errs.CodeInternal, "加密 webhook 密钥失败", err)
+		}
+	}
+
+	// before 快照：地址与"是否已设密钥"，绝不含密钥本身。
+	var before map[string]any
+	if s.deps.GetWebhook != nil {
+		if _, oldURL, oldEnc, _, err := s.deps.GetWebhook(ctx, appID); err == nil {
+			before = map[string]any{"webhook_url": oldURL, "secret_set": len(oldEnc) > 0}
+		}
+	}
+	if err := s.deps.SetWebhook(ctx, appID, in.URL, cipher, kid); err != nil {
+		s.writeAudit(ctx, in.Principal, "app.webhook", "application", fmt.Sprintf("%d", appID),
+			in.Reason, before, nil, "error", err)
+		return err
+	}
+	after := map[string]any{"webhook_url": in.URL, "secret_rotated": in.Secret != ""}
+	s.writeAudit(ctx, in.Principal, "app.webhook", "application", fmt.Sprintf("%d", appID),
+		in.Reason, before, after, "success", nil)
+	return nil
 }
