@@ -64,7 +64,8 @@ export interface Application {
   ID: number
   AppCode: string
   Name: string
-  AppSecretHash: string
+  // 服务端不再下发 app_secret 的哈希（adminapp.AppView 白名单投影）。
+  // 密钥明文只在创建 / 轮换时返回一次。
   Status: number // 1=enabled, 0=disabled
   AccountMode: string
   Policy: Policy
@@ -98,10 +99,10 @@ export interface ProviderConfig {
   Scene: string
   ConfigKey: string
   ProviderAppID: string
-  SecretCipher: string // base64
-  SecretCipherPrev: string | null
-  SecretRotatedAt: string | null
-  SecretDEKID: string
+  // 服务端不再下发凭据密文与 KEK 版本（adminchan.ConfigView 白名单投影）。
+  // 只保留"是否处于轮换过渡期"这一个前端真正需要的派生字段。
+  SecretRotationInProgress: boolean
+  SecretRotatedAt?: string | null
   Env: string
   Extra: Record<string, unknown>
   Version: number

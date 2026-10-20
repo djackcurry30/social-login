@@ -24,6 +24,58 @@ import (
 	"github.com/djackcurry30/social-login/internal/pkg/httpx"
 )
 
+// ConfigView 是渠道配置的对外投影。
+//
+// 为什么不直接返回 *tenant.ProviderConfig：领域模型带 SecretCipher /
+// SecretCipherPrev / SecretDEKID。密文虽然需要 KEK 才能解开，但把它和
+// KEK 版本一起下发，等于给"KEK 泄露"这一场景补上最后一块拼图，
+// 而管理端界面根本不需要它——只需要知道"是否在轮换过渡期"。
+//
+// 这是与 adminapp.AppView 同一套做法：白名单投影，新增内部字段默认不外发。
+//
+// ⚠️ JSON key 沿用 Go 字段名（大驼峰），与 web/src/lib/types.ts 保持一致。
+type ConfigView struct {
+	ID              int64          `json:"ID"`
+	AppID           int64          `json:"AppID"`
+	Platform        string         `json:"Platform"`
+	Scene           string         `json:"Scene"`
+	ConfigKey       string         `json:"ConfigKey"`
+	ProviderAppID   string         `json:"ProviderAppID"`
+	SecretRotatedAt *time.Time     `json:"SecretRotatedAt,omitempty"`
+	// SecretRotationInProgress 替代原来的 SecretCipherPrev：
+	// 前端本来只用它判断"是否处于轮换过渡期"，没有必要为此下发密文。
+	SecretRotationInProgress bool           `json:"SecretRotationInProgress"`
+	Env                      string         `json:"Env"`
+	Extra                    map[string]any `json:"Extra"`
+	Version                  int64          `json:"Version"`
+	Status                   int16          `json:"Status"`
+	CreatedAt                time.Time      `json:"CreatedAt"`
+	UpdatedAt                time.Time      `json:"UpdatedAt"`
+}
+
+// toConfigView 投影成对外视图。
+func toConfigView(c *tenant.ProviderConfig) *ConfigView {
+	if c == nil {
+		return nil
+	}
+	return &ConfigView{
+		ID:                       c.ID,
+		AppID:                    c.AppID,
+		Platform:                 c.Platform,
+		Scene:                    c.Scene,
+		ConfigKey:                c.ConfigKey,
+		ProviderAppID:            c.ProviderAppID,
+		SecretRotatedAt:          c.SecretRotatedAt,
+		SecretRotationInProgress: len(c.SecretCipherPrev) > 0,
+		Env:                      c.Env,
+		Extra:                    c.Extra,
+		Version:                  c.Version,
+		Status:                   c.Status,
+		CreatedAt:                c.CreatedAt,
+		UpdatedAt:                c.UpdatedAt,
+	}
+}
+
 // Deps 是用例依赖。
 type Deps struct {
 	TenantConfigs tenant.ProviderConfigRepository
@@ -70,7 +122,7 @@ type CreateConfigInput struct {
 //
 // 关键不变量：platform/scene 走权威枚举白名单校验（E4），防止拼写错误入库；
 // 凭据加密后入库，明文不出调用方边界。
-func (s *Service) CreateConfig(ctx context.Context, in CreateConfigInput) (*tenant.ProviderConfig, error) {
+func (s *Service) CreateConfig(ctx context.Context, in CreateConfigInput) (*ConfigView, error) {
 	if in.AppID <= 0 {
 		return nil, errs.New(errs.CodeInvalidRequest, "app_id 不合法")
 	}
@@ -126,7 +178,7 @@ func (s *Service) CreateConfig(ctx context.Context, in CreateConfigInput) (*tena
 	}
 	s.writeAudit(ctx, in.Principal, "config.create", "provider_config", fmt.Sprintf("%d", created.ID),
 		in.Reason, nil, configToState(created), "success", nil)
-	return created, nil
+	return toConfigView(created), nil
 }
 
 // UpdateConfigInput 是 PATCH /admin/v1/apps/{appId}/provider-configs/{id} 的入参。
@@ -139,7 +191,7 @@ type UpdateConfigInput struct {
 // UpdateConfig 改 extra / env / config_key 等非凭据字段。
 //
 // 凭据走专用的 secret:rotate 流程，不允许在 PATCH 中改。
-func (s *Service) UpdateConfig(ctx context.Context, id int64, in UpdateConfigInput) (*tenant.ProviderConfig, error) {
+func (s *Service) UpdateConfig(ctx context.Context, id int64, in UpdateConfigInput) (*ConfigView, error) {
 	if id <= 0 {
 		return nil, errs.New(errs.CodeInvalidRequest, "id 不合法")
 	}
@@ -163,7 +215,7 @@ func (s *Service) UpdateConfig(ctx context.Context, id int64, in UpdateConfigInp
 	}
 	s.writeAudit(ctx, in.Principal, "config.update", "provider_config", fmt.Sprintf("%d", id),
 		in.Reason, before, configToState(updated), "success", nil)
-	return updated, nil
+	return toConfigView(updated), nil
 }
 
 // RotateSecretInput 是 POST .../secret:rotate 的入参。
@@ -379,14 +431,28 @@ func (s *Service) Delete(ctx context.Context, id int64, principal *admin.Princip
 	return nil
 }
 
-// ListConfigs 列出某应用的全部渠道配置（凭据只返回掩码）。
-func (s *Service) ListConfigs(ctx context.Context, appID int64) ([]tenant.ProviderConfig, error) {
-	return s.deps.TenantConfigs.ListByApp(ctx, appID)
+// ListConfigs 列出某应用的全部渠道配置。
+//
+// 只返回 ConfigView：凭据密文与 KEK 版本不下发（见 ConfigView 注释）。
+func (s *Service) ListConfigs(ctx context.Context, appID int64) ([]ConfigView, error) {
+	rows, err := s.deps.TenantConfigs.ListByApp(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ConfigView, 0, len(rows))
+	for i := range rows {
+		out = append(out, *toConfigView(&rows[i]))
+	}
+	return out, nil
 }
 
-// GetConfig 详情（凭据返回掩码）。
-func (s *Service) GetConfig(ctx context.Context, id int64) (*tenant.ProviderConfig, error) {
-	return s.findByID(ctx, id)
+// GetConfig 详情（同样只返回视图）。
+func (s *Service) GetConfig(ctx context.Context, id int64) (*ConfigView, error) {
+	c, err := s.findByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return toConfigView(c), nil
 }
 
 func (s *Service) findByID(ctx context.Context, id int64) (*tenant.ProviderConfig, error) {

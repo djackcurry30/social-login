@@ -74,9 +74,50 @@ type CreateAppInput struct {
 	Principal   *admin.Principal // 解析自中间件；写审计用
 }
 
+// AppView 是应用在管理端接口上的对外投影。
+//
+// 为什么不直接返回 *tenant.Application：领域模型里带 AppSecretHash，
+// 而 JSON 序列化默认导出全部字段——此前 GET /admin/v1/apps 就把 app_secret
+// 的哈希原样发给了 viewer 角色。哈希虽不可逆，但它是对外验签密钥的全部
+// 秘密所在，泄露后可用于离线爆破，属于【不必要的暴露】。
+//
+// 这里改成显式白名单：新增内部字段时默认不外发，要外发必须在这里加一行。
+// 这是"默认拒绝"与"默认放行"的差别，也正是当初漏掉它的原因。
+//
+// ⚠️ 字段的 JSON key 沿用 Go 字段名（大驼峰），是为了不破坏现有前端
+// （web/src/lib/types.ts 与 AppsPage/AppDetailPage 都按 `AppCode` 读取）。
+// 与项目其它接口的 snake_case 不一致属于历史包袱，统一改造需单独排期。
+type AppView struct {
+	ID          int64         `json:"ID"`
+	AppCode     string        `json:"AppCode"`
+	Name        string        `json:"Name"`
+	Status      int16         `json:"Status"`
+	AccountMode string        `json:"AccountMode"`
+	Policy      tenant.Policy `json:"Policy"`
+	CreatedAt   time.Time     `json:"CreatedAt"`
+	UpdatedAt   time.Time     `json:"UpdatedAt"`
+}
+
+// toAppView 把领域模型投影成对外视图（白名单，天然屏蔽 AppSecretHash）。
+func toAppView(a *tenant.Application) *AppView {
+	if a == nil {
+		return nil
+	}
+	return &AppView{
+		ID:          a.ID,
+		AppCode:     a.AppCode,
+		Name:        a.Name,
+		Status:      a.Status,
+		AccountMode: a.AccountMode,
+		Policy:      a.Policy,
+		CreatedAt:   a.CreatedAt,
+		UpdatedAt:   a.UpdatedAt,
+	}
+}
+
 // CreateAppOutput 是 POST /admin/v1/apps 的出参。
 type CreateAppOutput struct {
-	App *tenant.Application `json:"app"`
+	App *AppView `json:"app"`
 	// AppSecret 是明文密钥，【仅在创建时】返回一次，不入库、不再次下发。
 	AppSecret string `json:"app_secret"`
 }
@@ -137,7 +178,7 @@ func (s *Service) CreateApp(ctx context.Context, in CreateAppInput) (*CreateAppO
 	s.writeAudit(ctx, in.Principal, "app.create", "application", fmt.Sprintf("%d", created.ID),
 		in.Reason, nil, appToState(created), "success", nil)
 
-	return &CreateAppOutput{App: created, AppSecret: secret}, nil
+	return &CreateAppOutput{App: toAppView(created), AppSecret: secret}, nil
 }
 
 // UpdateAppInput 是 PATCH /admin/v1/apps/{id} 的入参。
@@ -149,7 +190,7 @@ type UpdateAppInput struct {
 }
 
 // UpdateApp 改名称或启停状态。
-func (s *Service) UpdateApp(ctx context.Context, appID int64, in UpdateAppInput) (*tenant.Application, error) {
+func (s *Service) UpdateApp(ctx context.Context, appID int64, in UpdateAppInput) (*AppView, error) {
 	if appID <= 0 {
 		return nil, errs.New(errs.CodeInvalidRequest, "app_id 不合法")
 	}
@@ -181,7 +222,7 @@ func (s *Service) UpdateApp(ctx context.Context, appID int64, in UpdateAppInput)
 	}
 	s.writeAudit(ctx, in.Principal, "app.update", "application", fmt.Sprintf("%d", appID),
 		in.Reason, before, appToState(updated), "success", nil)
-	return updated, nil
+	return toAppView(updated), nil
 }
 
 // RotateAppSecretInput 是 POST /admin/v1/apps/{id}/secret:rotate 的入参。
@@ -316,12 +357,16 @@ func (s *Service) ValidatePolicy(_ context.Context, in ValidatePolicyInput) (*Va
 	}, nil
 }
 
-// GetApp 按 ID 查应用。
-func (s *Service) GetApp(ctx context.Context, appID int64) (*tenant.Application, error) {
+// GetApp 按 ID 查应用。返回白名单视图——AppSecretHash 不外发。
+func (s *Service) GetApp(ctx context.Context, appID int64) (*AppView, error) {
 	if appID <= 0 {
 		return nil, errs.New(errs.CodeInvalidRequest, "app_id 不合法")
 	}
-	return s.deps.TenantApps.FindByID(ctx, appID)
+	a, err := s.deps.TenantApps.FindByID(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	return toAppView(a), nil
 }
 
 // ListAppsInput 是 GET /admin/v1/apps 的入参。
@@ -335,8 +380,8 @@ type ListAppsInput struct {
 
 // ListAppsOutput 是列表出参。
 type ListAppsOutput struct {
-	Items         []tenant.Application `json:"items"`
-	NextPageToken string               `json:"next_page_token"`
+	Items         []AppView `json:"items"`
+	NextPageToken string    `json:"next_page_token"`
 }
 
 // ListApps 列表（按 ID 倒序分页）。
@@ -346,7 +391,7 @@ type ListAppsOutput struct {
 func (s *Service) ListApps(ctx context.Context, in ListAppsInput) (*ListAppsOutput, error) {
 	if s.deps.ListAppIDs == nil {
 		// 没有 List 能力时返回空列表（不报错），让 UI 至少能加载。
-		return &ListAppsOutput{Items: []tenant.Application{}, NextPageToken: ""}, nil
+		return &ListAppsOutput{Items: []AppView{}, NextPageToken: ""}, nil
 	}
 	if in.PageSize <= 0 {
 		in.PageSize = 20
@@ -361,7 +406,7 @@ func (s *Service) ListApps(ctx context.Context, in ListAppsInput) (*ListAppsOutp
 	if err != nil {
 		return nil, err
 	}
-	out := make([]tenant.Application, 0, len(ids))
+	out := make([]AppView, 0, len(ids))
 	for _, id := range ids {
 		a, err := s.deps.TenantApps.FindByID(ctx, id)
 		if err != nil {
@@ -376,7 +421,7 @@ func (s *Service) ListApps(ctx context.Context, in ListAppsInput) (*ListAppsOutp
 		if in.Name != "" && !containsFold(a.Name, in.Name) {
 			continue
 		}
-		out = append(out, *a)
+		out = append(out, *toAppView(a))
 	}
 	return &ListAppsOutput{Items: out, NextPageToken: ""}, nil
 }

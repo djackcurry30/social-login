@@ -27,6 +27,32 @@ type Config struct {
 	Migrate  MigrateConfig  `mapstructure:"migrate"`
 	// ProviderGuard 是渠道熔断配置（服务级，不能下放到应用）。
 	ProviderGuard ProviderGuardConfig `mapstructure:"provider_guard"`
+	// Audit 是审计相关配置（H 组异步导出）。
+	Audit AuditConfig `mapstructure:"audit"`
+}
+
+// AuditConfig 是审计配置。
+type AuditConfig struct {
+	// ExportDir 是审计导出文件的落盘目录。为空时导出 worker 不启动——
+	// 静默空转会让"提交了却永远 pending"变成谜案，所以宁可明确不启动并打日志。
+	//
+	// 生产建议挂独立卷：导出文件是临时产物，不该和密钥、日志混在同一层。
+	ExportDir string `mapstructure:"export_dir"`
+	// ExportFileTTL 是导出文件保留期，默认 7 天。
+	ExportFileTTL time.Duration `mapstructure:"export_file_ttl"`
+	// ExportWorkerEnabled 允许在"不落盘"的环境（如只读容器）关掉 worker。
+	ExportWorkerEnabled *bool `mapstructure:"export_worker_enabled"`
+}
+
+// ExportWorkerOn 判断是否启用导出 worker。
+//
+// 用 *bool 而不是 bool：零值 false 会让"没写这一项"与"显式关闭"无法区分，
+// 而默认应该是【启用】（配置了 export_dir 就该跑）。未配置时按目录是否为空判断。
+func (a AuditConfig) ExportWorkerOn() bool {
+	if a.ExportWorkerEnabled != nil {
+		return *a.ExportWorkerEnabled
+	}
+	return a.ExportDir != ""
 }
 
 // ServerConfig 是 HTTP 服务配置。
@@ -251,6 +277,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("provider_guard.circuit_breaker.consecutive_failures", 10)
 	v.SetDefault("provider_guard.circuit_breaker.open_seconds", "30s")
 	v.SetDefault("provider_guard.circuit_breaker.half_open_requests", 3)
+
+	// 审计导出：默认落在 ./var/exports（相对进程工作目录）。
+	// 配置为空字符串即关闭 worker（见 AuditConfig.ExportWorkerOn）。
+	v.SetDefault("audit.export_dir", "./var/exports")
+	v.SetDefault("audit.export_file_ttl", "168h")
 }
 
 // normalizeAndValidate 做归一化与启动期校验。

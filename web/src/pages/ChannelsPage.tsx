@@ -244,7 +244,7 @@ export default function ChannelsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs">
-                      {c.SecretCipherPrev ? '过渡中' : '—'}
+                      {c.SecretRotationInProgress ? '过渡中' : '—'}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
@@ -262,7 +262,7 @@ export default function ChannelsPage() {
                         >
                           轮换
                         </Button>
-                        {c.SecretCipherPrev ? (
+                        {c.SecretRotationInProgress ? (
                           <Button
                             variant="outline"
                             size="sm"

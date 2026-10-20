@@ -63,7 +63,12 @@ step "5. GET /admin/v1/apps"
 LIST=$(curl -s -m 3 "$BASE_URL/admin/v1/apps" -H "$AUTH")
 echo "$LIST"
 echo "$LIST" | grep -q '"items":' || fail "apps list 格式错"
-ok "apps list"
+# 回归：列表曾经把 app_secret 的哈希原样发给 viewer（领域模型直接序列化）。
+# 哈希虽不可逆，但它是验签密钥的全部秘密所在，泄露后可离线爆破。
+if echo "$LIST" | grep -qi 'app_secret_hash\|AppSecretHash'; then
+  fail "apps 列表泄露了 app_secret 哈希"
+fi
+ok "apps list（且未泄露 app_secret 哈希）"
 
 # 6. 创建 app（缺 reason → 400）
 step "6. POST /admin/v1/apps（缺 reason）"
@@ -123,6 +128,11 @@ PC=$(curl -s -m 3 \
   -X POST "$BASE_URL/admin/v1/apps/$APP_ID/provider-configs" -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"app_id":'$APP_ID',"platform":"generic_oauth2","scene":"web","provider_app_id":"acc-client","client_secret":"acc-secret","extra":{"token_url":"http://127.0.0.1:9090/oauth/token"},"reason":"冒烟测试配置渠道"}')
 echo "$PC"
+# 回归：渠道配置响应曾把 SecretCipher / SecretDEKID 一起下发。
+# 密文需要 KEK 才能解开，但与 KEK 版本同时出现等于给"KEK 泄露"补最后一块拼图。
+if echo "$PC" | grep -q '"SecretCipher"\|"SecretDEKID"'; then
+  fail "渠道配置响应泄露了凭据密文 / KEK 版本"
+fi
 PC_ID=$(echo "$PC" | sed -n 's/.*"ID":\([0-9]*\).*/\1/p' | head -1)
 if [ -z "$PC_ID" ]; then fail "provider-config 创建未返回 ID"; fi
 ok "provider-config created, id=$PC_ID"
@@ -172,6 +182,81 @@ curl -s -m 5 -X POST "$BASE_URL/admin/v1/apps/$APP_ID/provider-configs" \
   -H "$AUTH" -H "Content-Type: application/json" \
   -d '{"platform":"apple","scene":"app","config_key":"default","provider_app_id":"com.example.acc","client_secret":"acc-secret","reason":"验收：准备通知链路用例"}' >/dev/null
 ok "渠道配置就绪"
+
+# 15.6 H 组：审计查询与异步导出（必须在 logout 之前，需要 token）
+#
+# 这一组的价值在"排障时能不能查到证据"：G 组回答"事件发出去没有"，
+# H 组回答"当时到底是谁做了什么"。
+step "15.6 H 组：审计查询与异步导出"
+
+# (a) 管理端审计：前面的 app.create 应该已经留下记录
+ADM_AUDIT=$(curl -s -m 5 "$BASE_URL/admin/v1/audit-logs/admin?action=app.create&page_size=5" -H "$AUTH")
+echo "$ADM_AUDIT"
+echo "$ADM_AUDIT" | grep -q '"items":' || fail "管理端审计查询失败: $ADM_AUDIT"
+ADM_TOTAL=$(echo "$ADM_AUDIT" | sed -n 's/.*"total":\([0-9]*\).*/\1/p' | head -1)
+[ "${ADM_TOTAL:-0}" -ge 1 ] || fail "应先有 app.create 审计记录，实际 total=$ADM_TOTAL"
+ok "管理端审计可查（app.create total=$ADM_TOTAL）"
+
+# (b) 业务审计：不带 app_id = 跨应用查询（管理端天然跨应用）；
+#     再带 app_id 验证过滤链路。干净库里可能为空，因此只断言结构。
+BUS_ALL=$(curl -s -m 5 "$BASE_URL/admin/v1/audit-logs?page_size=5" -H "$AUTH")
+echo "$BUS_ALL"
+echo "$BUS_ALL" | grep -q '"items":' || fail "业务审计全量查询失败: $BUS_ALL"
+BUS_APP=$(curl -s -m 5 "$BASE_URL/admin/v1/audit-logs?app_id=$APP_ID&page_size=5" -H "$AUTH")
+echo "$BUS_APP" | grep -q '"items":' || fail "业务审计按 app_id 查询失败: $BUS_APP"
+ok "业务审计可查（全量 / 按 app_id 均正常）"
+
+# (c) 非法 result 必须是 400（枚举值写错时不能让调用方拿到空列表猜原因）
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/audit-logs?result=SUCCESS" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "非法 result 期望 400，实际 $CODE"
+ok "非法 result → 400"
+
+# (d) 提交导出：202 + task_id（异步，不等待结果）
+EXP=$(curl -s -m 5 -X POST "$BASE_URL/admin/v1/audit-logs/export" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d "{\"app_id\":$APP_ID,\"action\":\"login\",\"reason\":\"验收：导出业务审计\"}")
+echo "$EXP"
+TASK_ID=$(echo "$EXP" | sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p' | head -1)
+if [ -z "$TASK_ID" ]; then fail "导出未返回 task_id: $EXP"; fi
+echo "$EXP" | grep -q '"status":"pending"' || fail "新任务应为 pending"
+ok "导出已受理，task_id=$TASK_ID"
+
+# (e) 轮询直到 succeeded（worker 2s 一轮）
+STATUS=""
+for _ in $(seq 1 20); do
+  ST=$(curl -s -m 5 "$BASE_URL/admin/v1/audit-logs/export/$TASK_ID" -H "$AUTH")
+  STATUS=$(echo "$ST" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' | head -1)
+  case "$STATUS" in
+    succeeded) break ;;
+    failed)    fail "导出任务失败: $ST" ;;
+  esac
+  sleep 1
+done
+[ "$STATUS" = "succeeded" ] || fail "导出任务未在 20s 内完成（当前 $STATUS）"
+ROW_COUNT=$(curl -s -m 5 "$BASE_URL/admin/v1/audit-logs/export/$TASK_ID" -H "$AUTH" \
+  | sed -n 's/.*"row_count":\([0-9]*\).*/\1/p' | head -1)
+ok "导出任务完成（status=$STATUS, row_count=${ROW_COUNT:-?}）"
+
+# (f) 下载：必须走鉴权接口，且内容是可打开的 CSV（带 UTF-8 BOM）
+DL_CODE=$(curl -s -o /tmp/acc_audit.csv -w "%{http_code}" -m 10 \
+  "$BASE_URL/admin/v1/audit-logs/export/$TASK_ID/download" -H "$AUTH")
+[ "$DL_CODE" = "200" ] || fail "下载期望 200，实际 $DL_CODE"
+HEAD3=$(head -c 3 /tmp/acc_audit.csv | od -An -tx1 | tr -d ' \n')
+[ "$HEAD3" = "efbbbf" ] || fail "CSV 缺少 UTF-8 BOM（Excel 打开中文会乱码），实际=$HEAD3"
+grep -q "created_at,app_id,action" /tmp/acc_audit.csv || fail "CSV 表头不符"
+# 行数必须与任务记录一致：CSV 行 = 表头 + row_count。
+# 不校验这一点的话，"任务说 2000 行、文件只有表头"这种错误会静默通过。
+LINES=$(wc -l < /tmp/acc_audit.csv | tr -d ' ')
+[ "$LINES" = "$(( ${ROW_COUNT:-0} + 1 ))" ] \
+  || fail "CSV 行数($LINES) 与 row_count(${ROW_COUNT:-0})+表头 不一致"
+ok "下载成功（HTTP 200，CSV 带 BOM，$LINES 行）"
+
+# (g) 无 token 下载必须 401：审计数据是敏感数据，不能靠"猜不到 URL"保护
+DL_ANON=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/audit-logs/export/$TASK_ID/download")
+[ "$DL_ANON" = "401" ] || fail "匿名下载期望 401，实际 $DL_ANON"
+ok "匿名下载被拒绝（401）"
 
 # 16. logout
 step "16. POST /admin/v1/auth/logout"

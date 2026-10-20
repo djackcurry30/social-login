@@ -105,5 +105,22 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.POST("/events/outbox/:id/retry", adminmw.Require("event:write"), evH.Retry)
 			api.POST("/events/outbox/:id/discard", adminmw.Require("event:write"), evH.Discard)
 		}
+
+		// H 组：审计日志（§15.4）
+		//
+		// 全部走 audit:read：查询与导出都只读，导出虽会落盘但不改变业务事实，
+		// 单列一个 audit:export 权限只会让"谁能导出"变成第二个要维护的矩阵。
+		if deps.AdminAudit != nil {
+			auditH := handler.NewAuditLogsHandler(deps.AdminAudit, deps.Logger)
+			api.GET("/audit-logs", adminmw.Require("audit:read"), auditH.List)
+			// ⚠️ 路由顺序：/audit-logs/admin 必须在 /audit-logs/:xxx 之前注册，
+			// 否则 gin 会把 "admin" 当成参数吃进通配段（当前没有通配段，
+			// 但一旦将来加 /audit-logs/:id 就会踩）。这里保持"静态优先"的顺序。
+			api.GET("/audit-logs/admin", adminmw.Require("audit:read"), auditH.ListAdmin)
+			api.GET("/audit-logs/exports", adminmw.Require("audit:read"), auditH.ListExports)
+			api.POST("/audit-logs/export", adminmw.Require("audit:read"), auditH.SubmitExport)
+			api.GET("/audit-logs/export/:taskId", adminmw.Require("audit:read"), auditH.GetExport)
+			api.GET("/audit-logs/export/:taskId/download", adminmw.Require("audit:read"), auditH.Download)
+		}
 	}
 }

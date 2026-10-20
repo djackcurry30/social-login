@@ -34,9 +34,11 @@ import (
 
 	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
+	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/application/auditexport"
 	"github.com/djackcurry30/social-login/internal/application/outbox"
 	"github.com/djackcurry30/social-login/internal/embedweb"
 	adminhttp "github.com/djackcurry30/social-login/internal/interfaces/http/admin"
@@ -57,8 +59,10 @@ type App struct {
 
 	// dispatcher 是 outbox 投递循环；nil 表示不启用（SkipDatabase 的测试装配）。
 	dispatcher *outbox.Service
-	bgCancel   context.CancelFunc
-	bgWG       sync.WaitGroup
+	// exporter 是审计导出执行循环；nil 表示未配置导出目录。
+	exporter *auditexport.Service
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 // Options 是装配参数。
@@ -345,6 +349,30 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:     logger,
 	})
 
+	// H 组：审计查询与异步导出。
+	//
+	// 查询直接复用 auditRepo（它同时实现 audit.Writer 与 audit.Query）：
+	// 读写同一张表，没有理由再包一层。
+	auditExportRepo := postgres.NewAuditExportRepository(db)
+	adminAuditSvc := adminaudit.New(adminaudit.Deps{
+		Query:      auditRepo,
+		Exports:    auditExportRepo,
+		AdminAudit: adminAuditRepo,
+		ExportTTL:  cfg.Audit.ExportFileTTL,
+		ExportDir:  cfg.Audit.ExportDir,
+	})
+
+	// 审计导出 worker：与在线请求分离部署是架构建议，当前同进程；
+	// 领取用 SQL 原子更新（FOR UPDATE SKIP LOCKED），多副本不会重复导出。
+	var auditExporter *auditexport.Service
+	if cfg.Audit.ExportWorkerOn() {
+		auditExporter = auditexport.New(auditRepo, auditExportRepo,
+			auditexport.DefaultConfig(cfg.Audit.ExportDir), logger)
+	} else {
+		logger.Warn("审计导出 worker 未启用：audit.export_dir 为空或显式关闭，" +
+			"提交的导出任务会一直停在 pending")
+	}
+
 	// Outbox 投递 worker：事件外发的唯一出口。
 	//
 	// 与在线请求分离部署是架构 §9 的建议；当前同进程运行，但通过租约
@@ -370,6 +398,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminChan:    adminChanSvc,
 		AdminObs:     adminObsSvc,
 		AdminEvent:   adminEventSvc,
+		AdminAudit:   adminAuditSvc,
 	}
 	_ = adminDeps
 
@@ -408,6 +437,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 	app.dispatcher = outboxDispatcher
+	app.exporter = auditExporter
 
 	logger.Info("装配完成",
 		zap.String("version", Version),
@@ -430,6 +460,13 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer a.bgWG.Done()
 			a.dispatcher.Run(bgCtx)
+		}()
+	}
+	if a.exporter != nil {
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			a.exporter.Run(bgCtx)
 		}()
 	}
 

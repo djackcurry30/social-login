@@ -119,6 +119,10 @@ services:
       <<: *app-env
     ports:
       - "${APP_PORT:-8080}:8080"
+    volumes:
+      # 审计导出文件（§15.4 H 组）。不挂卷的话容器一重启，
+      # 已完成的导出任务就变成"元数据说成功、文件却不在"。
+      - export-data:/app/var/exports
     depends_on:
       pg:
         condition: service_healthy
@@ -129,3 +133,4 @@ services:
 
 volumes:
   pg-data:
+  export-data:

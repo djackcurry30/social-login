@@ -101,8 +101,16 @@ COPY --from=go-builder /out/migrate      /app/bin/migrate
 COPY --from=go-builder /out/adminseed    /app/bin/adminseed
 COPY configs/config.yaml /app/configs/config.yaml
 
-# 运行用户不写文件，目录只读即可
-RUN chown -R app:app /app
+# 运行用户不写文件，目录只读即可——除了审计导出目录。
+#
+# ⚠️ 这里必须【预先建好并 chown】：compose 把 named volume 挂在
+# /app/var/exports 上，而 Docker 初始化一个空 named volume 时，会把镜像里
+# 该路径的【属主与权限】复制过去。镜像里没有这个目录时，Docker 会以
+# root:root 新建，运行用户 uid=100(app) 随即失去写权限，表现是
+# "导出任务永远 failed: permission denied"，且启动阶段毫无提示。
+RUN chown -R app:app /app \
+ && mkdir -p /app/var/exports \
+ && chown -R app:app /app/var
 
 USER app
 

@@ -252,6 +252,28 @@ type adminAuditLogModel struct {
 
 func (adminAuditLogModel) TableName() string { return "admin_audit_logs" }
 
+// auditExportTaskModel 是审计异步导出任务（00004_audit_export.sql）。
+//
+// filter 用 JSONMap 而不是把 ExportCriteria 直接塞进模型：模型层不该反向
+// 依赖 domain 的序列化形态，且 JSONMap 已在别处验证过 JSONB 的读写路径。
+type auditExportTaskModel struct {
+	ID           string     `gorm:"column:id;primaryKey"`
+	SubjectID    string     `gorm:"column:subject_id"`
+	Filter       JSONMap    `gorm:"column:filter;type:jsonb"`
+	Status       string     `gorm:"column:status"`
+	RowCount     int64      `gorm:"column:row_count"`
+	FilePath     *string    `gorm:"column:file_path"`
+	FileSize     int64      `gorm:"column:file_size"`
+	ErrorCode    *string    `gorm:"column:error_code"`
+	ErrorMessage *string    `gorm:"column:error_message"`
+	CreatedAt    time.Time  `gorm:"column:created_at"`
+	StartedAt    *time.Time `gorm:"column:started_at"`
+	FinishedAt   *time.Time `gorm:"column:finished_at"`
+	ExpiresAt    *time.Time `gorm:"column:expires_at"`
+}
+
+func (auditExportTaskModel) TableName() string { return "audit_export_tasks" }
+
 // 管理员账号（00002_admin.sql）。
 type adminUserModel struct {
 	ID           int64      `gorm:"column:id;primaryKey"`

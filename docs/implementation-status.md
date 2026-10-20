@@ -511,3 +511,113 @@ dead / skipped / discarded ──人工 retry──> pending（event_id 不变�
 2. **worker 与在线请求同进程**：架构建议独立部署。当前靠租约保证多副本不重复，
    拆进程不需要改代码，但还没有独立进程入口。
 3. **H 组（审计查询）仍未实现**：数据在写，但没有查询入口。
+
+---
+
+## 12. 管理端 H 组（审计查询 + 异步导出）
+
+### 12.1 为什么排在 G 组之后立刻做
+
+G 组（§11）回答"事件发出去没有"，H 组回答"当时到底是谁做了什么"。
+两者是同一类能力——**线上排障时的证据链**。审计数据此前一直在写
+（`auth_audit_logs` / `admin_audit_logs`），但没有查询入口，等于
+"有日志、无检索"，出了事故还是只能连库翻。
+
+### 12.2 端点
+
+| 方法 | 路径 | 说明 | 权限 |
+| --- | --- | --- | --- |
+| GET | `/admin/v1/audit-logs` | 业务审计：`app_id` / `action` / `result` / `external_user_id` / `trace_id` / `platform` / `client` / 时间范围 | `audit:read` |
+| GET | `/admin/v1/audit-logs/admin` | 管理端审计：`subject_id` / `action` / `target_type` / `target_id` / `app_id` / `result` / 时间范围 | `audit:read` |
+| POST | `/admin/v1/audit-logs/export` | 提交导出，返回 `task_id`（**202**） | `audit:read` |
+| GET | `/admin/v1/audit-logs/export/{taskId}` | 查任务状态 | `audit:read` |
+| GET | `/admin/v1/audit-logs/export/{taskId}/download` | 下载 CSV | `audit:read` |
+| GET | `/admin/v1/audit-logs/exports` | **补充**：我的导出任务列表 | `audit:read` |
+
+> 文档里写作 `/audit-logs:export`，但 gin 不允许路径段内出现冒号（会被当成参数前缀）。
+> 与 A 组 `secret/rotate`、B 组 `secret/verify` 一致，统一改成斜杠分段。
+>
+> 最后一行是文档未列的必要补齐：`task_id` 只在提交响应里出现一次，
+> 前端刷新页面就再也找不回来，任务列表页无从实现。
+
+### 12.3 关键实现选择
+
+1. **导出必须异步**（§5.5 ①）。审计表是仓库里唯一可能上千万行的表，
+   同步等待会长时间占住连接；用 202 + task_id 让调用方立刻拿到位置。
+2. **流式读取，不用 OFFSET 深翻页**。`audit.Query.Stream` 用
+   `(created_at, id) < (?, ?)` 的键集游标，每批 500 行回调写盘，
+   内存占用与总量无关。导出与页面筛选共用同一套 `auditFilter`——
+   两份过滤逻辑迟早会出现"页面看到 3 条、导出 5 条"。
+3. **`COALESCE` 收敛 NULL**。`external_user_id` / `user_agent` / `trace_id`
+   等列允许为 NULL，GORM 把 NULL 扫进 `string` 会直接报
+   `converting NULL to string is unsupported`。在查询列上收敛成空串，
+   而不是把写入侧的模型全改成指针。
+4. **task_id 用 16 字节随机 hex，不用自增**。它会出现在 URL 里，
+   自增数字可枚举 = 能猜别人的导出任务。归属校验仍然做（只允许本人，
+   `super_admin` 例外），但不可枚举是纵深防御而非替代品。
+5. **下载走鉴权接口，不给直链**。审计含 openid、IP、UA 与错误详情，
+   直链一旦外泄等于永久公开（本地文件存储也给不了预签名 URL）。
+   匿名访问返回 401，已在验收脚本里固化。
+6. **CSV 带 UTF-8 BOM**。不带它 Excel 会把中文按本地编码解释，
+   打开就是乱码——"导出给运营看"的场景里最常见的坑。
+7. **O_EXCL 创建 + 失败只删本次创建的文件**。同名文件存在说明逻辑异常
+   （task_id 随机且唯一），此时宁可失败也不覆盖；反过来，失败清理时
+   若把 O_EXCL 撞到的既有文件删了，就是误伤别人的数据。
+
+### 12.4 状态机
+
+```
+pending ──(worker 领取)──► running ──► succeeded（写 file_path / row_count / expires_at）
+                             └──────► failed（写 error_code / error_message）
+
+启动时：running ──► pending（RequeueStale，进程崩溃遗留）
+每小时 ：expires_at < now ──► 删文件 + 删行（PurgeExpired）
+```
+
+与 outbox 的差别：**没有退避重试**。事件对外有副作用（丢了就是事故），
+导出是幂等只读操作，失败重跑由用户重新提交即可；因此也没有租约，
+靠启动时一次性 `RequeueStale` 收敛崩溃遗留。
+
+### 12.5 配置
+
+```yaml
+audit:
+  export_dir: "./var/exports"   # 置空即关闭 worker（会打 Warn 说明原因）
+  export_file_ttl: "168h"       # 7 天
+  # export_worker_enabled: false
+```
+
+compose 里给 app 挂了 `export-data:/app/var/exports` 卷：
+不挂卷的话容器一重启，已完成的任务就变成"元数据说成功、文件却不在"。
+
+### 12.6 顺带修掉的一处暴露
+
+`GET /admin/v1/apps` 此前把 `*tenant.Application` 直接序列化返回，
+于是 `AppSecretHash` 连同内部字段一起发给了 viewer 角色。哈希虽不可逆，
+但它是验签密钥的**全部秘密所在**，泄露后可离线爆破——属于不必要的暴露。
+
+修复方式不是给领域模型加 `json:"-"`（那样任何新调用点都会重新踩坑），
+而是在 `adminapp` 引入 `AppView` **白名单投影**：新增内部字段默认不外发，
+要外发必须显式加一行。`Create/Update/Get/List` 四个出口全部改为返回视图。
+前端 `web/src/lib/types.ts` 同步删除该字段。
+
+回归保护：`adminapp/service_test.go` 用 JSON 层面断言"响应里不得出现
+`AppSecretHash` / `app_secret_hash`"，验收脚本 step 5 也加了同样的断言。
+
+### 12.7 测试
+
+- `adminaudit`：11 例（非法 result / 时间格式 / 时间倒置 / 过滤透传 /
+  提交状态与 task_id 长度 / 他人任务伪装 404 / 本人可读 / super_admin 可见 /
+  领域错误归一化 / 未完成拒下载 / 过期拒下载 / 路径穿越收敛 / 列表）
+- `auditexport`：6 例（BOM + 表头 + 行数 + detail / 失败回写并删文件 /
+  同名拒绝覆盖 / 队列连续消费 / 无目录立即退出 / 过期清理）
+- `adminapp`：2 例（视图不含 AppSecretHash / nil 安全）
+- 验收脚本新增 step 15.6 共 7 条断言，含"匿名下载 401"
+
+### 12.8 尚未闭环
+
+1. 导出只有 CSV，没有 XLSX / JSON 格式选项。
+2. 导出文件存在本地磁盘，多副本部署时下载请求可能落到没有该文件的实例。
+   当前单副本无影响；拆多副本需要把 FilePath 换成对象存储 key
+   （`audit.ExportStore` 已把"落盘"隔离在 worker 里，改动面可控）。
+3. 前端还没有审计查询与导出页面（后端接口已就绪）。

@@ -49,6 +49,7 @@ coverage.txt
 
 # ---------- 运行时本地数据 ----------
 /data/
+/var/
 /tmp/
 /logs/
 *.log

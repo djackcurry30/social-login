@@ -80,3 +80,15 @@ log:
 migrate:
   # 启动时自动执行迁移。生产必须为 false（由发布流程单独执行）。
   enabled: true
+
+audit:
+  # 审计异步导出的落盘目录（§15.4 H 组）。导出 CSV 会写在这里，
+  # 默认保留 7 天由后台 worker 清理。
+  #
+  # 置空即关闭导出 worker：提交的导出任务会一直停在 pending，
+  # 启动日志会有一条 Warn 说明原因。
+  export_dir: "./var/exports"
+  export_file_ttl: "168h"
+  # 可选：显式关闭 worker（export_dir 非空但不想在本进程跑时使用，
+  # 例如把导出执行放到独立部署的 worker 容器里）。
+  # export_worker_enabled: false
