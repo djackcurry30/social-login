@@ -112,3 +112,15 @@ sms:
   #        接口却返回 200，这种"看起来正常、实际不可用"最难排查。
   # none = 显式声明未接通道：发码接口返回 CONFIG.INVALID 而不是假装成功。
   provider: "log"
+
+ratelimit:
+  # 入站限流（架构 §6.3）。默认关闭。
+  #
+  # 为什么默认关闭：阈值与业务量强相关，猜一个值上线比不限制更危险——
+  # 阈值偏低时正常用户会成片收到 429，而运维的第一反应往往是"服务坏了"。
+  # 打开前请按实际 QPS 校准这两个数。
+  enabled: false
+  # /v1/oauth/notify/{platform}：无鉴权、公网可达，按 平台+IP 限。
+  notify_per_minute: 120
+  # 业务端 /v1/*：按 应用+客户端 IP 限（挂在 AppAuth 之后，才拿得到 app_id）。
+  app_ip_per_minute: 600

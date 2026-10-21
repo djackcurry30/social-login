@@ -26,6 +26,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/infrastructure/webhook"
 	httpapi "github.com/djackcurry30/social-login/internal/interfaces/http"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 
@@ -502,11 +503,20 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger: logger,
 	})
 
+	// 入站限流（§6.3）。未启用时 Limiter 仍构造出来但 Enabled()=false，
+	// 路由装配里会据此跳过挂载。
+	limiter := middleware.NewLimiter(rdb, middleware.LimitConfig{
+		Enabled:         cfg.RateLimit.Enabled,
+		NotifyPerMinute: cfg.RateLimit.NotifyPerMinute,
+		AppIPPerMinute:  cfg.RateLimit.AppIPPerMinute,
+	})
+
 	app.router = httpapi.NewRouter(httpapi.RouterDeps{
 		Handler:      h,
 		Tenant:       tenantSvc,
 		Tokens:       tokenSvc,
 		SecretHasher: appSecretHasher,
+		Limiter:      limiter,
 		Logger:       logger,
 		Admin:        adminDeps,
 		WebFS:        embedweb.FS(),

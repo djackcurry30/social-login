@@ -919,3 +919,60 @@ oauth:revoked_user:{appID}:{user}  = unixNano   TTL = access TTL + 1min
 4. **KMS 信封加密升级**（当前单 KEK 本地主密钥）
 5. **账号注销与数据合规**（含 `Unbind` 不支持的降级提示）
 6. **双人复核流程**
+
+---
+
+## 15. 第四期（中）：入站限流
+
+### 15.1 三档维度里的两档
+
+架构 §6.3 列了四档（app+IP / identity / platform 日配额 / global）。
+本批落地两档，另两档暂缓，理由都在代码注释里写清了：
+
+| 维度 | 状态 | 说明 |
+| --- | --- | --- |
+| `rl:notify:{platform}:ip:{ip}` | ✅ | 平台通知入口无鉴权、公网可达，是被刷的首选目标 |
+| `rl:app:{appID}:ip:{ip}` | ✅ | 业务端，挂在 `AppAuth` 之后才拿得到 app_id |
+| `rl:global:{route}:ip` | ⏸ 不挂 | 按路由计数而 `/admin/assets` 一次页面加载就是几十个请求，3000/min 很易误伤 |
+| `rl:identity:{identityID}` | ⏸ 未做 | 需要 identity 上下文，属于授权流程内部 |
+| `rl:platform:{platform}:day` | ⏸ 未做 | 依赖渠道配额元数据（`Metadata` 里还没有日配额字段） |
+
+### 15.2 为什么用固定窗口
+
+目标是"挡量级"而不是精确整形。一次 `INCR` 就能判定，成本最低；
+代价是窗口边界的突刺（两个窗口交界处可能瞬时双倍），对防刷完全够用。
+令牌桶能整形，但需要多几个 Redis 往返，在这个场景不划算。
+
+窗口号写进 key（`...:{unix/60}`）而不是只靠 TTL：
+只靠 TTL 时"第一个请求决定窗口对齐"，两个请求可能落在同一 key
+但属于不同实际窗口，计数被摊薄。
+
+### 15.3 三个边界决定了它安不安全
+
+1. **Redis 故障时 fail-open**。限流是保护措施，不是正确性前提。
+   一次 Redis 抖动让全站 429，可用性损失远大于"这段时间没限流"。
+2. **阈值 0 = 该维度不限制**，而不是"全部拒绝"。配置漏填把全部请求
+   拒掉，比不限制危险得多。
+3. **429 带 `Retry-After`**（距窗口结束的秒数，不是固定 60）。
+   不带它客户端会立即重试，限流本身变成流量放大器。
+
+### 15.4 默认关闭
+
+`ratelimit.enabled: false`。阈值与业务量强相关，猜一个值上线**比不限制更危险**：
+阈值偏低时正常用户成片收到 429，而运维的第一反应往往是"服务坏了"。
+打开前必须按实际 QPS 校准。
+
+### 15.5 测试
+
+`middleware/ratelimit_test.go`：6 例
+- 未启用放行 / 超限返回 429（含 Retry-After 与 `RATE.LIMITED`）
+- Redis 故障 fail-open / TTL 只设一次 / 阈值 0 跳过 / Retry-After 落在窗口内
+
+「Redis 故障 fail-open」这条专门抽了 `Counter` 接口来造：
+拿着真 Redis 很难把"Redis 挂了"这个分支稳定复现。
+
+### 15.6 尚未交付
+
+- `rl:identity`：需要 identity 上下文，接在授权流程内部（防止撞库与暴力绑定）
+- `rl:platform:{platform}:day`：需要 `Provider.Metadata` 增加日配额字段
+- 管理端按应用调整阈值（当前是服务级配置，与 `provider_guard` 同级）

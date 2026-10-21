@@ -47,7 +47,9 @@ type RouterDeps struct {
 	Tenant       *tenantconfig.Service
 	Tokens       *token.Service
 	SecretHasher *crypto.AppSecretHasher
-	Logger       *zap.Logger
+	// Limiter 是入站限流（文档 §6.3）。为 nil 或未启用时不挂任何中间件。
+	Limiter *middleware.Limiter
+	Logger  *zap.Logger
 	// Admin 是 admin 路由的可选依赖。
 	Admin *admin.RouterDeps
 	// WebFS 是 admin SPA 静态资源（前端 dist）。
@@ -90,7 +92,15 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	//   - 必须允许 POST（Apple 用 POST，且默认 application/x-www-form-urlencoded）；
 	//   - 不挂 AppAuth / UserAuth：调用方是平台的服务器，不是我们的业务方或用户；
 	//   - app_id / scene 由平台侧注册的通知地址携带，用于定位渠道凭据做验签。
-	r.POST("/v1/oauth/notify/:platform", middleware.Timeout(TimeoutNormal), h.Notify)
+	//
+	// 限流挂在最前面：这个端点没有应用凭据可依赖，是最容易被脚本刷的入口，
+	// 必须先于任何业务处理把量挡住。
+	notifyChain := []gin.HandlerFunc{}
+	if deps.Limiter != nil && deps.Limiter.Enabled() {
+		notifyChain = append(notifyChain, deps.Limiter.Notify())
+	}
+	notifyChain = append(notifyChain, middleware.Timeout(TimeoutNormal), h.Notify)
+	r.POST("/v1/oauth/notify/:platform", notifyChain...)
 
 	// JWKS 与 discovery 是公开的：公钥本来就是要给业务方用的。
 	r.GET("/v1/jwks", h.JWKS)
@@ -102,7 +112,13 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// 请求体里，而中间件无法读取尚未绑定的请求体，因此它自行完成凭据校验。
 	r.POST("/v1/token", middleware.Timeout(TimeoutNormal), h.Token)
 
-	appGroup := r.Group("/v1", middleware.AppAuth(deps.Logger, deps.Tenant, deps.SecretHasher))
+	appMIDDLEWARE := []gin.HandlerFunc{middleware.AppAuth(deps.Logger, deps.Tenant, deps.SecretHasher)}
+	if deps.Limiter != nil && deps.Limiter.Enabled() {
+		// 必须挂在 AppAuth 之后：只有那时才知道 app_id。
+		// 挂前面只能按 IP 限，会把 NAT 后面的整个办公室当成一个滥用者。
+		appMIDDLEWARE = append(appMIDDLEWARE, deps.Limiter.AppIP())
+	}
+	appGroup := r.Group("/v1", appMIDDLEWARE...)
 	appGroup.Use(middleware.Timeout(TimeoutNormal))
 	{
 		appGroup.POST("/introspect", h.Introspect)

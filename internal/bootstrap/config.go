@@ -33,6 +33,21 @@ type Config struct {
 	Merge MergeConfig `mapstructure:"merge"`
 	// SMS 是验证码短信通道配置。
 	SMS SMSConfig `mapstructure:"sms"`
+	// RateLimit 是入站限流配置（架构 §6.3）。
+	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
+}
+
+// RateLimitConfig 是入站限流参数。
+//
+// 默认关闭：限流阈值与业务量强相关，猜一个值上线比不限制更危险——
+// 阈值偏低时正常用户会成片收到 429，而运维的第一反应往往是"服务坏了"。
+type RateLimitConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// NotifyPerMinute 是 /v1/oauth/notify/{platform} 的上限（平台 + IP）。
+	// 这个端点无鉴权、公开可达，是被刷的首选目标。
+	NotifyPerMinute int `mapstructure:"notify_per_minute"`
+	// AppIPPerMinute 是业务端应用的上限（app + 客户端 IP）。
+	AppIPPerMinute int `mapstructure:"app_ip_per_minute"`
 }
 
 // SMSConfig 是短信通道配置。
@@ -318,6 +333,10 @@ func setDefaults(v *viper.Viper) {
 
 	// 短信通道默认日志实现（仅开发可用，见 normalizeAndValidate 的生产校验）。
 	v.SetDefault("sms.provider", "log")
+
+	v.SetDefault("ratelimit.enabled", false)
+	v.SetDefault("ratelimit.notify_per_minute", 120)
+	v.SetDefault("ratelimit.app_ip_per_minute", 600)
 }
 
 // normalizeAndValidate 做归一化与启动期校验。
