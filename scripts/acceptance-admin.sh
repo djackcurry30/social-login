@@ -322,6 +322,40 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 [ "$CODE" = "400" ] || fail "缺 reason 期望 400，实际 $CODE"
 ok "retry 缺 reason → 400"
 
+# 15.8 confirm 模式的验证入口（POST /v1/bind/resolve）
+#
+# 只验证HTTP薄壳与校验口径：真库上的"发码 → 验码 → 合并"由
+# test/acceptance 的 TestConfirmVerification* 覆盖（含错误码限次）。
+step "15.8 POST /v1/bind/resolve（校验口径）"
+
+BIND_AUTH=(-H "X-App-Id: $APP_CODE" -H "X-App-Secret: $APP_SECRET" -H "Content-Type: application/json")
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/v1/bind/resolve" "${BIND_AUTH[@]}" \
+  -d '{"external_user_id":"u-probe","action":"send_code"}')
+[ "$CODE" = "400" ] || fail "缺 merge_ticket 期望 400，实际 $CODE"
+ok "缺 merge_ticket → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/v1/bind/resolve" "${BIND_AUTH[@]}" \
+  -d '{"external_user_id":"u-probe","merge_ticket":"mtk_bogus","action":"send_code"}')
+[ "$CODE" = "400" ] || fail "无效票据期望 400，实际 $CODE"
+ok "无效票据 → 400"
+
+RESOLVE_BODY=$(curl -s -m 5 \
+  -X POST "$BASE_URL/v1/bind/resolve" "${BIND_AUTH[@]}" \
+  -d '{"external_user_id":"u-probe","merge_ticket":"mtk_bogus","action":"verify","code":"123456"}')
+echo "$RESOLVE_BODY"
+echo "$RESOLVE_BODY" | grep -q '"code":"BIND.TICKET_INVALID"' \
+  || fail "无效票据验码应返回 BIND.TICKET_INVALID，实际: $RESOLVE_BODY"
+ok "无效票据验码 → BIND.TICKET_INVALID"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/v1/bind/resolve" "${BIND_AUTH[@]}" \
+  -d '{"external_user_id":"u-probe","merge_ticket":"mtk_bogus","action":"hack"}')
+[ "$CODE" = "400" ] || fail "未知 action 期望 400，实际 $CODE"
+ok "未知 action → 400"
+
 # 16. logout
 step "16. POST /admin/v1/auth/logout"
 curl -s -m 3 -X POST "$BASE_URL/admin/v1/auth/logout" -H "$AUTH" >/dev/null

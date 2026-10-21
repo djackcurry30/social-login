@@ -102,3 +102,22 @@ func saveJSON(ctx context.Context, rdb *redis.Client, key string, value any, ttl
 	}
 	return rdb.Set(ctx, key, buf, ttl).Err()
 }
+
+// getJSON 读取并反序列化（不删除）。
+//
+// 与 consumeAndDecode 分开而不是加个 bool 参数：调用方看到方法名就知道
+// 这一步会不会让票据失效。这是"待验证合并票据需要被读两次"的场景前提。
+// 返回 found=false 表示键不存在。
+func getJSON(ctx context.Context, rdb *redis.Client, key string, out any) (bool, error) {
+	raw, err := rdb.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return false, err
+	}
+	return true, nil
+}

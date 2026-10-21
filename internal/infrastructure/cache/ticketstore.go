@@ -19,6 +19,9 @@ const (
 	keyPrefixContext    = "oauth:ticket:"
 	keyPrefixAuthCode   = "oauth:code:"
 	keyPrefixBindTicket = "oauth:bindticket:"
+	// 待验证合并票据。与 bindticket 分开前缀：两者 TTL 与消费语义不同
+	// （bindticket 读即删，merge ticket 只在验证完成时删）。
+	keyPrefixMergeTicket = "oauth:mergeticket:"
 	keyPrefixReplay     = "oauth:replay:"
 )
 
@@ -154,4 +157,48 @@ func (s *TicketStore) SeenReplay(ctx context.Context, fingerprint string) (bool,
 		return false, errs.Wrap(errs.CodeInternal, "查询票据指纹失败", err)
 	}
 	return n > 0, nil
+}
+
+// SaveMergeTicket 保存待验证合并票据。
+func (s *TicketStore) SaveMergeTicket(ctx context.Context, t *ticket.MergeTicket, ttl time.Duration) error {
+	if t == nil || t.Ticket == "" {
+		return errs.New(errs.CodeInternal, "合并票据缺少 ticket")
+	}
+	if ttl <= 0 {
+		ttl = ticket.TTLMergeTicket
+	}
+	if err := saveJSON(ctx, s.rdb, keyPrefixMergeTicket+t.Ticket, t, ttl); err != nil {
+		return errs.Wrap(errs.CodeInternal, "保存合并票据失败", err)
+	}
+	return nil
+}
+
+// GetMergeTicket 读取合并票据（不删除）。
+//
+// 刻意不提供"读即删"：用户要先发码再提交码，同一票据会被读两次。
+// 一次性语义由"验证成功或次数耗尽时 Delete"保证——那才是真正的一次性边界。
+func (s *TicketStore) GetMergeTicket(ctx context.Context, ticketID string) (*ticket.MergeTicket, error) {
+	if ticketID == "" {
+		return nil, ticket.ErrMergeTicketInvalid
+	}
+	var t ticket.MergeTicket
+	found, err := getJSON(ctx, s.rdb, keyPrefixMergeTicket+ticketID, &t)
+	if err != nil {
+		return nil, errs.Wrap(errs.CodeInternal, "读取合并票据失败", err)
+	}
+	if !found {
+		return nil, ticket.ErrMergeTicketInvalid
+	}
+	return &t, nil
+}
+
+// DeleteMergeTicket 使合并票据失效。
+func (s *TicketStore) DeleteMergeTicket(ctx context.Context, ticketID string) error {
+	if ticketID == "" {
+		return nil
+	}
+	if err := s.rdb.Del(ctx, keyPrefixMergeTicket+ticketID).Err(); err != nil {
+		return errs.Wrap(errs.CodeInternal, "删除合并票据失败", err)
+	}
+	return nil
 }

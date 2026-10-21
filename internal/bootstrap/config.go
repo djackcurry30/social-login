@@ -31,6 +31,18 @@ type Config struct {
 	Audit AuditConfig `mapstructure:"audit"`
 	// Merge 是账号合并配置（第三期）。
 	Merge MergeConfig `mapstructure:"merge"`
+	// SMS 是验证码短信通道配置。
+	SMS SMSConfig `mapstructure:"sms"`
+}
+
+// SMSConfig 是短信通道配置。
+type SMSConfig struct {
+	// Provider 取值 log | none。
+	//
+	//	log  把验证码打进日志（仅开发/测试）。release 模式下启动会被拒绝——
+	//	     用户收不到码，表现为"合并流程走到一半没反应"，比启动失败难查得多。
+	//	none 显式声明未接通道：发码接口会返回 CONFIG.INVALID 而不是假装成功。
+	Provider string `mapstructure:"provider"`
 }
 
 // MergeConfig 是账号合并的运行期配置。
@@ -303,6 +315,9 @@ func setDefaults(v *viper.Viper) {
 
 	// 合并补偿默认关闭自动重试（安全默认）。
 	v.SetDefault("merge.remote_idempotent", false)
+
+	// 短信通道默认日志实现（仅开发可用，见 normalizeAndValidate 的生产校验）。
+	v.SetDefault("sms.provider", "log")
 }
 
 // normalizeAndValidate 做归一化与启动期校验。
@@ -312,6 +327,20 @@ func setDefaults(v *viper.Viper) {
 func (c *Config) normalizeAndValidate() error {
 	if c.Server.Addr == "" {
 		return errs.New(errs.CodeConfigInvalid, "server.addr 不能为空")
+	}
+	// 短信通道的生产校验。
+	//
+	// release 模式下用日志通道 = 用户永远收不到验证码，而接口返回 200。
+	// 这种"功能看起来正常、实际不可用"的状态最难排查，必须在启动时拒绝。
+	if c.Server.IsProduction() && (c.SMS.Provider == "" || c.SMS.Provider == "log") {
+		return errs.New(errs.CodeConfigInvalid,
+			"生产环境必须配置真实短信通道：sms.provider 不能为 log/none").
+			WithDetail("hint", "接入短信服务商后把 sms.provider 改为对应实现")
+	}
+	switch c.SMS.Provider {
+	case "", "log", "none":
+	default:
+		return errs.Newf(errs.CodeConfigInvalid, "未知的 sms.provider: %s", c.SMS.Provider)
 	}
 	if c.Server.CallbackBaseURL == "" {
 		return errs.New(errs.CodeConfigInvalid, "server.callback_base_url 不能为空").

@@ -25,6 +25,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/domain/event"
 	"github.com/djackcurry30/social-login/internal/domain/identity"
 	mergex "github.com/djackcurry30/social-login/internal/domain/merge"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
 	"github.com/djackcurry30/social-login/internal/domain/tenant"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
@@ -39,6 +40,12 @@ type Deps struct {
 	Audit     audit.Writer
 	Logger    *zap.Logger
 	Now       func() time.Time
+	// Tickets 保存"待验证合并"票据（confirm 模式）。
+	Tickets ticket.Store
+	// Challenges 存验证码挑战。
+	Challenges mergex.ChallengeStore
+	// Sender 发验证码短信。
+	Sender mergex.CodeSender
 	// RemoteIdempotent 表示用户中心是否真正实现了按幂等键去重（§D3 硬性要求）。
 	//
 	// 为 false 时**不做自动重试**，只发告警：非幂等的 Merge 被重复执行会
@@ -66,6 +73,11 @@ type Request struct {
 	Identity *identity.Identity
 	Trigger  Trigger
 	Reason   string
+	// Verified 表示调用方【已经完成】用户验证（confirm 模式的短信验证）。
+	//
+	// 只有 merge.Service 自己的验证流程会把它置为 true；HTTP 层不暴露这个
+	// 字段——否则调用方可以绕过验证直接声称"我验证过了"，confirm 模式作废。
+	Verified bool
 }
 
 // Result 是合并结果。
@@ -239,9 +251,12 @@ func (s *Service) precheck(req Request) (string, error) {
 	case tenant.MergeModeConfirm:
 		// confirm：需要用户证明对 source 账号的控制权。
 		//
-		// 本轮只做"拒绝静默合并"，验证流程（短信 / 已绑定渠道）由
-		// POST /v1/bind/resolve 承接。这里直接返回哨兵错误，绝不降级为 auto——
-		// 那等于把 confirm 配置静默改成 auto，是最危险的一类静默失败。
+		// Verified=true 表示验证流程（POST /v1/bind/resolve → 短信验证码）已完成。
+		// 未验证时只返回哨兵错误，绝不降级为 auto——那等于把 confirm 配置
+		// 静默改成 auto，是最危险的一类静默失败。
+		if req.Verified {
+			return p.Mode, nil
+		}
 		return p.Mode, ErrNeedVerification
 	case tenant.MergeModeAuto:
 		// auto：用户已登录 target，并成功完成了对 source 身份的授权，

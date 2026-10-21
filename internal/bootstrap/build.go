@@ -8,8 +8,10 @@ import (
 	"gorm.io/gorm"
 
 	domainaccount "github.com/djackcurry30/social-login/internal/domain/account"
+	"github.com/djackcurry30/social-login/internal/domain/merge"
 	infraaccount "github.com/djackcurry30/social-login/internal/infrastructure/account"
 	"github.com/djackcurry30/social-login/internal/infrastructure/crypto"
+	"github.com/djackcurry30/social-login/internal/infrastructure/sms"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/ids"
 	"github.com/djackcurry30/social-login/internal/pkg/jwtkit"
@@ -110,6 +112,24 @@ func buildSigner(cfg *Config, logger *zap.Logger) (*jwtkit.Signer, error) {
 }
 
 // buildAccountProvider 构造账号体系实现（约束 C4）。
+// buildSMSSender 构造验证码发送通道。
+//
+// release 模式下的 "log" 已在 normalizeAndValidate 里被拒绝，
+// 因此这里可以安全地把 log 当作开发专用实现。
+func buildSMSSender(cfg *Config, logger *zap.Logger) merge.CodeSender {
+	switch cfg.SMS.Provider {
+	case "log":
+		logger.Warn("短信通道使用日志实现：验证码只写日志，不会真实发送（仅限开发）")
+		return sms.NewLogSender(logger)
+	case "none", "":
+		logger.Warn("未配置短信通道：confirm 模式的发码接口会返回 CONFIG.INVALID")
+		return sms.NewUnconfiguredSender()
+	default:
+		// 走到这里说明 normalizeAndValidate 与 build 不一致，按未配置处理。
+		return sms.NewUnconfiguredSender()
+	}
+}
+
 func buildAccountProvider(cfg *Config, logger *zap.Logger) (domainaccount.Provider, error) {
 	switch cfg.Account.Provider {
 	case "", "stub":

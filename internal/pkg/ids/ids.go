@@ -23,6 +23,8 @@ const (
 	PrefixAuthCode = "ac"
 	PrefixTrace    = "tr"
 	PrefixMergeOp  = "mrg"
+	// PrefixMergeTicket 是"待验证合并"票据前缀。
+	PrefixMergeTicket = "mtk"
 )
 
 // ULID 返回一个新的 ULID 字符串（26 字符 Crockford Base32，时间有序）。

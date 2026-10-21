@@ -24,7 +24,12 @@ import (
 const (
 	TTLContext    = 5 * time.Minute
 	TTLBindTicket = 10 * time.Minute
-	TTLAuthCode   = 60 * time.Second
+	// TTLMergeTicket 是"待验证合并"的有效期。
+	//
+	// 比 bind_ticket 短：合并是账号归属变更，用户愿意验证就会当场完成；
+	// 留 10 分钟窗口只扩大"手机不在身边时被别人拿走去验证"的机会。
+	TTLMergeTicket = 5 * time.Minute
+	TTLAuthCode    = 60 * time.Second
 )
 
 // 哨兵错误，便于调用方区分"过期"与"被篡改/不存在"。
@@ -35,6 +40,8 @@ var (
 	ErrBindTicketInvalid = errors.New("ticket: bind ticket invalid")
 	// ErrAuthCodeInvalid 表示 auth_code 无效（伪造、已使用、或已过期）。
 	ErrAuthCodeInvalid = errors.New("ticket: auth code invalid")
+	// ErrMergeTicketInvalid 表示待验证合并票据无效（伪造、过期、或已被使用）。
+	ErrMergeTicketInvalid = errors.New("ticket: merge ticket invalid")
 )
 
 // Context 是一次授权流程的服务端上下文。
@@ -85,6 +92,30 @@ type BindTicket struct {
 	CreatedAt time.Time
 }
 
+// MergeTicket 是 confirm 模式下"待验证合并"的上下文。
+//
+// 为什么不用 bind_ticket：bind_ticket 的语义是"把这个 identity 绑到我账号"，
+// 而合并票据记录的是"对方账号是谁、我为什么要合并它"。两者的校验条件
+// 与生命周期都不同，混用会让 bind_ticket 的防抢绑保证失效。
+//
+// ⚠️ 票据里不含任何验证码——验证码另行存放（见 merge.ChallengeStore），
+// 且只存哈希。票据泄露不等于可以完成验证。
+type MergeTicket struct {
+	Ticket string
+	AppID  int64
+	AppCode string
+	// TargetUserID 是当前账号（用户已登录、主动发起绑定的一方）。
+	TargetUserID string
+	// SourceUserID 是被占用身份所属的旧账号（本次要并进来的一方）。
+	SourceUserID string
+	IdentityID   int64
+	Platform     string
+	Scene        string
+	// Verification 是应用配置的验证强度（existing_binding | sms | strict）。
+	Verification string
+	CreatedAt    time.Time
+}
+
 // AuthCode 是一次性授权码，用于 /token 交换。
 //
 // 回调不直接返回令牌（架构 §5.2）：重定向 URL 会进入浏览器历史与 Referer，
@@ -116,6 +147,18 @@ type Store interface {
 
 	SaveAuthCode(ctx context.Context, c *AuthCode, ttl time.Duration) error
 	ConsumeAuthCode(ctx context.Context, code string) (*AuthCode, error)
+
+	// SaveMergeTicket 保存待验证合并票据。
+	SaveMergeTicket(ctx context.Context, t *MergeTicket, ttl time.Duration) error
+
+	// GetMergeTicket 读取待验证合并票据（【不删除】）。
+	//
+	// 与 Consume* 不同：用户需要先用它发验证码、再用它提交验证码，
+	// 同一条票据要被读两次。删除发生在验证成功或失败次数耗尽时。
+	GetMergeTicket(ctx context.Context, ticketID string) (*MergeTicket, error)
+
+	// DeleteMergeTicket 使票据失效（验证成功 / 次数耗尽 / 主动放弃）。
+	DeleteMergeTicket(ctx context.Context, ticketID string) error
 
 	// MarkReplay 记录票据指纹，用于重放检测告警（架构 §6.3）。
 	// 注意命名与 Apple nonce 区分开：这里是"已消费票据指纹"，不是 nonce 库。

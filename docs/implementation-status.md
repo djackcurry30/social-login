@@ -750,10 +750,81 @@ TEST_REDIS_ADDR="127.0.0.1:16379" go test ./test/acceptance/ -run Merge -v
 - **重复解绑幂等**：已 unbound 的再解一次返回成功但不产生新事件，
   避免客服重复点击产生一串重复通知。
 
-### 13.9 尚未交付
+### 13.9 confirm 模式的验证流程（短信）
 
-1. **confirm 模式的验证流程**：当前返回 `BIND.MERGE_REQUIRED`，
-   由 `POST /v1/bind/resolve` 承接验证（短信 / 已绑定渠道）。端点与短信通道未做。
+在这之前，`confirm`（默认模式）遇到绑定冲突只返回 `BIND.MERGE_REQUIRED`，
+用户走到这一步就没有下一步了——**默认配置的应用实际不可用**。本节补齐。
+
+#### 端点
+
+```
+POST /v1/bind/resolve        （app 凭据；Bearer 优先，其次 body 断言账号）
+
+{"merge_ticket":"mtk_...","action":"send_code"}
+  → 200 {"phone_masked":"138****00","expires_at":"...","resend_after_seconds":60}
+
+{"merge_ticket":"mtk_...","action":"verify","code":"123456"}
+  → 200 {"merged_into":"<target>","operation_id":12,"already":false}
+```
+
+#### 为什么是两段式
+
+发码与验码刻意不合并成一个接口：发码有外部副作用（短信费用、手机响），
+必须能单独限流；验码必须能单独拒绝猜想。合成一个"提交即发码+验码"会让
+重试语义失控——用户点两次就是两条短信、两条码都有效。
+
+#### 票据（`ticket.MergeTicket`，5 分钟）
+
+| 字段 | 为什么必须在票据里 |
+| --- | --- |
+| target / source / identity | 前端不得重传：否则可以把"合并 A→B"改成"合并任意账号→我" |
+| verification | 前端据此决定走短信还是其他方式，不该硬编码 |
+| 不含验证码 | 票据泄露 ≠ 可以完成验证；码只存哈希在另一处 |
+
+与 `bind_ticket` 分开：后者的语义是"把这个 identity 绑到我账号"，
+校验条件与生命周期都不同，混用会让它的防抢绑保证失效。
+
+#### 验证码的安全参数
+
+| 参数 | 取值 | 理由 |
+| --- | --- | --- |
+| 长度 | 6 位数字 | **必须左补零**（`000123` 也是合法码，截断会缩小猜测空间） |
+| 存储 | `sha256(ticketID + ":" + code)` | 6 位只有 100 万种可能，不加盐等于给 Redis 快照配一张反查表 |
+| 尝试上限 | 5 次 | 成功率 5e-6；再多一个数量级就够脚本刷开 |
+| 重发间隔 | 60s | 防短信轰炸（成本与投诉），也让"换条短信再猜"慢到不划算 |
+| 有效期 | 5 分钟 | 与票据同步：票据没了码也不该活着 |
+| 递增原子性 | Lua 脚本 + 保留 PTTL | 并发提交不能把 attempts 卡在 1；改写时保留原 PTTL，避免猜错一次就续期 |
+
+#### 失败时的处置
+
+| 场景 | 行为 |
+| --- | --- |
+| 码错（未到上限） | 返回剩余次数，票据保留 |
+| 码错到上限 | **挑战 + 票据一起作废**，用户需从绑定冲突重新开始 |
+| 未发码就验码 | `REQUEST.INVALID` |
+| 票据过期/伪造 | `BIND.TICKET_INVALID` |
+| 调用者 ≠ 票据 target | 403（票据属于别人，不能替他合并） |
+| source 在用户中心没有手机号 | `BIND.MERGE_REQUIRED` + `hint: existing_binding` |
+
+#### 短信通道
+
+`sms.provider`：`log`（只写日志，仅开发）/ `none`（未配置，发码直接报错）。
+
+**release 模式下 `log` / `none` 会让进程启动失败** —— 用户收不到码而接口
+返回 200，这种"看起来正常、实际不可用"的状态最难排查。
+
+#### 仍未做
+
+- **`existing_binding` 验证方式**：用 source 账号上的另一个已绑定渠道
+  完成一次授权来证明控制权。它需要给 `/v1/authorize` 增加一个"验证用途"的
+  模式，侵入核心链路，单独排期。当前 source 无手机号时返回
+  `hint: existing_binding`，前端可提示改用其他登录方式。
+- **`strict`**：服务端行为与 `sms` 相同，区别是前端多一步二次确认弹窗。
+
+### 13.10 尚未交付
+
+1. **`existing_binding` 验证方式**：短信验证已完成（§13.9），
+   用"已绑定渠道再授权一次"证明控制权的方式未做。
 2. **login 链路的 claim 归并**（`on_login=claim_verified` / `detect_only`）：
    `finishLogin` 目前只做 detect_only 的提示，`claim_verified` 的写数据路径未接。
 3. **J 组**（claim 一致性与 mismatch 排查）：未做。C 组已在 §13.8 交付。

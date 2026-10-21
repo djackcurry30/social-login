@@ -9,6 +9,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/application/token"
@@ -24,6 +25,8 @@ type Deps struct {
 	Bindings *binding.Service
 	// Notify 处理平台服务端通知（Apple 解约 / 支付宝异步通知）。
 	Notify *oauthnotify.Service
+	// Merge 是账号合并用例（confirm 模式的验证流程走 /v1/bind/resolve）。
+	Merge *appmerge.Service
 	Signer *jwtkit.Signer
 	// SecretHasher 用于校验 /v1/token 请求体里携带的 client_secret
 	// （该接口不挂 AppAuth 中间件，见 token.go 的说明），

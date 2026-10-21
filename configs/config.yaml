@@ -103,3 +103,12 @@ merge:
   # 本地 stub 实现是真幂等的，因此开发环境打开以便验证补偿链路。
   # ⚠️ 接真实用户中心前，必须在其契约确认幂等后再保持 true。
   remote_idempotent: true
+
+sms:
+  # 验证码短信通道。取值 log | none。
+  #
+  # log  = 验证码只写日志，不真实发送（仅开发/测试可用）。
+  #        生产（server.mode=release）下启动会被拒绝——用户收不到码，
+  #        接口却返回 200，这种"看起来正常、实际不可用"最难排查。
+  # none = 显式声明未接通道：发码接口返回 CONFIG.INVALID 而不是假装成功。
+  provider: "log"

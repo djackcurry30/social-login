@@ -269,7 +269,7 @@ func (s *Service) bindConflict(
 		if err != nil {
 			switch {
 			case errors.Is(err, appmerge.ErrNeedVerification):
-				return nil, s.mergeRequiredErr(app, idn, existing, target)
+				return nil, s.mergeRequiredErr(ctx, app, idn, existing, target)
 			case errors.Is(err, appmerge.ErrRejected):
 				return s.rejectConflict(ctx, app, tc, idn, existing, out, meta, started,
 					"应用策略不允许合并")
@@ -296,8 +296,9 @@ func (s *Service) bindConflict(
 
 	case tenant.MergeModeConfirm:
 		// confirm：不能静默合并，也不能降级成 auto。
-		// 返回专门的错误码，接入方据此弹验证框（§7.5.2 场景 B）。
-		return nil, s.mergeRequiredErr(app, idn, existing, target)
+		// 返回专门的错误码 + 一次性票据，接入方据此弹验证框并调用
+		// POST /v1/bind/resolve（§7.5.2 场景 B）。
+		return nil, s.mergeRequiredErr(ctx, app, idn, existing, target)
 
 	default:
 		// manual（以及任何未知取值）：只提示不处理。
@@ -307,20 +308,60 @@ func (s *Service) bindConflict(
 	}
 }
 
-// mergeRequiredErr 构造"需要验证后合并"的错误。
+// mergeRequiredErr 构造"需要验证后合并"的错误，并签发一次性合并票据。
 //
-// 带 verification 与 merge_mode 两个 details：前端要据此决定用哪种验证方式
-// （短信 / 已绑定渠道），而不是硬编码。
+// 票据里记录 target/source/identity，而不是让前端在验证接口里重新提交这些值：
+// 否则用户可以把"合并 A→B"的票据改成"合并任意账号→我"，验证码就成了
+// 一个万能通行证。
 func (s *Service) mergeRequiredErr(
-	app *tenant.Application, idn *identity.Identity, existing *binding.Binding, target string,
+	ctx context.Context,
+	app *tenant.Application,
+	idn *identity.Identity,
+	existing *binding.Binding,
+	target string,
 ) error {
 	code := errs.CodeBindMergeRequired
-	return errs.New(code, "该三方身份已绑定其他账号，需验证后合并").
-		WithDetail("merge_mode", app.Policy.Merge.Mode).
-		WithDetail("verification", app.Policy.Merge.Verification).
-		WithDetail("target_user_id", target).
-		WithDetail("platform", idn.Platform).
-		WithDetail("action", "调用 POST /v1/bind/resolve 完成验证后合并")
+	details := func(ticketID string) *errs.Error {
+		e := errs.New(code, "该三方身份已绑定其他账号，需验证后合并").
+			WithDetail("merge_mode", app.Policy.Merge.Mode).
+			WithDetail("verification", app.Policy.Merge.Verification).
+			WithDetail("target_user_id", target).
+			WithDetail("platform", idn.Platform).
+			WithDetail("action", "调用 POST /v1/bind/resolve 完成验证后合并")
+		if ticketID != "" {
+			e = e.WithDetail("merge_ticket", ticketID)
+		}
+		return e
+	}
+
+	if s.deps.Tickets == nil {
+		// 没有票据存储就无法完成后续验证。此时仍返回同一个错误码，
+		// 但不带 ticket——前端会展示"需要验证"而没有下一步入口，
+		// 至少比"假装可以合并"安全。
+		return details("")
+	}
+
+	mt := &ticket.MergeTicket{
+		Ticket:       ids.New(ids.PrefixMergeTicket),
+		AppID:        app.ID,
+		AppCode:      app.AppCode,
+		TargetUserID: target,
+		SourceUserID: existing.ExternalUserID,
+		IdentityID:   idn.ID,
+		Platform:     idn.Platform,
+		Verification: app.Policy.Merge.Verification,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := s.deps.Tickets.SaveMergeTicket(ctx, mt, ticket.TTLMergeTicket); err != nil {
+		if s.deps.Logger != nil {
+			s.deps.Logger.Error("保存合并票据失败",
+				zap.Int64("app_id", app.ID),
+				zap.Int64("identity_id", idn.ID),
+				zap.Error(err))
+		}
+		return details("")
+	}
+	return details(mt.Ticket)
 }
 
 // rejectConflict 是"按策略不允许合并"的响应。

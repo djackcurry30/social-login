@@ -20,6 +20,7 @@ import (
 // 如果实现变了导致别的方法被调用，测试会立刻炸出来，而不是静默返回零值。
 type fakeTickets struct {
 	savedAuthCodes []*ticket.AuthCode
+	mergeTickets   []*ticket.MergeTicket
 }
 
 func (f *fakeTickets) SaveContext(context.Context, *ticket.Context, time.Duration) error {
@@ -41,6 +42,14 @@ func (f *fakeTickets) SaveAuthCode(_ context.Context, c *ticket.AuthCode, _ time
 func (f *fakeTickets) ConsumeAuthCode(context.Context, string) (*ticket.AuthCode, error) {
 	panic("unexpected ConsumeAuthCode")
 }
+func (f *fakeTickets) SaveMergeTicket(_ context.Context, t *ticket.MergeTicket, _ time.Duration) error {
+	f.mergeTickets = append(f.mergeTickets, t)
+	return nil
+}
+func (f *fakeTickets) GetMergeTicket(context.Context, string) (*ticket.MergeTicket, error) {
+	return nil, ticket.ErrMergeTicketInvalid
+}
+func (f *fakeTickets) DeleteMergeTicket(context.Context, string) error { return nil }
 func (f *fakeTickets) MarkReplay(context.Context, string, time.Duration) error { return nil }
 func (f *fakeTickets) SeenReplay(context.Context, string) (bool, error)        { return false, nil }
 
@@ -107,7 +116,7 @@ func TestBindConflictAutoMerges(t *testing.T) {
 
 // TestBindConflictConfirmRequiresVerification：confirm 绝不能静默合并。
 func TestBindConflictConfirmRequiresVerification(t *testing.T) {
-	svc, _, mk, app, tc, idn, ex := conflictFixture(tenant.MergeModeConfirm)
+	svc, tk, mk, app, tc, idn, ex := conflictFixture(tenant.MergeModeConfirm)
 
 	_, err := svc.bindConflict(context.Background(), app, tc, idn, ex, &CallbackOutput{},
 		reqmetaZero(), time.Now())
@@ -119,6 +128,17 @@ func TestBindConflictConfirmRequiresVerification(t *testing.T) {
 	}
 	if mk.calls != 0 {
 		t.Fatal("需要验证时不得执行合并")
+	}
+	// confirm 必须签发一次性合并票据，否则前端拿到错误也没有下一步入口。
+	if len(tk.mergeTickets) != 1 {
+		t.Fatalf("应签发 1 张合并票据，实际 %d", len(tk.mergeTickets))
+	}
+	mt := tk.mergeTickets[0]
+	if mt.TargetUserID != "user-C" || mt.SourceUserID != "user-B" {
+		t.Fatalf("票据里的双方账号错误: %+v", mt)
+	}
+	if mt.Ticket == "" {
+		t.Fatal("票据 ID 不能为空")
 	}
 }
 

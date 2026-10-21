@@ -241,6 +241,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Locker:           cache.NewMergeLocker(rdb),
 		Audit:            auditRepo,
 		Logger:           logger,
+		Tickets:          ticketStore,
+		Challenges:       cache.NewMergeChallengeStore(rdb),
+		Sender:           buildSMSSender(cfg, logger),
 		RemoteIdempotent: cfg.Merge.RemoteIdempotent,
 	})
 	// 补偿时需要读应用策略（Resume 不做前置校验，但仍需要 app 上下文）。
@@ -465,6 +468,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Tokens:       tokenSvc,
 		Bindings:     bindingSvc,
 		Notify:       notifySvc,
+		Merge:        mergeSvc,
 		Signer:       signer,
 		SecretHasher: appSecretHasher,
 		Issuer:       cfg.Server.Issuer,

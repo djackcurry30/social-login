@@ -120,6 +120,11 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		// ② 的安全性来自 app_secret：能持有它的是可信服务端，它断言"这是我自己的账号"
 		// 与 OAuth2 中客户端断言用户身份是同一模式。
 		appGroup.POST("/bind", h.Bind)
+		// /v1/bind/resolve 是 confirm 模式的验证入口：绑定冲突后拿到
+		// merge_ticket，先发码再提交码，成功后完成合并。
+		// 它同样不挂 UserAuth——理由与 /bind 一致（服务端到服务端场景），
+		// 但内部会用 Bearer 优先的原则确定"当前是谁"。
+		appGroup.POST("/bind/resolve", h.Resolve)
 	}
 
 	// --- 用户端点（应用凭据 + 已登录用户） ---
