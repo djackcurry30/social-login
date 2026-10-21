@@ -40,6 +40,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
+	"github.com/djackcurry30/social-login/internal/application/admingrant"
 	"github.com/djackcurry30/social-login/internal/application/adminidentity"
 	"github.com/djackcurry30/social-login/internal/application/adminkey"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
@@ -426,6 +427,17 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:      logger,
 	})
 
+	// K 组：管理员授权。
+	//
+	// 与 admin_users.role 并存取并集（见 admin.User.Can）：
+	// 这样上线不需要迁移现有管理员，也不会因漏迁让人失去权限。
+	adminGrantSvc := admingrant.New(admingrant.Deps{
+		Grants:     postgres.NewAdminGrantRepository(db),
+		Users:      adminUserRepo,
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+	})
+
 	// F 组：签名密钥轮换。
 	//
 	// keyStore 可能为 nil（未配置 security.key_dir）：此时 rotate/retire
@@ -492,6 +504,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminIdentity: adminIdentitySvc,
 		AdminSession:  adminSessionSvc,
 		AdminKey:      adminKeySvc,
+		AdminGrant:    adminGrantSvc,
 	}
 	_ = adminDeps
 

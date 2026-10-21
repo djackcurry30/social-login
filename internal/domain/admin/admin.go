@@ -148,6 +148,36 @@ type User struct {
 	LastLoginAt  *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// Grants 是该管理员当前生效的附加授权（K 组）。
+	//
+	// 由仓储在 FindByID / FindByUsername 时一并加载，而不是在鉴权中间件里
+	// 再查一次——中间件在每一个管理端请求的热路径上。
+	Grants []Grant
+}
+
+// Can 判断管理员是否拥有某项权限。
+//
+// 判定是【基础角色 ∪ 附加授权】：这样 K 组上线不需要一次性迁移所有
+// 现有管理员，也不会因为漏迁而让人突然失去权限。
+//
+// ⚠️ 当前忽略 Grant.ScopeAppID：现有接口没有"按应用"的权限边界，
+// 按全局处理。真正的按应用隔离需要中间件拿到目标 app_id，
+// 那是一次跨所有端点的改动。
+func (u *User) Can(perm string) bool {
+	if u == nil {
+		return false
+	}
+	if u.Role.Has(perm) {
+		return true
+	}
+	now := time.Now().UTC()
+	for i := range u.Grants {
+		g := &u.Grants[i]
+		if g.Effective(now) && g.Role.Has(perm) {
+			return true
+		}
+	}
+	return false
 }
 
 // Enabled 判断账号是否可用。

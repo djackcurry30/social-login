@@ -137,6 +137,17 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.POST("/bindings/:id/transfer", adminmw.Require("binding:transfer"), idH.Transfer)
 		}
 
+		// K 组：管理员授权（§15.4）
+		//
+		// 三个端点全部要求 admin:grant —— 该权限只有 super_admin 拥有。
+		// 能改"谁能进管理端"的人必须是最小集合。
+		if deps.AdminGrant != nil {
+			gH := handler.NewAdminGrantsHandler(deps.AdminGrant, deps.Logger)
+			api.GET("/admin-grants", adminmw.Require("admin:grant"), gH.List)
+			api.POST("/admin-grants", adminmw.Require("admin:grant"), gH.Grant)
+			api.DELETE("/admin-grants/:id", adminmw.Require("admin:grant"), gH.Revoke)
+		}
+
 		// F 组：签名密钥（§15.4）
 		//
 		// rotate / retire 是高危操作：一次错误的 retire 会让全站旧 token

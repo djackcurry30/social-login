@@ -1078,3 +1078,90 @@ list    → 旧密钥 status=published，带 demoted_at / retirable_at
 - **紧急轮换流程**（密钥泄漏）：需要"立即切换 + 撤销受影响 token"的组合动作，
   当前 `rotate` + `tokens/revoke` 可人工拼出，但没有一键入口
 - **轮换周期提醒**：90 天建议值没有内置检查
+
+---
+
+## 17. 第四期：管理员授权（K 组）
+
+### 17.1 与 `admin_users.role` 的关系：并存取并集
+
+`admin_users.role` 只能表达"一个人一个角色"。现实里常见两种需求它表达不了：
+
+- **临时提权**："这个人这个月临时加 operator 处理一批客诉"
+- **按应用限定**："只允许他管这个应用"
+
+`admin_grants` 用 `subject_id + role + scope_app_id + expires_at` 覆盖这两种。
+
+**关键决定是"并存取并集"而不是"grants 取代 role"**：
+
+```go
+func (u *User) Can(perm string) bool {
+    if u.Role.Has(perm) { return true }          // 基础角色
+    for _, g := range u.Grants {                  // 附加授权
+        if g.Effective(now) && g.Role.Has(perm) { return true }
+    }
+    return false
+}
+```
+
+如果改成"只认 grants"，K 组上线瞬间所有现有管理员会全部失去权限——
+因为 `admin_grants` 从一期就是空表。那是上线事故，不是设计。
+
+### 17.2 端点
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/admin/v1/admin-grants` | `admin:grant` |
+| POST | `/admin/v1/admin-grants` | `admin:grant` |
+| DELETE | `/admin/v1/admin-grants/{id}` | `admin:grant` |
+
+`admin:grant` 只有 `super_admin` 拥有（`Role.Has` 对它恒真）。这条边界很重要：
+**能改"谁能进管理端"的人必须是最小集合**——`test/domain/admin` 里
+`TestViewerCannotGrant` 专门守住它（含 operator / config_admin）。
+
+### 17.3 几个实现细节
+
+- **grants 在仓储层加载**（`FindByID` / `FindByUsername` 后调 `attachGrants`），
+  而不是让中间件再查一次：中间件在每一个管理端请求的热路径上，
+  而这两个方法有多个调用点（登录、鉴权、管理端查询），漏掉任何一处
+  都会让权限判定不一致。
+- **受授主体必须存在**：不校验会建出"授予了一个不存在的人"的记录——
+  列表里看得见、永远不生效，排查时会被当成"授权没起作用"。
+- **`subject_id` 形如 `admin:<id>`**：与 `admin_audit_logs.subject_id` 同一套命名，
+  便于把"谁被授权"与"谁做了什么"直接对上。将来切 SSO 时换成 IdP 的 sub，
+  校验逻辑改成"在 IdP 中存在"，接口不变。
+- **`expires_at` 必须是未来**：过去的到期时间等于"授予即失效"，几乎必然是填错。
+- **`ScopeAppID` 当前被鉴权层忽略**：现有 52 个管理端接口没有"按应用"的权限边界。
+  真正的按应用隔离需要中间件拿到目标 `app_id`（路径参数或请求体），
+  那是一次跨所有端点的改动。字段先留着，语义写在 `Grant` 的注释里。
+
+### 17.4 实测（本地 compose）
+
+把 admin 的 `role` 临时改成 `viewer`，再逐项验证：
+
+```
+viewer            → GET /tokens      200（token:read 有）
+viewer            → POST /tokens/revoke 403（token:revoke 无）
+viewer            → GET /admin-grants  403（admin:grant 无）
++ grant operator  → POST /tokens/revoke 200   ← grants 生效
+                    GET /admin-grants   403   ← 没有溢出
+撤销 grant        → POST /tokens/revoke 403   ← 立即回到基线
+```
+
+最后一行值得注意：**撤 grant 不需要重新登录**——鉴权中间件每请求都从库读
+`User` 与 `Grants`，所以权限变更是即时生效的。
+
+### 17.5 测试
+
+- `domain/admin`：7 例（并集判定 / 过期与撤销 / super_admin 恒真 /
+  viewer/operator/config_admin 都拿不到 admin:grant / nil 安全 / Effective 三态 / SubjectOf）
+- `application/admingrant`：11 例（reason / 未知角色 / subject 格式 / 账号不存在 /
+  过去的 expires_at / granted_by / 撤销 404 归一化 / 过滤透传 / 仓储错误透出）
+- 验收脚本新增 15.97 共 8 条断言，17 步全过
+
+### 17.6 尚未交付
+
+- **管理员账号管理**（创建 / 停用 / 改密）：当前靠 `cmd/adminseed` 引导，
+  管理端没有入口。K 组只解决"授权"，不解决"开户"。
+- **按应用限定的鉴权**（`ScopeAppID` 生效）：需要中间件拿到目标 app_id。
+- **双人复核**（`admin_approvals`）：表未建，高危操作的审批流未做。

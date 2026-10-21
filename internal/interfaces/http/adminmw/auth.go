@@ -130,7 +130,9 @@ func Require(perm string) gin.HandlerFunc {
 			httputil.Fail(c, nil, errs.New(errs.CodeUnauthorized, "未认证"))
 			return
 		}
-		if !principal.User.Role.Has(perm) {
+		// 用 Can 而不是 Role.Has：K 组的附加授权（grants）也参与判定，
+		// 否则"临时加 operator"这类授权等于没生效。
+		if !principal.User.Can(perm) {
 			httputil.Fail(c, nil, errs.New(errs.CodeForbidden,
 				"权限不足: "+perm).
 				WithDetail("required", perm).

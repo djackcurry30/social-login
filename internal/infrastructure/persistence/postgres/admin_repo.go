@@ -44,7 +44,11 @@ func (r *AdminUserRepository) FindByUsername(ctx context.Context, username strin
 	if err != nil {
 		return nil, errs.Wrap(errs.CodeInternal, "查询管理员账号失败", err)
 	}
-	return adminUserToDomain(&m), nil
+	u := adminUserToDomain(&m)
+	if err := attachGrants(ctx, r.db, time.Now().UTC(), u); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 // FindByID 按主键查找。
@@ -60,7 +64,11 @@ func (r *AdminUserRepository) FindByID(ctx context.Context, id int64) (*admin.Us
 	if err != nil {
 		return nil, errs.Wrap(errs.CodeInternal, "查询管理员账号失败", err)
 	}
-	return adminUserToDomain(&m), nil
+	u := adminUserToDomain(&m)
+	if err := attachGrants(ctx, r.db, time.Now().UTC(), u); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 // Insert 插入新账号。

@@ -452,6 +452,65 @@ if [ -n "$ACTIVE_KID" ]; then
   ok "下线当前签名密钥 → 409"
 fi
 
+# 15.97 K 组：管理员授权
+#
+# 核心边界：admin:grant 只有 super_admin 有（能改"谁能进管理端"的人
+# 必须是最小集合）；受授主体必须是已存在的管理员账号。
+step "15.97 K 组：管理员授权"
+
+GRANTS=$(curl -s -m 5 "$BASE_URL/admin/v1/admin-grants?page_size=5" -H "$AUTH")
+echo "$GRANTS"
+echo "$GRANTS" | grep -q '"items":' || fail "授权列表查询失败: $GRANTS"
+ok "授权可查"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/admin-grants" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"subject_id":"admin:1","role":"viewer","reason":"x"}')
+[ "$CODE" = "400" ] || fail "缺 reason 期望 400，实际 $CODE"
+ok "授予缺 reason → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/admin-grants" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"subject_id":"admin:1","role":"root","reason":"验收：未知角色"}')
+[ "$CODE" = "400" ] || fail "未知角色期望 400，实际 $CODE"
+ok "未知角色 → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/admin-grants" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"subject_id":"admin:99999999","role":"operator","reason":"验收：不存在的账号"}')
+[ "$CODE" = "404" ] || fail "不存在的账号期望 404，实际 $CODE"
+ok "授予不存在的账号 → 404"
+
+# 给 admin 自己加一条 viewer 授权（幂等，重复跑返回同一条）。
+GRANT=$(curl -s -m 5 \
+  -X POST "$BASE_URL/admin/v1/admin-grants" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"subject_id":"admin:1","role":"viewer","reason":"验收：演示临时授权"}')
+echo "$GRANT"
+echo "$GRANT" | grep -q '"role":"viewer"' || fail "授予未生效: $GRANT"
+GRANT_ID=$(echo "$GRANT" | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+ok "授予成功（grant_id=$GRANT_ID）"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/admin-grants?subject_id=admin:1" -H "$AUTH")
+[ "$CODE" = "200" ] || fail "按主体查询期望 200，实际 $CODE"
+ok "按主体可查"
+
+# reason 走 body：query 里的中文短词会因长度校验（≥4 字符）被判 400，
+# 那是校验在起作用，不是 bug——这里要验的是"不存在 → 404"。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X DELETE "$BASE_URL/admin/v1/admin-grants/99999999" -H "$AUTH" \
+  -H "Content-Type: application/json" -d '{"reason":"验收：撤销不存在的授权"}')
+[ "$CODE" = "404" ] || fail "撤销不存在的授权期望 404，实际 $CODE"
+ok "撤销不存在的授权 → 404"
+
+if [ -n "$GRANT_ID" ]; then
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+    -X DELETE "$BASE_URL/admin/v1/admin-grants/$GRANT_ID" -H "$AUTH" \
+    -H "Content-Type: application/json" -d '{"reason":"验收：撤销临时授权"}')
+  [ "$CODE" = "200" ] || fail "撤销期望 200，实际 $CODE"
+  ok "撤销成功"
+fi
+
 # 16. logout
 step "16. POST /admin/v1/auth/logout"
 curl -s -m 3 -X POST "$BASE_URL/admin/v1/auth/logout" -H "$AUTH" >/dev/null
