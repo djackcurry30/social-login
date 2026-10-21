@@ -14,6 +14,7 @@ package admin
 
 import (
 	"errors"
+	"sort"
 	"time"
 )
 
@@ -153,6 +154,43 @@ type User struct {
 	// 由仓储在 FindByID / FindByUsername 时一并加载，而不是在鉴权中间件里
 	// 再查一次——中间件在每一个管理端请求的热路径上。
 	Grants []Grant
+}
+
+// Permissions 返回该管理员的全部有效权限（基础角色 ∪ 生效 grants）。
+//
+// super_admin 用通配 "\u002a" 表达"全部权限"，而不是把所有权限字符串列一遍：
+// 权限表会随接口增加而增长，逐一枚举意味着每次加权限都要记得改这里。
+// 前端 consumes 这个返回值来决定按钮是否可用（见 web/src/lib/auth.ts）。
+func (u *User) Permissions() []string {
+	if u == nil {
+		return nil
+	}
+	if u.Role == RoleSuperAdmin {
+		return []string{"*"}
+	}
+	set := make(map[string]struct{}, 16)
+	for p := range Permissions[u.Role] {
+		set[p] = struct{}{}
+	}
+	now := time.Now().UTC()
+	for i := range u.Grants {
+		g := &u.Grants[i]
+		if !g.Effective(now) {
+			continue
+		}
+		if g.Role == RoleSuperAdmin {
+			return []string{"*"}
+		}
+		for p := range Permissions[g.Role] {
+			set[p] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out) // 稳定输出：便于前端缓存与测试对比
+	return out
 }
 
 // Can 判断管理员是否拥有某项权限。

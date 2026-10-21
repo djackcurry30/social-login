@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react'
 
 import { SigningKeysApi } from '@/lib/api'
+import { can, useMe } from '@/lib/auth'
 import type { SigningKeyInfo } from '@/lib/types'
 import { fmtTime } from '@/lib/utils'
 import FormDialog from '@/components/FormDialog'
@@ -39,6 +40,9 @@ type Dialog =
   | null
 
 export default function SigningKeysPage() {
+  const { me } = useMe()
+  // 轮换与下线都是 key:write；没有权限时按钮置灰，而不是让用户点了吃 403。
+  const canWrite = can(me, 'key:write')
   const [rows, setRows] = useState<SigningKeyInfo[]>([])
   const [jwks, setJwks] = useState<unknown>(null)
   const [loading, setLoading] = useState(false)
@@ -87,7 +91,13 @@ export default function SigningKeysPage() {
           <Button variant="outline" onClick={openJwks}>
             预览 JWKS
           </Button>
-          <Button onClick={() => setDialog({ kind: 'rotate' })}>轮换密钥</Button>
+          <Button
+            onClick={() => setDialog({ kind: 'rotate' })}
+            disabled={!canWrite}
+            title={canWrite ? '' : '需要 key:write 权限（config_admin 及以上）'}
+          >
+            轮换密钥
+          </Button>
         </div>
       </div>
 
@@ -144,6 +154,8 @@ export default function SigningKeysPage() {
                         <Button
                           size="sm"
                           variant="destructive"
+                          disabled={!canWrite}
+                          title={canWrite ? '' : '需要 key:write 权限（config_admin 及以上）'}
                           onClick={() => setDialog({ kind: 'retire', kid: k.kid })}
                         >
                           下线

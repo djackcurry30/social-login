@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react'
 
 import { AppsApi, SessionsApi } from '@/lib/api'
+import { can, useMe } from '@/lib/auth'
 import type {
   Application,
   RevocationView,
@@ -38,6 +39,8 @@ import {
 } from '@/components/ui/table'
 
 export default function SessionsPage() {
+  const { me } = useMe()
+  const canRevoke = can(me, 'token:revoke')
   const [apps, setApps] = useState<Application[]>([])
   const [appId, setAppId] = useState<number | ''>('')
   const [userId, setUserId] = useState('')
@@ -159,7 +162,8 @@ export default function SessionsPage() {
             <Button
               variant="destructive"
               size="sm"
-              disabled={appId === '' || !userId}
+              disabled={appId === '' || !userId || !canRevoke}
+              title={canRevoke ? '' : '需要 token:revoke 权限（operator 及以上）'}
               onClick={() => setOfflineOpen(true)}
             >
               强制下线

@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react'
 
 import { AppsApi, MergesApi } from '@/lib/api'
+import { can, useMe } from '@/lib/auth'
 import type { Application, MergeImpact, MergeOperation } from '@/lib/types'
 import { fmtTime } from '@/lib/utils'
 import FormDialog from '@/components/FormDialog'
@@ -61,6 +62,8 @@ type Dialog =
   | null
 
 export default function MergesPage() {
+  const { me } = useMe()
+  const canRetry = can(me, 'merge:retry')
   const [apps, setApps] = useState<Application[]>([])
   const [appId, setAppId] = useState<number | ''>('')
   const [status, setStatus] = useState('')
@@ -226,6 +229,8 @@ export default function MergesPage() {
                           <Button
                             size="sm"
                             variant="outline"
+                            disabled={!canRetry}
+                            title={canRetry ? '' : '需要 merge:retry 权限（operator 及以上）'}
                             onClick={() => setDialog({ kind: 'retry', op: m })}
                           >
                             重试
@@ -233,6 +238,8 @@ export default function MergesPage() {
                           <Button
                             size="sm"
                             variant="secondary"
+                            disabled={!canRetry}
+                            title={canRetry ? '' : '需要 merge:retry 权限（operator 及以上）'}
                             onClick={() => setDialog({ kind: 'resolve', op: m })}
                           >
                             人工收尾

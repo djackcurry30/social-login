@@ -8,6 +8,7 @@
 import { useEffect, useState } from 'react'
 
 import { GrantsApi } from '@/lib/api'
+import { can, useMe } from '@/lib/auth'
 import type { AdminGrant } from '@/lib/types'
 import { fmtTime } from '@/lib/utils'
 import FormDialog from '@/components/FormDialog'
@@ -45,6 +46,8 @@ const ROLES = [
 ]
 
 export default function AdminGrantsPage() {
+  const { me } = useMe()
+  const canGrant = can(me, 'admin:grant')
   const [subjectId, setSubjectId] = useState('')
   const [includeRevoked, setIncludeRevoked] = useState(false)
   const [rows, setRows] = useState<AdminGrant[]>([])
@@ -87,7 +90,13 @@ export default function AdminGrantsPage() {
             与 admin_users.role 取并集，不会削减原有权限。
           </p>
         </div>
-        <Button onClick={() => setDialog({ kind: 'grant' })}>授予角色</Button>
+        <Button
+          onClick={() => setDialog({ kind: 'grant' })}
+          disabled={!canGrant}
+          title={canGrant ? '' : '需要 admin:grant（仅 super_admin）'}
+        >
+          授予角色
+        </Button>
       </div>
 
       <Alert>
@@ -96,6 +105,12 @@ export default function AdminGrantsPage() {
         不需要对方重新登录。本页需要 <span className="font-mono">admin:grant</span>，
         通常只有 super_admin 拥有。
       </Alert>
+
+      {!canGrant ? (
+        <Alert variant="destructive">
+          当前角色没有 admin:grant 权限，本页只能查看。授权入口仅对 super_admin 开放。
+        </Alert>
+      ) : null}
 
       {err ? <div className="text-sm text-destructive">{err}</div> : null}
       {notice ? <div className="text-sm text-green-600">{notice}</div> : null}

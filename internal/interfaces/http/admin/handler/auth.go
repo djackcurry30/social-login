@@ -257,10 +257,13 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		return
 	}
 	httputil.OK(c, http.StatusOK, gin.H{
-		"user_id":            p.User.ID,
-		"username":           p.User.Username,
-		"display_name":       p.User.DisplayName,
-		"role":               p.User.Role,
+		"user_id":      p.User.ID,
+		"username":     p.User.Username,
+		"display_name": p.User.DisplayName,
+		"role":         p.User.Role,
+		// 有效权限集（基础角色 ∪ 生效 grants）。前端据此决定按钮是否可点，
+		// 避免"点了才 403"。super_admin 返回 ["*"]。
+		"permissions":        p.User.Permissions(),
 		"last_login_at":      p.User.LastLoginAt,
 		"session_expires_at": p.Session.ExpiresAt,
 	})

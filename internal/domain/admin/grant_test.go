@@ -116,3 +116,65 @@ func TestSubjectOf(t *testing.T) {
 		}
 	}
 }
+
+// TestPermissionsForSuperAdminIsWildcard：super_admin 返回通配符，
+// 而不是把权限字符串逐一枚举——权限表会随接口增长，枚举必然漏。
+func TestPermissionsForSuperAdminIsWildcard(t *testing.T) {
+	u := &User{ID: 1, Role: RoleSuperAdmin}
+	got := u.Permissions()
+	if len(got) != 1 || got[0] != "*" {
+		t.Fatalf("super_admin 应返回 [\"*\"]，实际 %v", got)
+	}
+}
+
+// TestPermissionsIncludesEffectiveGrants：/auth/me 下发的权限集必须含 grants。
+//
+// 前端据此禁用无权限的按钮；如果这里漏了 grants，viewer 加了 operator 授权后
+// 按钮仍然是灰的——"给了我权限却不让点"，比不给更难解释。
+func TestPermissionsIncludesEffectiveGrants(t *testing.T) {
+	u := &User{ID: 1, Role: RoleViewer, Grants: []Grant{futureGrant(RoleOperator)}}
+	got := u.Permissions()
+	has := func(p string) bool {
+		for _, v := range got {
+			if v == p {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("token:revoke") {
+		t.Fatalf("应包含 grants 带来的 token:revoke，实际 %v", got)
+	}
+	if !has("app:read") {
+		t.Fatalf("应保留基础角色的 app:read，实际 %v", got)
+	}
+	if has("admin:grant") {
+		t.Fatal("viewer + operator 不应包含 admin:grant")
+	}
+	// 稳定排序：前端会缓存它，顺序乱跳没有意义。
+	for i := 1; i < len(got); i++ {
+		if got[i-1] > got[i] {
+			t.Fatalf("权限集应有序: %v", got)
+		}
+	}
+}
+
+// TestPermissionsExcludesExpiredGrante：过期授权不进权限集。
+func TestPermissionsExcludesExpiredGrante(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour)
+	u := &User{ID: 1, Role: RoleViewer, Grants: []Grant{
+		{SubjectID: "admin:1", Role: RoleOperator, ExpiresAt: &past},
+	}}
+	for _, p := range u.Permissions() {
+		if p == "token:revoke" {
+			t.Fatal("过期授权不应出现在权限集里")
+		}
+	}
+}
+
+func TestPermissionsNilUser(t *testing.T) {
+	var u *User
+	if got := u.Permissions(); got != nil {
+		t.Fatalf("nil 用户应返回 nil，实际 %v", got)
+	}
+}

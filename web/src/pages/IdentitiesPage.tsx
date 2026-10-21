@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react'
 
 import { AppsApi, IdentitiesApi } from '@/lib/api'
+import { can, useMe } from '@/lib/auth'
 import type {
   Application,
   BindingItem,
@@ -43,6 +44,10 @@ type Dialog =
   | null
 
 export default function IdentitiesPage() {
+  const { me } = useMe()
+  // 解绑与 transfer 是两组权限：transfer 更高危（改变渠道归属），单独判定。
+  const canUnbind = can(me, 'binding:write')
+  const canTransfer = can(me, 'binding:transfer')
   const [apps, setApps] = useState<Application[]>([])
   const [appId, setAppId] = useState<number | ''>('')
   const [platform, setPlatform] = useState('')
@@ -317,6 +322,8 @@ export default function IdentitiesPage() {
                               <Button
                                 size="sm"
                                 variant="outline"
+                                disabled={!canTransfer}
+                                title={canTransfer ? '' : '需要 binding:transfer 权限'}
                                 onClick={() => setDialog({ kind: 'transfer', binding: b })}
                               >
                                 转移
@@ -324,6 +331,8 @@ export default function IdentitiesPage() {
                               <Button
                                 size="sm"
                                 variant="destructive"
+                                disabled={!canUnbind}
+                                title={canUnbind ? '' : '需要 binding:write 权限（operator 及以上）'}
                                 onClick={() => setDialog({ kind: 'unbind', binding: b })}
                               >
                                 强制解绑

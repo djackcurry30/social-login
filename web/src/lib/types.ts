@@ -39,6 +39,8 @@ export interface MeOutput {
   username: string
   display_name: string
   role: Role
+  /** 有效权限集（基础角色 ∪ grants）；super_admin 为 ["*"] */
+  permissions: string[]
   last_login_at: string | null
   session_expires_at: string
 }
