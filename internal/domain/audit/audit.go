@@ -146,4 +146,3 @@ type Query interface {
 	// fn 返回错误即中止（用于写盘失败），错误原样上抛。
 	Stream(ctx context.Context, f Filter, batch int, fn func([]Record) error) error
 }
-

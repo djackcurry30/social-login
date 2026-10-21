@@ -32,10 +32,10 @@ import (
 )
 
 const (
-	cfgTeamID   = "team_id"
-	cfgKeyID    = "key_id"
-	cfgJWKSURL  = "jwks_url"
-	cfgTokenURL = "token_url"
+	cfgTeamID    = "team_id"
+	cfgKeyID     = "key_id"
+	cfgJWKSURL   = "jwks_url"
+	cfgTokenURL  = "token_url"
 	cfgRevokeURL = "revoke_url"
 
 	defaultJWKSURL   = "https://appleid.apple.com/auth/keys"

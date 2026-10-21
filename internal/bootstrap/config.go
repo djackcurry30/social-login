@@ -209,11 +209,11 @@ type ProviderGuardConfig struct {
 
 // CircuitBreakerConfig 对应 §5.6.5 的 YAML。
 type CircuitBreakerConfig struct {
-	Enabled     bool   `mapstructure:"enabled"`
-	Granularity string `mapstructure:"granularity"` // platform | platform_scene
-	WindowSeconds int  `mapstructure:"window_seconds"`
-	BucketSeconds int  `mapstructure:"bucket_seconds"`
-	MinRequests   int  `mapstructure:"min_requests"`
+	Enabled       bool   `mapstructure:"enabled"`
+	Granularity   string `mapstructure:"granularity"` // platform | platform_scene
+	WindowSeconds int    `mapstructure:"window_seconds"`
+	BucketSeconds int    `mapstructure:"bucket_seconds"`
+	MinRequests   int    `mapstructure:"min_requests"`
 
 	FailureRatio        float64       `mapstructure:"failure_ratio"`
 	TimeoutRatio        float64       `mapstructure:"timeout_ratio"`

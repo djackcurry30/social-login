@@ -30,7 +30,7 @@ type Deps struct {
 	Exports    audit.ExportStore
 	AdminAudit admin.AuditWriter
 	// Logger 目前只在 worker 侧使用；用例内不记录失败分支（审计写入失败由 auditx 兜底）。
-	Now        func() time.Time
+	Now func() time.Time
 	// ExportTTL 是导出文件保留期，默认 7 天。
 	ExportTTL time.Duration
 	// ExportDir 是导出文件落盘目录（与 auditexport worker 共用同一配置）。
@@ -221,16 +221,16 @@ func (s *Service) ListAdmin(ctx context.Context, in AdminListInput) (*AdminListO
 
 // ExportInput 是 POST /admin/v1/audit-logs/export 的入参。
 type ExportInput struct {
-	AppID          int64  `json:"app_id,omitempty"`
-	Action         string `json:"action,omitempty"`
-	Result         string `json:"result,omitempty"`
-	ExternalUserID string `json:"external_user_id,omitempty"`
-	TraceID        string `json:"trace_id,omitempty"`
-	Platform       string `json:"platform,omitempty"`
-	Client         string `json:"client,omitempty"`
-	From           string `json:"from,omitempty"`
-	To             string `json:"to,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	AppID          int64            `json:"app_id,omitempty"`
+	Action         string           `json:"action,omitempty"`
+	Result         string           `json:"result,omitempty"`
+	ExternalUserID string           `json:"external_user_id,omitempty"`
+	TraceID        string           `json:"trace_id,omitempty"`
+	Platform       string           `json:"platform,omitempty"`
+	Client         string           `json:"client,omitempty"`
+	From           string           `json:"from,omitempty"`
+	To             string           `json:"to,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
 	Principal      *admin.Principal `json:"-"`
 }
 

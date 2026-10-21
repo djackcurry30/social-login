@@ -209,7 +209,7 @@ func (r *AdminSessionRepository) Insert(ctx context.Context, s *admin.Session) e
 //
 // 不主动过滤 expires_at 与 revoked_at：上层用 Session.Expired() / Revoked() 判断，
 // 仓储只负责"是否存在"。这样调用方可以基于同一份实体做多种判断
-//（如审计时想知道"会话被撤销的时间点"）。
+// （如审计时想知道"会话被撤销的时间点"）。
 func (r *AdminSessionRepository) FindByTokenHash(ctx context.Context, tokenHash string) (*admin.Session, error) {
 	if tokenHash == "" {
 		return nil, errs.New(errs.CodeInvalidRequest, "token_hash 不能为空")
@@ -292,18 +292,18 @@ func (w *AdminAuditWriter) Write(ctx context.Context, e *admin.AuditEvent) error
 	}
 
 	m := adminAuditLogModel{
-		SubjectID:  e.SubjectID,
-		Action:     e.Action,
-		TargetType: e.TargetType,
-		TargetID:   e.TargetID,
-		AppID:      e.AppID,
-		Reason:     e.Reason,
+		SubjectID:   e.SubjectID,
+		Action:      e.Action,
+		TargetType:  e.TargetType,
+		TargetID:    e.TargetID,
+		AppID:       e.AppID,
+		Reason:      e.Reason,
 		BeforeState: jsonFromMap(e.BeforeState),
 		AfterState:  jsonFromMap(e.AfterState),
-		TraceID:    e.TraceID,
-		Result:     e.Result,
-		ErrorCode:  e.ErrorCode,
-		CreatedAt:  time.Now().UTC(),
+		TraceID:     e.TraceID,
+		Result:      e.Result,
+		ErrorCode:   e.ErrorCode,
+		CreatedAt:   time.Now().UTC(),
 	}
 	if e.ClientIP != "" {
 		ip := e.ClientIP

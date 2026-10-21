@@ -25,8 +25,8 @@ import (
 	"github.com/djackcurry30/social-login/internal/domain/event"
 	"github.com/djackcurry30/social-login/internal/domain/identity"
 	mergex "github.com/djackcurry30/social-login/internal/domain/merge"
-	"github.com/djackcurry30/social-login/internal/domain/ticket"
 	"github.com/djackcurry30/social-login/internal/domain/tenant"
+	"github.com/djackcurry30/social-login/internal/domain/ticket"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
@@ -276,12 +276,12 @@ func (s *Service) precheck(req Request) (string, error) {
 
 func (s *Service) mergedEvent(req Request, op *mergex.Operation, remote *account.MergeResult) *mergex.ConvergeEvent {
 	payload := map[string]any{
-		"merge_id":               op.ID,
-		"target_user_id":         req.TargetUserID,
-		"source_user_id":         req.SourceUserID,
-		"trigger":                string(req.Trigger),
-		"occurred_at":            s.deps.Now().Format(time.RFC3339),
-		"notify_source_account":  true,
+		"merge_id":              op.ID,
+		"target_user_id":        req.TargetUserID,
+		"source_user_id":        req.SourceUserID,
+		"trigger":               string(req.Trigger),
+		"occurred_at":           s.deps.Now().Format(time.RFC3339),
+		"notify_source_account": true,
 	}
 	if req.Identity != nil {
 		payload["identity_id"] = req.Identity.ID

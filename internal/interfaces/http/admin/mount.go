@@ -137,6 +137,17 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.POST("/bindings/:id/transfer", adminmw.Require("binding:transfer"), idH.Transfer)
 		}
 
+		// E 组：会话与令牌（§15.4）
+		//
+		// 查询给 viewer（排查客诉的第一步就是看会话列表）；
+		// 强制下线与审计同级——它是高危撤销，必须 token:revoke。
+		if deps.AdminSession != nil {
+			sH := handler.NewSessionsHandler(deps.AdminSession, deps.Logger)
+			api.GET("/tokens", adminmw.Require("token:read"), sH.List)
+			api.GET("/revoked-jti", adminmw.Require("token:read"), sH.GetRevocation)
+			api.POST("/tokens/revoke", adminmw.Require("token:revoke"), sH.Revoke)
+		}
+
 		// D 组：账号合并运维（§15.4）
 		//
 		// 读与推进分开：读给 viewer，retry/resolve 会改变账号归属事实，

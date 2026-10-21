@@ -830,3 +830,92 @@ POST /v1/bind/resolve        （app 凭据；Bearer 优先，其次 body 断言�
 3. **J 组**（claim 一致性与 mismatch 排查）：未做。C 组已在 §13.8 交付。
 4. **HTTPAccountProvider**：`account.provider=http` 仍显式报错，等用户中心联调。
 5. **管理端前端**：D 组接口已就绪，页面未做。
+
+---
+
+## 14. 第四期（上）：会话与令牌（E 组）+ jti 撤销名单（修正 P0-5）
+
+### 14.1 这一步补的是什么
+
+此前 `Introspect` 对 `check_revocation=true` 的回应是：
+
+```go
+return nil, errs.New(errs.CodeProviderNotSupported,
+    "check_revocation 尚未实现（第四期），当前仅支持本地验签")
+```
+
+也就是**安全敏感操作（改密、提现、绑定新渠道）拿不到强校验**，
+只能接受 15 分钟的撤销窗口。这既是 P0-5 的欠项，也让 E 组的
+"强制下线"无法兑现承诺。
+
+### 14.2 分层撤销的落地（§8.4）
+
+| 场景 | 处理 | 生效延迟 |
+| --- | --- | --- |
+| 普通登出 | 撤销该设备 refresh_token | ≤ 15 min |
+| 管理员强制下线 | 撤销全部 refresh_token **+ 写账号撤销水位** | 强校验下立即 |
+| 已知 jti 的精确撤销 | 写 jti 黑名单（TTL = 令牌剩余有效期） | 强校验下立即 |
+
+**为什么账号级用"水位"而不是枚举 jti**：管理员强制下线时根本不知道
+有哪些 access_token 在飞（它们是本地签发的 JWT，服务端不存）。
+水位 = "该账号在 T 之前签发的令牌全部失效"，一条 Redis 键就够，
+且 TTL 只需覆盖一个 access_token 生命周期——过了这个时间旧令牌自然过期。
+
+键：
+```
+oauth:revoked_jti:{jti}            = "1"        TTL = 令牌剩余有效期
+oauth:revoked_user:{appID}:{user}  = unixNano   TTL = access TTL + 1min
+```
+
+### 14.3 端点（§15.4 E 组）
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/admin/v1/tokens` | `token:read` |
+| POST | `/admin/v1/tokens/revoke` | `token:revoke` |
+| GET | `/admin/v1/revoked-jti` | `token:read` |
+
+实现要点：
+
+- **会话列表不返回 `token_hash`**：它是"持有即可换令牌"的凭据哈希，
+  管理端只需要定位会话（id / 设备 / 时间）。
+- **`active` 是三态**（`""` / `true` / `false`）：用 bool 的话
+  "查全部"与"查已撤销"无法区分，而排查客诉恰恰要能只看已失效的会话。
+- **`app_id` 强制必填**：会话按应用隔离（C1），不指定可能把用户
+  在别的应用里的会话一起踢掉。
+- **返回 `effective_window_seconds`**：未开启强校验的调用方仍可能接受
+  旧令牌的剩余时间。运营对用户说"已下线"时需要知道这句话的准确含义。
+- **撤销名单未装配时直接失败**，不做半套——半套会让运营以为下线成功。
+
+### 14.4 边界语义
+
+`session.Revoked` 把两处判定收敛成一个函数（jti 命中 / 水位比对），
+避免"introspect 说有效、网关说无效"这类分叉：
+
+- 水位使用 `!issuedAt.After(at)`：**撤销与签发同毫秒时归入撤销一侧**，
+  宁可多踢一个，不要漏一个。
+- 查询失败**上抛错误**而不是返回 false：调用方明确要求强校验，
+  一次 Redis 抖动不该变成安全缺口。
+- 撤销名单为 nil 时返回 false（不声称已撤销）：如果"安全默认"返回 true，
+  一次装配遗漏就会让所有强校验请求被判无效——全站不可用。
+
+### 14.5 测试
+
+- `domain/session`：4 例（nil 保守 / jti 命中 / 水位边界 / 错误上抛）
+- `application/adminsession`：9 例
+- 集成测试（真 DB + 真 Redis）：`TestForceOfflineInvalidatesAccessToken`
+  - 下线前强校验 active=true
+  - 下线后强校验 **active=false**
+  - 默认模式**仍为 active**（≤15 分钟窗口，这是设计权衡而非 bug）
+  - refresh_token 全部撤销
+  - 撤销水位可查
+- 验收脚本新增 15.9 共 8 条断言，17 步全过
+
+### 14.6 尚未交付（第四期剩余）
+
+1. **F 组**（签名密钥管理：`rotate` / `retire`，§8.3 四步）
+2. **K 组**（管理员授权：`admin_grants` 表已建，当前仍按 `admin_users.role` 单角色）
+3. **限流**（入站限流中间件整体未做，含 provider 维度配额）
+4. **KMS 信封加密升级**（当前单 KEK 本地主密钥）
+5. **账号注销与数据合规**（含 `Unbind` 不支持的降级提示）
+6. **双人复核流程**

@@ -26,16 +26,16 @@ func (e wxError) failed() bool { return e.ErrCode != 0 }
 //   - 我们的配置错误（appsecret 错 / 无接口权限）→ AUTH.INVALID_CONFIG，
 //     计入熔断但单独告警（它不会自愈，等下去只是浪费流量）
 const (
-	codeInvalidCode        = 40029 // code 无效
-	codeCodeUsed           = 40163 // code 已被使用
-	codeInvalidAppID       = 40013 // appid 无效
-	codeInvalidSecret      = 40125 // appsecret 无效
-	codeAPIUnauthorized    = 48001 // 接口未授权（公众号 scope 不足）
-	codeUserNotExist       = 40003 // openid 无效
-	codeRateLimit          = 45011 // 频率限制
-	codeSystemBusy         = -1    // 系统繁忙
-	codeTokenExpired       = 42001 // access_token 过期
-	codeInvalidCredential  = 40001 // 凭据无效
+	codeInvalidCode       = 40029 // code 无效
+	codeCodeUsed          = 40163 // code 已被使用
+	codeInvalidAppID      = 40013 // appid 无效
+	codeInvalidSecret     = 40125 // appsecret 无效
+	codeAPIUnauthorized   = 48001 // 接口未授权（公众号 scope 不足）
+	codeUserNotExist      = 40003 // openid 无效
+	codeRateLimit         = 45011 // 频率限制
+	codeSystemBusy        = -1    // 系统繁忙
+	codeTokenExpired      = 42001 // access_token 过期
+	codeInvalidCredential = 40001 // 凭据无效
 )
 
 func wxErr(e wxError, platform string) *errs.Error {

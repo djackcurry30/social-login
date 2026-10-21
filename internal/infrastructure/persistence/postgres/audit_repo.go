@@ -306,8 +306,8 @@ func (r *AuditRepository) Write(ctx context.Context, e *audit.Event) error {
 		UserAgent:      e.UserAgent,
 		TraceID:        e.TraceID,
 		// NOT NULL 列：不是每条审计都有 detail。
-		Detail:         jsonNotNull(e.Detail),
-		CreatedAt:      at,
+		Detail:    jsonNotNull(e.Detail),
+		CreatedAt: at,
 	}
 	if e.ClientIP != "" {
 		ip := e.ClientIP

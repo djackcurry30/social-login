@@ -3,7 +3,7 @@
 // 设计依据：架构 §15.3 规定管理员身份复用用户中心账号，但当前阶段
 // 用户中心尚未落地（参 docs/admin-quickstart.md），本包实现"本地账号密码起步"的
 // 临时形态：身份在 admin_users 本地维护，subject_id 字段保留为兼容位
-//（先填 admin_users.id 的字符串化，将来切 OIDC SSO 时只换中间件）。
+// （先填 admin_users.id 的字符串化，将来切 OIDC SSO 时只换中间件）。
 //
 // 演进路径：
 //   - 接用户中心 / OIDC SSO：password_hash 列废弃不写，subject_id 填 IdP 标识
@@ -28,10 +28,10 @@ import (
 type Role string
 
 const (
-	RoleViewer      Role = "viewer"      // *:read
-	RoleOperator    Role = "operator"    // viewer + binding:* token:revoke merge:retry
+	RoleViewer      Role = "viewer"       // *:read
+	RoleOperator    Role = "operator"     // viewer + binding:* token:revoke merge:retry
 	RoleConfigAdmin Role = "config_admin" // viewer + app:* config:* key:* event:*
-	RoleSuperAdmin  Role = "super_admin" // 全部 + admin:grant
+	RoleSuperAdmin  Role = "super_admin"  // 全部 + admin:grant
 )
 
 // AllRoles 列出全部内置角色（校验与测试用）。

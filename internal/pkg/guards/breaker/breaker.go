@@ -40,8 +40,8 @@ const (
 // 为什么不放应用级：熔断保护的是所有应用共享的连接池与 goroutine。
 // 若允许某个应用关掉熔断，它就能替所有应用关掉保护。
 type Config struct {
-	Enabled      bool
-	Granularity  string
+	Enabled       bool
+	Granularity   string
 	WindowSeconds int
 	BucketSeconds int
 	MinRequests   int
@@ -361,9 +361,9 @@ func ratio(n, total int) float64 {
 // 熔断是降级保护机制，不应该依赖 Redis，否则 Redis 故障时保护也一起失效。
 // 副本数超过约 20 时再考虑"熔断事件广播"，而不是每次调用读共享状态。
 type Guard struct {
-	cfg   Config
-	log   *zap.Logger
-	now   func() time.Time
+	cfg Config
+	log *zap.Logger
+	now func() time.Time
 
 	mu    sync.RWMutex
 	items map[string]*item
@@ -473,13 +473,13 @@ func (g *Guard) newItem(key, platform, scene string) *item {
 	}
 
 	it.cb = gobreaker.NewCircuitBreaker[struct{}](gobreaker.Settings{
-		Name:         key,
-		MaxRequests:  g.cfg.HalfOpenRequests,
-		Interval:     0, // 0 = 不按时间重置：窗口统计由我们自己负责
-		Timeout:      g.cfg.OpenDuration,
-		ReadyToTrip:  readyToTrip,
+		Name:          key,
+		MaxRequests:   g.cfg.HalfOpenRequests,
+		Interval:      0, // 0 = 不按时间重置：窗口统计由我们自己负责
+		Timeout:       g.cfg.OpenDuration,
+		ReadyToTrip:   readyToTrip,
 		OnStateChange: onStateChange,
-		IsSuccessful: isSuccessful,
+		IsSuccessful:  isSuccessful,
 	})
 	return it
 }

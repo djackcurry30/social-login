@@ -47,12 +47,12 @@ func (r *IdentityRepository) Upsert(ctx context.Context, in identity.UpsertInput
 	ctx = appctx.WithAppScope(ctx, in.AppID)
 
 	m := identityModel{
-		AppID:           in.AppID,
-		Platform:        in.Platform,
-		ProviderAppID:   in.ProviderAppID,
-		OpenID:          in.OpenID,
-		UnionID:         in.UnionID,
-		IdentityKey:     in.IdentityKey,
+		AppID:         in.AppID,
+		Platform:      in.Platform,
+		ProviderAppID: in.ProviderAppID,
+		OpenID:        in.OpenID,
+		UnionID:       in.UnionID,
+		IdentityKey:   in.IdentityKey,
 		// NOT NULL 列：平台什么都没返回时 Profile 为空，不能写 NULL。
 		ProfileSnapshot: jsonNotNull(in.Profile),
 		ProfileSyncedAt: &at,

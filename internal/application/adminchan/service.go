@@ -35,13 +35,13 @@ import (
 //
 // ⚠️ JSON key 沿用 Go 字段名（大驼峰），与 web/src/lib/types.ts 保持一致。
 type ConfigView struct {
-	ID              int64          `json:"ID"`
-	AppID           int64          `json:"AppID"`
-	Platform        string         `json:"Platform"`
-	Scene           string         `json:"Scene"`
-	ConfigKey       string         `json:"ConfigKey"`
-	ProviderAppID   string         `json:"ProviderAppID"`
-	SecretRotatedAt *time.Time     `json:"SecretRotatedAt,omitempty"`
+	ID              int64      `json:"ID"`
+	AppID           int64      `json:"AppID"`
+	Platform        string     `json:"Platform"`
+	Scene           string     `json:"Scene"`
+	ConfigKey       string     `json:"ConfigKey"`
+	ProviderAppID   string     `json:"ProviderAppID"`
+	SecretRotatedAt *time.Time `json:"SecretRotatedAt,omitempty"`
 	// SecretRotationInProgress 替代原来的 SecretCipherPrev：
 	// 前端本来只用它判断"是否处于轮换过渡期"，没有必要为此下发密文。
 	SecretRotationInProgress bool           `json:"SecretRotationInProgress"`
@@ -106,15 +106,15 @@ func New(d Deps) *Service {
 
 // CreateConfigInput 是 POST /admin/v1/apps/{appId}/provider-configs 的入参。
 type CreateConfigInput struct {
-	AppID         int64           `json:"app_id"`
-	Platform      string          `json:"platform" binding:"required"`
-	Scene         string          `json:"scene" binding:"required"`
-	ConfigKey     string          `json:"config_key"`
-	Env           string          `json:"env"`
-	ProviderAppID string          `json:"provider_app_id" binding:"required"`
-	ClientSecret  string          `json:"client_secret" binding:"required"` // 明文，仅在创建/轮换时上传
-	Extra         map[string]any  `json:"extra,omitempty"`
-	Reason        string          `json:"reason" binding:"required"`
+	AppID         int64          `json:"app_id"`
+	Platform      string         `json:"platform" binding:"required"`
+	Scene         string         `json:"scene" binding:"required"`
+	ConfigKey     string         `json:"config_key"`
+	Env           string         `json:"env"`
+	ProviderAppID string         `json:"provider_app_id" binding:"required"`
+	ClientSecret  string         `json:"client_secret" binding:"required"` // 明文，仅在创建/轮换时上传
+	Extra         map[string]any `json:"extra,omitempty"`
+	Reason        string         `json:"reason" binding:"required"`
 	Principal     *admin.Principal
 }
 
@@ -220,9 +220,9 @@ func (s *Service) UpdateConfig(ctx context.Context, id int64, in UpdateConfigInp
 
 // RotateSecretInput 是 POST .../secret:rotate 的入参。
 type RotateSecretInput struct {
-	NewSecret   string
-	Reason      string
-	Principal   *admin.Principal
+	NewSecret string
+	Reason    string
+	Principal *admin.Principal
 }
 
 // RotateSecretOutput 是轮换出参。
@@ -302,11 +302,11 @@ type VerifyConfigInput struct {
 
 // VerifyConfigOutput 是连通性校验结果。
 type VerifyConfigOutput struct {
-	OK        bool          `json:"ok"`
-	LatencyMs int64         `json:"latency_ms"`
-	Error     string        `json:"error,omitempty"`
-	HTTPStatus int          `json:"http_status,omitempty"`
-	ProviderError string    `json:"provider_error,omitempty"`
+	OK            bool   `json:"ok"`
+	LatencyMs     int64  `json:"latency_ms"`
+	Error         string `json:"error,omitempty"`
+	HTTPStatus    int    `json:"http_status,omitempty"`
+	ProviderError string `json:"provider_error,omitempty"`
 }
 
 // VerifyConfig 连通性校验。
@@ -371,8 +371,8 @@ func (s *Service) VerifyConfig(ctx context.Context, id int64, in VerifyConfigInp
 	}
 	s.writeAudit(ctx, in.Principal, "config.verify", "provider_config", fmt.Sprintf("%d", id),
 		in.Reason, nil, map[string]any{
-			"ok":         out.OK,
-			"latency_ms": out.LatencyMs,
+			"ok":          out.OK,
+			"latency_ms":  out.LatencyMs,
 			"http_status": out.HTTPStatus,
 		}, result, verifyErr)
 	return out, nil
@@ -475,19 +475,19 @@ func configToState(c *tenant.ProviderConfig) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"id":                       c.ID,
-		"app_id":                   c.AppID,
-		"platform":                 c.Platform,
-		"scene":                    c.Scene,
-		"config_key":               c.ConfigKey,
-		"provider_app_id":          c.ProviderAppID,
-		"env":                      c.Env,
-		"status":                   c.Status,
-		"version":                  c.Version,
-		"secret_cipher_prev_set":   c.SecretCipherPrev != nil,
-		"secret_dek_id":            c.SecretDEKID,
-		"secret_rotated_at":        c.SecretRotatedAt,
-		"extra":                    c.Extra,
+		"id":                     c.ID,
+		"app_id":                 c.AppID,
+		"platform":               c.Platform,
+		"scene":                  c.Scene,
+		"config_key":             c.ConfigKey,
+		"provider_app_id":        c.ProviderAppID,
+		"env":                    c.Env,
+		"status":                 c.Status,
+		"version":                c.Version,
+		"secret_cipher_prev_set": c.SecretCipherPrev != nil,
+		"secret_dek_id":          c.SecretDEKID,
+		"secret_rotated_at":      c.SecretRotatedAt,
+		"extra":                  c.Extra,
 	}
 }
 

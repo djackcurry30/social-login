@@ -101,8 +101,8 @@ type BindTicket struct {
 // ⚠️ 票据里不含任何验证码——验证码另行存放（见 merge.ChallengeStore），
 // 且只存哈希。票据泄露不等于可以完成验证。
 type MergeTicket struct {
-	Ticket string
-	AppID  int64
+	Ticket  string
+	AppID   int64
 	AppCode string
 	// TargetUserID 是当前账号（用户已登录、主动发起绑定的一方）。
 	TargetUserID string

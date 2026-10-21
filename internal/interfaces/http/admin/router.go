@@ -25,10 +25,11 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminidentity"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
-	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/application/adminsession"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/adminmw"
 )
@@ -51,6 +52,8 @@ type Deps struct {
 	AdminMerge *adminmerge.Service
 	// AdminIdentity 是 C 组（身份与绑定）用例。
 	AdminIdentity *adminidentity.Service
+	// AdminSession 是 E 组（会话与令牌）用例。
+	AdminSession *adminsession.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。

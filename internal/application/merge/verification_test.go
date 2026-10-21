@@ -16,10 +16,10 @@ import (
 // --- fakes ---
 
 type fakeTicketStore struct {
-	ticket   *ticket.MergeTicket
-	getErr   error
-	deleted  []string
-	saved    int
+	ticket  *ticket.MergeTicket
+	getErr  error
+	deleted []string
+	saved   int
 }
 
 func (f *fakeTicketStore) SaveContext(context.Context, *ticket.Context, time.Duration) error {
@@ -61,10 +61,10 @@ func (f *fakeTicketStore) MarkReplay(context.Context, string, time.Duration) err
 func (f *fakeTicketStore) SeenReplay(context.Context, string) (bool, error)        { return false, nil }
 
 type fakeChallenges struct {
-	item     *mergex.Challenge
-	bumps    int
-	deletes  int
-	saved    *mergex.Challenge
+	item    *mergex.Challenge
+	bumps   int
+	deletes int
+	saved   *mergex.Challenge
 }
 
 func (f *fakeChallenges) Save(_ context.Context, c *mergex.Challenge, _ time.Duration) error {

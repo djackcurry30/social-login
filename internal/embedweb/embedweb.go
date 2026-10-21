@@ -3,9 +3,9 @@
 // 设计依据：架构 §15.6 第 1 项"管理端 SPA 与后端单 binary 部署"。
 //
 // 工作流（详见 Makefile → web-sync）：
-//   1. web/ 下 npm run build → web/dist/
-//   2. cp -r web/dist internal/embedweb/dist
-//   3. 重新构建 Go 二进制（go:embed 嵌入 dist）
+//  1. web/ 下 npm run build → web/dist/
+//  2. cp -r web/dist internal/embedweb/dist
+//  3. 重新构建 Go 二进制（go:embed 嵌入 dist）
 //
 // 与 migrations/embed.go 的差异：
 //   - migrations 是【必要】资源；

@@ -49,7 +49,7 @@ func (f *fakeTickets) SaveMergeTicket(_ context.Context, t *ticket.MergeTicket, 
 func (f *fakeTickets) GetMergeTicket(context.Context, string) (*ticket.MergeTicket, error) {
 	return nil, ticket.ErrMergeTicketInvalid
 }
-func (f *fakeTickets) DeleteMergeTicket(context.Context, string) error { return nil }
+func (f *fakeTickets) DeleteMergeTicket(context.Context, string) error         { return nil }
 func (f *fakeTickets) MarkReplay(context.Context, string, time.Duration) error { return nil }
 func (f *fakeTickets) SeenReplay(context.Context, string) (bool, error)        { return false, nil }
 

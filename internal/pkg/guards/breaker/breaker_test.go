@@ -41,7 +41,7 @@ func newTestGuard(t *testing.T, mutate func(*Config)) (*Guard, *fakeClock) {
 	return g, clk
 }
 
-func connErr() error   { return errs.New(errs.CodeProviderUnavailable, "无法连接三方平台") }
+func connErr() error    { return errs.New(errs.CodeProviderUnavailable, "无法连接三方平台") }
 func timeoutErr() error { return errs.New(errs.CodeProviderTimeout, "三方超时") }
 func rejectErr() error  { return errs.New(errs.CodeProviderRejected, "code 已使用") }
 

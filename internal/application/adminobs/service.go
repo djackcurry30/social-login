@@ -96,8 +96,8 @@ func (s *Service) ListProviders() []provider.Metadata {
 
 // HealthResult 是 providers/health 的出参。
 type HealthResult struct {
-	ProbedAt time.Time         `json:"probed_at"`
-	Items    []ProviderHealth  `json:"items"`
+	ProbedAt time.Time        `json:"probed_at"`
+	Items    []ProviderHealth `json:"items"`
 }
 
 // PingProviders 并发探测全部渠道可达性。
@@ -192,11 +192,11 @@ func (s *Service) PingProviders(ctx context.Context) (*HealthResult, error) {
 
 // OverviewStats 是 health/overview 的摘要。
 type OverviewStats struct {
-	ProviderCount     int                    `json:"provider_count"`
-	AppsCount         int                    `json:"apps_count"`
-	HealthyProviders  int                    `json:"healthy_providers"`
-	UnhealthyProviders int                   `json:"unhealthy_providers"`
-	ByPlatform        map[string]int         `json:"by_platform"`
+	ProviderCount      int            `json:"provider_count"`
+	AppsCount          int            `json:"apps_count"`
+	HealthyProviders   int            `json:"healthy_providers"`
+	UnhealthyProviders int            `json:"unhealthy_providers"`
+	ByPlatform         map[string]int `json:"by_platform"`
 }
 
 // Overview 关键指标摘要。

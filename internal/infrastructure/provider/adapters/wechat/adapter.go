@@ -45,12 +45,12 @@ const (
 
 // Adapter 是微信渠道实现（一个实例对应一个 scene）。
 type Adapter struct {
-	meta   provider.Metadata
-	scene  string
-	apiBase string
+	meta     provider.Metadata
+	scene    string
+	apiBase  string
 	openBase string
-	http   *httpx.Client
-	tokens *accessTokenCache
+	http     *httpx.Client
+	tokens   *accessTokenCache
 }
 
 // --- 场景构造 ---
@@ -381,9 +381,9 @@ func (a *Adapter) UserInfo(ctx context.Context, req provider.UserInfoRequest) (*
 		out.OpenID = openID
 	}
 	return &provider.ExternalUser{
-		OpenID:     out.OpenID,
-		Nickname:   out.Nickname,
-		AvatarURL:  out.HeadImgURL,
+		OpenID:    out.OpenID,
+		Nickname:  out.Nickname,
+		AvatarURL: out.HeadImgURL,
 		// UnionID 按 C3 不写入。
 		Raw: map[string]any{
 			"openid":   out.OpenID,

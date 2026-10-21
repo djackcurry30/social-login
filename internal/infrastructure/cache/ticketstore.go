@@ -22,7 +22,7 @@ const (
 	// 待验证合并票据。与 bindticket 分开前缀：两者 TTL 与消费语义不同
 	// （bindticket 读即删，merge ticket 只在验证完成时删）。
 	keyPrefixMergeTicket = "oauth:mergeticket:"
-	keyPrefixReplay     = "oauth:replay:"
+	keyPrefixReplay      = "oauth:replay:"
 )
 
 // TicketStore 是 ticket.Store 的 Redis 实现。

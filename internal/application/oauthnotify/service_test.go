@@ -56,9 +56,11 @@ type fakeSource struct {
 	seenAudience string
 }
 
-func (f *fakeSource) Kind() identitysource.Kind            { return identitysource.KindProvider }
-func (f *fakeSource) Key() string                          { return "apple:app" }
-func (f *fakeSource) Metadata() provider.Metadata          { return provider.Metadata{Platform: "apple", Scene: "app"} }
+func (f *fakeSource) Kind() identitysource.Kind { return identitysource.KindProvider }
+func (f *fakeSource) Key() string               { return "apple:app" }
+func (f *fakeSource) Metadata() provider.Metadata {
+	return provider.Metadata{Platform: "apple", Scene: "app"}
+}
 func (f *fakeSource) BeginAuth(context.Context, provider.AuthorizeRequest) (*provider.AuthorizeResult, error) {
 	return nil, nil
 }

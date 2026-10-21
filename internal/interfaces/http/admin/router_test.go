@@ -79,10 +79,10 @@ func (s *stubSessionRepo) Revoke(_ context.Context, _ int64) error { return nil 
 // --- 测试装配 ---
 
 type fixture struct {
-	router  *gin.Engine
-	users   *stubUserRepo
-	sess    *stubSessionRepo
-	token   string
+	router *gin.Engine
+	users  *stubUserRepo
+	sess   *stubSessionRepo
+	token  string
 }
 
 func newFixture(t *testing.T) *fixture {

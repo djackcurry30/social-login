@@ -124,11 +124,11 @@ func (s *Service) ListIdentities(ctx context.Context, in IdentityListInput) (*Id
 // value_hash 只返回前缀：完整哈希可用于离线比对（例如拿一批疑似手机号
 // 反查是否与库中某条匹配），没有必要完整暴露。
 type ClaimItem struct {
-	ID         int64      `json:"id"`
-	Type       string     `json:"claim_type"`
+	ID   int64  `json:"id"`
+	Type string `json:"claim_type"`
 	// 不回显凭证明文：库里只存哈希与信封加密后的密文（§8.5），
 	// 展示明文等于给"管理端账号被盗"额外送一批手机号。
-	ValueHash string `json:"value_hash_prefix,omitempty"`
+	ValueHash  string     `json:"value_hash_prefix,omitempty"`
 	Verified   bool       `json:"verified"`
 	Source     string     `json:"source"`
 	VerifiedAt *time.Time `json:"verified_at,omitempty"`
@@ -274,7 +274,7 @@ func (s *Service) ListAccountBindings(ctx context.Context, appID int64, external
 
 // UnbindInput 是强制解绑入参。
 type UnbindInput struct {
-	AppID     int64 `json:"app_id"`
+	AppID     int64  `json:"app_id"`
 	Reason    string `json:"reason"`
 	Principal *admin.Principal
 }
@@ -294,10 +294,10 @@ func (s *Service) ForceUnbind(ctx context.Context, bindingID int64, in UnbindInp
 		Type:          event.TypeBindingRemoved,
 		SchemaVersion: 1,
 		Payload: map[string]any{
-			"binding_id":     bindingID,
-			"reason":         "admin_force_unbind",
-			"admin_reason":   in.Reason,
-			"occurred_at":    s.deps.Now().Format(time.RFC3339),
+			"binding_id":   bindingID,
+			"reason":       "admin_force_unbind",
+			"admin_reason": in.Reason,
+			"occurred_at":  s.deps.Now().Format(time.RFC3339),
 		},
 	}
 
@@ -405,14 +405,14 @@ func (s *Service) writeAudit(ctx context.Context, p *admin.Principal, action str
 	}
 	m := reqmeta.From(ctx)
 	e := &admin.AuditEvent{
-		Action:      action,
-		TargetType:  "binding",
-		TargetID:    fmt.Sprintf("%d", bindingID),
-		Reason:      reason,
-		AfterState:  detail,
-		Result:      result,
-		TraceID:     m.TraceID,
-		ClientIP:    m.ClientIP,
+		Action:     action,
+		TargetType: "binding",
+		TargetID:   fmt.Sprintf("%d", bindingID),
+		Reason:     reason,
+		AfterState: detail,
+		Result:     result,
+		TraceID:    m.TraceID,
+		ClientIP:   m.ClientIP,
 	}
 	e.SubjectID = "admin:anonymous"
 	if p != nil && p.User != nil {

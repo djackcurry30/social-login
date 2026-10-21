@@ -49,13 +49,13 @@ func makeIDToken(t *testing.T, key *rsa.PrivateKey, claims jwt.MapClaims) string
 
 func baseClaims(clientID string) jwt.MapClaims {
 	return jwt.MapClaims{
-		"iss":   appleIssuer,
-		"aud":   clientID,
-		"sub":   "001234.abcdef.1234",
-		"email": "user@privaterelay.appleid.com",
+		"iss":            appleIssuer,
+		"aud":            clientID,
+		"sub":            "001234.abcdef.1234",
+		"email":          "user@privaterelay.appleid.com",
 		"email_verified": "true",
-		"iat":   time.Now().Add(-time.Minute).Unix(),
-		"exp":   time.Now().Add(time.Hour).Unix(),
+		"iat":            time.Now().Add(-time.Minute).Unix(),
+		"exp":            time.Now().Add(time.Hour).Unix(),
 	}
 }
 

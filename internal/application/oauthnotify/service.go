@@ -21,12 +21,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
+	"github.com/djackcurry30/social-login/internal/domain/audit"
 	domainbinding "github.com/djackcurry30/social-login/internal/domain/binding"
 	"github.com/djackcurry30/social-login/internal/domain/identity"
 	"github.com/djackcurry30/social-login/internal/domain/identitysource"
 	"github.com/djackcurry30/social-login/internal/domain/provider"
 	"github.com/djackcurry30/social-login/internal/domain/tenant"
-	"github.com/djackcurry30/social-login/internal/domain/audit"
 	"github.com/djackcurry30/social-login/internal/pkg/auditx"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
@@ -194,21 +194,21 @@ func (s *Service) apply(ctx context.Context, appID int64, providerAppID, scene s
 		// 频繁出现往往意味着 consent-revoked 即将到达。
 		out.Reason = "email_disabled_does_not_affect_binding"
 		s.emitAudit(ctx, appID, "", "", scene, audit.ActionRevoke, audit.ResultSuccess, map[string]any{
-			"source":     "platform_notify",
-			"event":      ev.Type,
-			"open_id":    ev.OpenID,
+			"source":      "platform_notify",
+			"event":       ev.Type,
+			"open_id":     ev.OpenID,
 			"occurred_at": ev.OccurredAt,
-			"note":       "邮箱停用不影响绑定关系",
+			"note":        "邮箱停用不影响绑定关系",
 		}, now)
 		return out, nil
 	default:
 		// 未知事件：留痕但不报错，避免平台在重试队列里堆积。
 		out.Reason = "unknown_event"
 		s.emitAudit(ctx, appID, "", "", scene, audit.ActionRevoke, audit.ResultSuccess, map[string]any{
-			"source": "platform_notify",
-			"event":  ev.Type,
+			"source":  "platform_notify",
+			"event":   ev.Type,
 			"open_id": ev.OpenID,
-			"detail": ev.Detail,
+			"detail":  ev.Detail,
 		}, now)
 		s.log.Warn("收到未建模的服务端通知事件",
 			zap.String("event", ev.Type),

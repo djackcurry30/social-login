@@ -38,10 +38,11 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminidentity"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
-	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
+	"github.com/djackcurry30/social-login/internal/application/adminsession"
 	"github.com/djackcurry30/social-login/internal/application/auditexport"
 	"github.com/djackcurry30/social-login/internal/application/outbox"
 	"github.com/djackcurry30/social-login/internal/embedweb"
@@ -180,6 +181,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	sessionRepo := postgres.NewSessionRepository(db)
 	auditRepo := postgres.NewAuditRepository(db)
 	ticketStore := cache.NewTicketStore(rdb)
+	// 撤销名单（§8.4 高危撤销）：强制下线后让已签发的 access_token
+	// 在 check_revocation=true 时立即失效。
+	revocationStore := cache.NewRevocationStore(rdb)
 
 	// 管理端仓储（admin_users / admin_sessions / admin_audit_logs）。
 	adminUserRepo := postgres.NewAdminUserRepository(db)
@@ -271,12 +275,13 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AccessTokenTTL:  cfg.JWT.AccessTokenTTL,
 		RefreshTokenTTL: cfg.JWT.RefreshTokenTTL,
 	}, token.Deps{
-		Signer:   signer,
-		Tickets:  ticketStore,
-		Sessions: sessionRepo,
-		Tenant:   tenantSvc,
-		Audit:    auditRepo,
-		Logger:   logger,
+		Signer:     signer,
+		Revocation: revocationStore,
+		Tickets:    ticketStore,
+		Sessions:   sessionRepo,
+		Tenant:     tenantSvc,
+		Audit:      auditRepo,
+		Logger:     logger,
 	})
 
 	bindingSvc := binding.New(binding.Deps{
@@ -419,6 +424,16 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:      logger,
 	})
 
+	// E 组：会话与令牌。
+	adminSessionSvc := adminsession.New(adminsession.Deps{
+		Sessions:       sessionRepo,
+		AdminList:      postgres.NewSessionAdminRepository(db),
+		Revocation:     revocationStore,
+		AdminAudit:     adminAuditRepo,
+		Logger:         logger,
+		AccessTokenTTL: cfg.JWT.AccessTokenTTL,
+	})
+
 	// 审计导出 worker：与在线请求分离部署是架构建议，当前同进程；
 	// 领取用 SQL 原子更新（FOR UPDATE SKIP LOCKED），多副本不会重复导出。
 	var auditExporter *auditexport.Service
@@ -447,17 +462,18 @@ func New(ctx context.Context, opts Options) (*App, error) {
 
 	// 管理端被用来"启用"才会挂上路由；为保持简洁第一期默认挂上。
 	adminDeps := &adminhttp.RouterDeps{
-		Logger:       logger,
-		AuthSessions: adminSessionRepo,
-		AuthUsers:    adminUserRepo,
-		AuthLogin:    adminLoginSvc,
-		AdminApp:     adminAppSvc,
-		AdminChan:    adminChanSvc,
-		AdminObs:     adminObsSvc,
-		AdminEvent:   adminEventSvc,
-		AdminAudit:   adminAuditSvc,
+		Logger:        logger,
+		AuthSessions:  adminSessionRepo,
+		AuthUsers:     adminUserRepo,
+		AuthLogin:     adminLoginSvc,
+		AdminApp:      adminAppSvc,
+		AdminChan:     adminChanSvc,
+		AdminObs:      adminObsSvc,
+		AdminEvent:    adminEventSvc,
+		AdminAudit:    adminAuditSvc,
 		AdminMerge:    adminMergeSvc,
 		AdminIdentity: adminIdentitySvc,
+		AdminSession:  adminSessionSvc,
 	}
 	_ = adminDeps
 

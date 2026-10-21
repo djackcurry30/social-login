@@ -112,11 +112,11 @@ type AdminWriter interface {
 
 // AdminUnbindInput 是强制解绑入参。
 type AdminUnbindInput struct {
-	AppID      int64
-	BindingID  int64
-	Reason     string
-	Event      *AdminEvent
-	At         time.Time
+	AppID     int64
+	BindingID int64
+	Reason    string
+	Event     *AdminEvent
+	At        time.Time
 }
 
 // AdminTransferInput 是 transfer 入参。

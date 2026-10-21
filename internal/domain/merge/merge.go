@@ -50,8 +50,8 @@ var ErrDuplicate = errors.New("merge: 幂等键已存在")
 
 // Operation 是一条合并操作记录（merge_operations 表）。
 type Operation struct {
-	ID     int64
-	AppID  int64
+	ID    int64
+	AppID int64
 	// IdempotencyKey 由"场景 + 应用 + 双方账号"确定性生成，而不是随机。
 	//
 	// 这样同一个冲突被重复触发（用户连点、前端重试、补偿重跑）都会命中

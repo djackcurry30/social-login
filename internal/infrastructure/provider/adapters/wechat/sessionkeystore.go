@@ -20,8 +20,8 @@ import (
 // 未注入时行为是"安静跳过持久化"：同一次请求内的手机号解密照常工作
 // （session_key 直接从 TokenSet 传下来），只是跨请求解密不可用。
 var (
-	sessionStoreMu sync.RWMutex
-	sessionStore   sessionkey.Store
+	sessionStoreMu  sync.RWMutex
+	sessionStore    sessionkey.Store
 	sessionStoreLog *zap.Logger
 )
 

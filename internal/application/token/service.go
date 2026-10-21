@@ -52,9 +52,12 @@ type Deps struct {
 	Signer   *jwtkit.Signer
 	Tickets  ticket.Store
 	Sessions session.Repository
-	Tenant   *tenantconfig.Service
-	Audit    audit.Writer
-	Logger   *zap.Logger
+	// Revocation 是高危撤销名单（§8.4）。为 nil 时 check_revocation
+	// 会退化为"仅本地验签"，与未接黑名单的部署语义一致。
+	Revocation session.RevocationList
+	Tenant     *tenantconfig.Service
+	Audit      audit.Writer
+	Logger     *zap.Logger
 }
 
 // Service 提供令牌签发、轮转、校验与撤销。
@@ -264,11 +267,31 @@ func (s *Service) Introspect(ctx context.Context, appCode, accessToken string, c
 	if len(claims.Audience) == 0 || claims.Audience[0] != app.AppCode {
 		return &IntrospectResult{Active: false}, nil
 	}
-	if checkRevocation {
-		// 第四期：查 oauth:revoked_jti:{jti} 黑名单。当前显式声明未实现，
-		// 而不是静默忽略这个参数——静默忽略会让调用方以为自己得到了强校验。
+	if checkRevocation && s.deps.Revocation == nil {
+		// 调用方要的是强校验。没接黑名单就说没接，不能静默降级成纯本地验签——
+		// 那会让"改密前先 check_revocation"这道防线看起来存在、实际不存在。
 		return nil, errs.New(errs.CodeProviderNotSupported,
-			"check_revocation 尚未实现（第四期），当前仅支持本地验签")
+			"check_revocation 需要撤销名单（Redis），当前未装配")
+	}
+	if checkRevocation {
+		// 高危撤销校验（§8.4）：jti 黑名单 + 账号级水位。
+		//
+		// 只在调用方显式要求时才查——绝大多数业务请求由业务方自行验签，
+		// 不该为一次改密/提现之外的操作付出 Redis 往返。
+		issuedAt := time.Time{}
+		if claims.IssuedAt != nil {
+			issuedAt = claims.IssuedAt.Time
+		}
+		revoked, rerr := session.Revoked(ctx, s.deps.Revocation,
+			app.ID, claims.Subject, claims.ID, issuedAt)
+		if rerr != nil {
+			// 查不到黑名单就返回错误而不是 active=true：
+			// 调用方要的是"强校验"，给不了就必须说给不了。
+			return nil, rerr
+		}
+		if revoked {
+			return &IntrospectResult{Active: false}, nil
+		}
 	}
 	out := &IntrospectResult{
 		Active:  true,

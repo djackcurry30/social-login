@@ -356,6 +356,61 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 [ "$CODE" = "400" ] || fail "未知 action 期望 400，实际 $CODE"
 ok "未知 action → 400"
 
+# 15.9 E 组：会话与令牌（强制下线 + 撤销名单）
+#
+# 关键断言是"下线后能查到撤销水位"：只撤 refresh_token 不写水位，
+# 攻击者手里的 access_token 还能用满 15 分钟（修正 P0-5）。
+step "15.9 E 组：会话与令牌"
+
+TOK=$(curl -s -m 5 "$BASE_URL/admin/v1/tokens?app_id=$APP_ID&page_size=5" -H "$AUTH")
+echo "$TOK"
+echo "$TOK" | grep -q '"items":' || fail "会话查询失败: $TOK"
+ok "会话可查"
+
+# 会话列表不得返回 token_hash：它是"持有即可换令牌"的凭据哈希。
+if echo "$TOK" | grep -qi 'token_hash\|TokenHash'; then
+  fail "会话列表泄露了 token_hash"
+fi
+ok "会话列表不含 token_hash"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/tokens?app_id=$APP_ID&active=maybe" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "非法 active 期望 400，实际 $CODE"
+ok "非法 active → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/tokens/revoke" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"app_id":'"$APP_ID"',"external_user_id":"u-acceptance-offline","reason":"x"}')
+[ "$CODE" = "400" ] || fail "缺 reason 期望 400，实际 $CODE"
+ok "强制下线缺 reason → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/tokens/revoke" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"external_user_id":"u-acceptance-offline","reason":"验收：缺少应用归属"}')
+[ "$CODE" = "400" ] || fail "缺 app_id 期望 400，实际 $CODE"
+ok "强制下线缺 app_id → 400"
+
+OFFLINE=$(curl -s -m 5 \
+  -X POST "$BASE_URL/admin/v1/tokens/revoke" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"app_id":'"$APP_ID"',"external_user_id":"u-acceptance-offline","reason":"验收：模拟账号被盗强制下线"}')
+echo "$OFFLINE"
+echo "$OFFLINE" | grep -q '"revoked_at":' || fail "强制下线未返回撤销水位: $OFFLINE"
+# 必须如实告知生效窗口，运营才知道"已下线"的准确含义。
+echo "$OFFLINE" | grep -q '"effective_window_seconds":' \
+  || fail "强制下线未返回生效窗口: $OFFLINE"
+ok "强制下线成功（含生效窗口说明）"
+
+REV=$(curl -s -m 5 \
+  "$BASE_URL/admin/v1/revoked-jti?app_id=$APP_ID&external_user_id=u-acceptance-offline" -H "$AUTH")
+echo "$REV"
+echo "$REV" | grep -q '"revoked_at":' || fail "查不到撤销水位: $REV"
+ok "撤销水位可查"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/revoked-jti?app_id=$APP_ID" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "撤销查询缺标识期望 400，实际 $CODE"
+ok "撤销查询缺标识 → 400"
+
 # 16. logout
 step "16. POST /admin/v1/auth/logout"
 curl -s -m 3 -X POST "$BASE_URL/admin/v1/auth/logout" -H "$AUTH" >/dev/null

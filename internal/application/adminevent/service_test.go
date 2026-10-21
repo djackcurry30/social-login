@@ -25,7 +25,7 @@ func (f *fakeStore) MarkRetry(context.Context, int64, int, time.Time, string) er
 }
 func (f *fakeStore) MarkDead(context.Context, int64, int, string) error { return nil }
 func (f *fakeStore) MarkSkipped(context.Context, int64, string) error   { return nil }
-func (f *fakeStore) Get(context.Context, int64) (*event.Event, error)  { return f.item, nil }
+func (f *fakeStore) Get(context.Context, int64) (*event.Event, error)   { return f.item, nil }
 func (f *fakeStore) List(context.Context, event.Filter) ([]*event.Event, int64, error) {
 	return nil, 0, nil
 }
