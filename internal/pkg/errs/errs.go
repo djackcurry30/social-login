@@ -39,6 +39,12 @@ const (
 	CodeBindTicketInvalid Code = "BIND.TICKET_INVALID"
 	CodeBindNotFound      Code = "BIND.NOT_FOUND"
 	CodeBindDuplicate     Code = "BIND.DUPLICATE"
+	// CodeBindMergeRequired 表示 confirm 模式下的绑定冲突需要用户先完成验证，
+	// 验证通过后由 /v1/bind/resolve 推进合并。
+	//
+	// 与 IDENTITY_TAKEN 分开：后者是"按策略不允许合并"（manual），
+	// 前者是"可以合并，但要先证明你是原账号主人"。接入方的处理完全不同。
+	CodeBindMergeRequired Code = "BIND.MERGE_REQUIRED"
 
 	CodeTokenExpired Code = "TOKEN.EXPIRED"
 	CodeTokenRevoked Code = "TOKEN.REVOKED"
@@ -98,6 +104,7 @@ var defaults = map[Code]meta{
 	CodeBindTicketInvalid: {http.StatusBadRequest, false},
 	CodeBindNotFound:      {http.StatusNotFound, false},
 	CodeBindDuplicate:     {http.StatusConflict, false},
+	CodeBindMergeRequired: {http.StatusConflict, false},
 
 	CodeTokenExpired: {http.StatusUnauthorized, false},
 	CodeTokenRevoked: {http.StatusUnauthorized, false},

@@ -621,3 +621,114 @@ compose 里给 app 挂了 `export-data:/app/var/exports` 卷：
    当前单副本无影响；拆多副本需要把 FilePath 换成对象存储 key
    （`audit.ExportStore` 已把"落盘"隔离在 worker 里，改动面可控）。
 3. 前端还没有审计查询与导出页面（后端接口已就绪）。
+
+---
+
+## 13. 第三期（上）：账号合并链路 + 管理端 D 组
+
+### 13.1 这一步解决什么
+
+一期在 `bindConflict` 里留了一个明确的占位：
+
+```go
+// ⚠️ 当前状态：三种 merge mode 的合并链路属于第三期交付。
+// 第一期在此统一返回 BIND.IDENTITY_TAKEN
+```
+
+也就是说 R1（"同一用户在同一业务应用内只有一个账号"）此前是**功能缺失**，
+不是"实现得不够好"。本次把它补齐，并顺带补上出问题时的兜底手段（D 组）。
+
+### 13.2 三次独立事务（修正 P0-3）
+
+```
+第 0 步  前置校验（只读）
+        · mode=manual → 拒绝；mode=confirm → 要求验证；mode=auto → 放行
+        · 取分布式锁 lock:merge:{appID}:{targetUserID}
+
+第 1 步  事务 A：INSERT merge_operations(status=pending) 并 COMMIT
+        · 幂等键确定性生成：merge:{trigger}:{appID}:{target}:{source}
+        · ON CONFLICT DO NOTHING + 回查：并发重复请求命中同一行
+
+第 2 步  无事务：AccountProvider.Merge（带幂等键）
+
+第 3 步  事务 B：改挂绑定 + 撤销 source 令牌 + 置 done + 写 outbox + 写审计
+```
+
+**为什么第 1 步必须先提交**：如果 pending 记录与远端调用在同一事务里，
+远端成功后事务回滚 → 本地没有记录 → 补偿任务扫不到 → 远端已合并、本地
+仍是两个账号，**永久孤儿且不可逆**。
+
+**为什么不用仓储组合替代事务 B**：`BindingRepository` / `SessionRepository` /
+`EventRepository` 各自持有独立的 `*gorm.DB`，每次调用都在自己的连接上自动提交。
+在它们外面包一层 `db.Transaction` 只是幻觉——事务是连接级的。
+所以本地收敛落在 `postgres.MergeConverger` 里，用同一个 tx 操作四张表。
+
+### 13.3 R4 三条红线的落点
+
+| 红线 | 落点 |
+| --- | --- |
+| 1 · 归并依据必须是已验证凭证 | `identity.IsTrustedSource` 白名单，login 链路的 claim 归并路径使用（本批未接入，见 13.6） |
+| 2 · 被合并账号必须收到通知 | 事件体 `notify_source_account` 恒为 `true`，且不读配置——单测 `TestAutoMergeConvergesWithEvent` 守住 |
+| 3 · 跨平台自动合并需额外评估 | bind 路径天然同平台（同一 identity），跨平台判定属于 login 的 claim 归并路径 |
+
+### 13.4 幂等与补偿
+
+- `merge_operations.idempotency_key` 唯一约束 + 确定性生成 ⇒ 重复触发不会新开记录
+- 补偿器每 30s 扫 `pending` / `failed`（`attempts < 3`），调 `Resume` 重放第 2~3 步
+- **非幂等的远端不自动重试**：`merge.remote_idempotent=false` 时失败直接标 `dead`，
+  等人工推进。非幂等的 Merge 重复执行会重复迁移订单/资产，代价远高于"合并没做完"
+- `Resume` **不做前置校验**：操作在初次执行时已校验过；补偿时若配置被改成 manual
+  就停手，会让"已经调过远端的合并"永远停在半路
+
+### 13.5 管理端 D 组
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/admin/v1/merge-operations` | `merge:read` |
+| GET | `/admin/v1/merge-operations/{id}` | `merge:read` |
+| GET | `/admin/v1/merge-operations/{id}/impact` | `merge:read` |
+| POST | `/admin/v1/merge-operations/{id}/retry` | `merge:retry` |
+| POST | `/admin/v1/merge-operations/{id}/resolve` | `merge:retry` |
+
+- `retry` 复用原幂等键（§15.4 明确要求），否则用户中心会当成新合并
+- `resolve` 置 **dead 而不是 done**：done 会被下游当成"合并成功"，那是谎报
+- `impact` 给出"将改绑 N 条绑定 / 撤销 M 个令牌 / 涉及哪些平台"，供二次确认
+
+### 13.6 顺带修掉的权限缺陷
+
+`admin.Permissions` 里 `RoleOperator` 与 `RoleConfigAdmin` 此前是**空 map**。
+`Has()` 不做角色继承（刻意的显式列举），于是 operator 登录后连
+`GET /admin/v1/apps` 都是 403——一个"看不到任何东西"的角色。
+本次按 §15.3 的矩阵补齐：operator = viewer 读权限 + `binding:write` /
+`token:revoke` / `merge:retry`；config_admin = viewer 读权限 + `app:write` /
+`config:write` / `key:write` / `event:write`。
+
+### 13.7 测试
+
+- `application/merge`：11 例（自合并拒绝 / manual 拒绝 / confirm 要求验证 /
+  成功收敛含事件与审计 / 幂等命中 / 锁冲突 / 远端失败 / 非幂等转 dead /
+  收敛失败 / 补偿跳过 / 补偿重放 / 幂等键确定性）
+- `application/authflow`：6 例（auto 合并签发 / confirm 返回 MERGE_REQUIRED /
+  manual 返回 IDENTITY_TAKEN / 缺依赖拒绝 / 合并失败透出错误 / 内部拒绝映射）
+- `application/adminmerge`：10 例
+- `test/acceptance`：2 个真实依赖用例
+  - `TestAccountMergeConvergesLocally`：改挂 → 令牌撤销 → outbox 事件 →
+    op=done → 重复请求只有一条记录
+  - `TestMergeImpactReportsCounts`：影响面数字
+
+集成测试需要从宿主机连库，compose 已把 pg 暴露到 `127.0.0.1:15432`：
+
+```bash
+TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:15432/social_login?sslmode=disable" \
+TEST_REDIS_ADDR="127.0.0.1:16379" go test ./test/acceptance/ -run Merge -v
+```
+
+### 13.8 尚未交付
+
+1. **confirm 模式的验证流程**：当前返回 `BIND.MERGE_REQUIRED`，
+   由 `POST /v1/bind/resolve` 承接验证（短信 / 已绑定渠道）。端点与短信通道未做。
+2. **login 链路的 claim 归并**（`on_login=claim_verified` / `detect_only`）：
+   `finishLogin` 目前只做 detect_only 的提示，`claim_verified` 的写数据路径未接。
+3. **C 组**（身份与绑定查询、强制解绑、`transfer` 旁路）与 **J 组**（claim 一致性）。
+4. **HTTPAccountProvider**：`account.provider=http` 仍显式报错，等用户中心联调。
+5. **管理端前端**：D 组接口已就绪，页面未做。

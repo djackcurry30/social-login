@@ -60,11 +60,27 @@ var Permissions = map[Role]map[string]struct{}{
 	RoleViewer: {
 		"app:read": {}, "config:read": {}, "token:read": {},
 		"identity:read": {}, "binding:read": {}, "event:read": {},
-		"audit:read": {}, "key:read": {},
+		"audit:read": {}, "key:read": {}, "merge:read": {},
 	},
-	RoleOperator: {},
-	RoleConfigAdmin: {},
-	RoleSuperAdmin:  {},
+	// operator = viewer + 会话/绑定运维 + 合并重试。
+	//
+	// ⚠️ 这里必须把 viewer 的读权限【显式重列】一遍：Has() 不做角色继承
+	// （见下方注释的取舍），早期版本把 operator 留空，结果 operator 登录后
+	// 连 GET /admin/v1/apps 都是 403——一个"看不到任何东西"的角色。
+	RoleOperator: {
+		"app:read": {}, "config:read": {}, "token:read": {},
+		"identity:read": {}, "binding:read": {}, "event:read": {},
+		"audit:read": {}, "key:read": {}, "merge:read": {},
+		"binding:write": {}, "token:revoke": {}, "merge:retry": {},
+	},
+	// config_admin = viewer + 应用/渠道/密钥/事件写权限。
+	RoleConfigAdmin: {
+		"app:read": {}, "config:read": {}, "token:read": {},
+		"identity:read": {}, "binding:read": {}, "event:read": {},
+		"audit:read": {}, "key:read": {}, "merge:read": {},
+		"app:write": {}, "config:write": {}, "key:write": {}, "event:write": {},
+	},
+	RoleSuperAdmin: {},
 }
 
 // has 内部辅助。

@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/domain/account"
 	"github.com/djackcurry30/social-login/internal/domain/audit"
 	"github.com/djackcurry30/social-login/internal/domain/binding"
@@ -220,15 +221,19 @@ func (s *Service) finishBind(
 	}
 }
 
-// bindConflict 处理"该身份已被另一个账号占用"。
+// bindConflict 处理"该身份已被另一个账号占用"（需求 R1 的主场景）。
 //
-// 这是需求 R1 的主场景：用户先在小程序登录得到账号 B，之后在 App 登录得到
-// 账号 C，在 C 里点"绑定微信小程序"时必然命中这里。
+// 用户先在小程序登录得到账号 B，之后在 App 登录得到账号 C，在 C 里点
+// "绑定微信小程序"时必然命中这里。**注意场景区分（§7.2）**：
+// 这里是 bind 模式——用户已登录 C 并主动发起绑定，意图明确，因此按
+// applications.policy.merge.mode 处理；login 模式下的冲突不合并，
+// 因为那里用户还没证明对当前账号的控制权。
 //
-// ⚠️ 当前状态：三种 merge mode 的合并链路属于第三期交付。第一期在此统一返回
-// BIND.IDENTITY_TAKEN，并在 details 里带上 merge_mode 与 pending 标记，
-// 由接入方展示"该渠道已绑定其他账号"。第三期会按 mode 分叉到
-// verify_then_merge / auto_merge（架构 §7.2、§7.3）。
+// 三条分支（§7.5.2 场景 B）：
+//
+//	auto     直接合并 B → C，绑定即完成
+//	confirm  返回 BIND.MERGE_REQUIRED，由 /v1/bind/resolve 验证后推进
+//	manual   返回 BIND.IDENTITY_TAKEN，只提示不处理
 func (s *Service) bindConflict(
 	ctx context.Context,
 	app *tenant.Application,
@@ -239,10 +244,102 @@ func (s *Service) bindConflict(
 	meta reqmeta.Meta,
 	started time.Time,
 ) (*CallbackOutput, error) {
+	target := tc.BindExternalUserID
+	p := app.Policy.Merge
+
+	// 未装配合并能力时一律拒绝。
+	//
+	// 这里绝不能"没装依赖就当放行"：放行等于把一个已经被别的账号占用的
+	// 身份挂到当前账号上，直接破坏 uk_bindings_active 的语义。
+	if s.deps.Merge == nil {
+		return s.rejectConflict(ctx, app, tc, idn, existing, out, meta, started,
+			"合并能力未装配")
+	}
+
+	switch p.Mode {
+	case tenant.MergeModeAuto:
+		res, err := s.deps.Merge.Execute(ctx, appmerge.Request{
+			App:          app,
+			TargetUserID: target,
+			SourceUserID: existing.ExternalUserID,
+			Identity:     idn,
+			Trigger:      appmerge.TriggerBind,
+			Reason:       "用户主动绑定触发自动合并",
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, appmerge.ErrNeedVerification):
+				return nil, s.mergeRequiredErr(app, idn, existing, target)
+			case errors.Is(err, appmerge.ErrRejected):
+				return s.rejectConflict(ctx, app, tc, idn, existing, out, meta, started,
+					"应用策略不允许合并")
+			default:
+				// 远端或本地失败：合并操作已进入补偿队列，这里如实报错。
+				// 不能"失败了也当绑定成功"——绑定实际没发生。
+				s.auditLogin(ctx, app.ID, idn.ID, existing.ExternalUserID, tc,
+					audit.ResultFailure, errs.CodeOf(err), meta, started)
+				return nil, err
+			}
+		}
+		if s.deps.Logger != nil {
+			s.deps.Logger.Info("自动合并完成，绑定转为成功",
+				zap.Int64("app_id", app.ID),
+				zap.Int64("identity_id", idn.ID),
+				zap.String("target", target),
+				zap.String("source", existing.ExternalUserID),
+				zap.Bool("already_merged", res != nil && res.AlreadyMerged))
+		}
+		// 合并后 source 的绑定已改挂到 target，identity 现在属于 target，
+		// 直接按"绑定成功"签发 auth_code。
+		return s.issueAuthCode(ctx, app, tc, idn, target,
+			identity.ScopeOpenIDProfile, out, audit.ResultSuccess, meta, started)
+
+	case tenant.MergeModeConfirm:
+		// confirm：不能静默合并，也不能降级成 auto。
+		// 返回专门的错误码，接入方据此弹验证框（§7.5.2 场景 B）。
+		return nil, s.mergeRequiredErr(app, idn, existing, target)
+
+	default:
+		// manual（以及任何未知取值）：只提示不处理。
+		// 未知取值走拒绝而不是放行——配置写错时"什么都不做"是安全的。
+		return s.rejectConflict(ctx, app, tc, idn, existing, out, meta, started,
+			"应用配置为 manual，不提供合并")
+	}
+}
+
+// mergeRequiredErr 构造"需要验证后合并"的错误。
+//
+// 带 verification 与 merge_mode 两个 details：前端要据此决定用哪种验证方式
+// （短信 / 已绑定渠道），而不是硬编码。
+func (s *Service) mergeRequiredErr(
+	app *tenant.Application, idn *identity.Identity, existing *binding.Binding, target string,
+) error {
+	code := errs.CodeBindMergeRequired
+	return errs.New(code, "该三方身份已绑定其他账号，需验证后合并").
+		WithDetail("merge_mode", app.Policy.Merge.Mode).
+		WithDetail("verification", app.Policy.Merge.Verification).
+		WithDetail("target_user_id", target).
+		WithDetail("platform", idn.Platform).
+		WithDetail("action", "调用 POST /v1/bind/resolve 完成验证后合并")
+}
+
+// rejectConflict 是"按策略不允许合并"的响应。
+func (s *Service) rejectConflict(
+	ctx context.Context,
+	app *tenant.Application,
+	tc *ticket.Context,
+	idn *identity.Identity,
+	existing *binding.Binding,
+	out *CallbackOutput,
+	meta reqmeta.Meta,
+	started time.Time,
+	why string,
+) (*CallbackOutput, error) {
 	if s.deps.Logger != nil {
-		s.deps.Logger.Warn("绑定冲突：合并链路尚未交付（第三期）",
+		s.deps.Logger.Warn("绑定冲突被拒绝",
 			zap.String("app_code", app.AppCode),
 			zap.String("merge_mode", app.Policy.Merge.Mode),
+			zap.String("reason", why),
 			zap.Int64("app_id", app.ID),
 			zap.Int64("identity_id", idn.ID),
 			zap.String("occupied_by", existing.ExternalUserID))
@@ -251,8 +348,7 @@ func (s *Service) bindConflict(
 	code := errs.CodeBindIdentityTaken
 	err := errs.New(code, "该三方身份已绑定其他账号").
 		WithDetail("merge_mode", app.Policy.Merge.Mode).
-		WithDetail("pending_feature", "merge").
-		WithDetail("action", "请改用原账号登录，或等待合并能力上线后走验证合并")
+		WithDetail("action", "请改用原账号登录")
 
 	s.auditLogin(ctx, app.ID, idn.ID, existing.ExternalUserID, tc, audit.ResultFailure, code, meta, started)
 	_ = out

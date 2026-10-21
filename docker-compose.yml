@@ -65,9 +65,10 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-    # 需要从宿主机连库时取消下面注释（避开宿主已占用的 5432）
-    # ports:
-    #   - "15432:5432"
+    # 从宿主机连库（验收测试 test/acceptance 需要）。用 15432 避开宿主可能已占用的 5432。
+    # 只绑回环地址：本地开发要直连，但绝不暴露到局域网。
+    ports:
+      - "127.0.0.1:15432:5432"
 
   redis:
     image: ${REGISTRY:-docker.m.daocloud.io/library}/redis:7-alpine

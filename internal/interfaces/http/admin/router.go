@@ -25,6 +25,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
@@ -45,6 +46,8 @@ type Deps struct {
 	AdminEvent *adminevent.Service
 	// AdminAudit 是 H 组（审计查询与异步导出）用例。同样为 nil 时跳过注册。
 	AdminAudit *adminaudit.Service
+	// AdminMerge 是 D 组（账号合并运维）用例。
+	AdminMerge *adminmerge.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。

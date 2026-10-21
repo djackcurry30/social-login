@@ -122,5 +122,18 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.GET("/audit-logs/export/:taskId", adminmw.Require("audit:read"), auditH.GetExport)
 			api.GET("/audit-logs/export/:taskId/download", adminmw.Require("audit:read"), auditH.Download)
 		}
+
+		// D 组：账号合并运维（§15.4）
+		//
+		// 读与推进分开：读给 viewer，retry/resolve 会改变账号归属事实，
+		// 必须 merge:retry（operator 及以上）。
+		if deps.AdminMerge != nil {
+			mH := handler.NewMergeHandler(deps.AdminMerge, deps.Logger)
+			api.GET("/merge-operations", adminmw.Require("merge:read"), mH.List)
+			api.GET("/merge-operations/:id", adminmw.Require("merge:read"), mH.Get)
+			api.GET("/merge-operations/:id/impact", adminmw.Require("merge:read"), mH.Impact)
+			api.POST("/merge-operations/:id/retry", adminmw.Require("merge:retry"), mH.Retry)
+			api.POST("/merge-operations/:id/resolve", adminmw.Require("merge:retry"), mH.Resolve)
+		}
 	}
 }

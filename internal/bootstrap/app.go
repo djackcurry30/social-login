@@ -13,9 +13,11 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/application/token"
+	domainaccount "github.com/djackcurry30/social-login/internal/domain/account"
 	"github.com/djackcurry30/social-login/internal/domain/identitysource"
 	"github.com/djackcurry30/social-login/internal/domain/provider"
 	"github.com/djackcurry30/social-login/internal/infrastructure/cache"
@@ -36,6 +38,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/application/auditexport"
@@ -61,6 +64,11 @@ type App struct {
 	dispatcher *outbox.Service
 	// exporter 是审计导出执行循环；nil 表示未配置导出目录。
 	exporter *auditexport.Service
+	// compensator 是账号合并的补偿循环（§7.3）。
+	compensator *appmerge.Compensator
+	// accounts 是账号体系端口。暴露给集成测试用（构造 source/target 账号），
+	// 与 DB()/Redis() 同属测试可达的装配产物。
+	accounts domainaccount.Provider
 	bgCancel context.CancelFunc
 	bgWG     sync.WaitGroup
 }
@@ -160,6 +168,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.accounts = accounts
 
 	// --- 仓储 ---
 	appRepo := postgres.NewAppRepository(db)
@@ -218,6 +227,25 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		zap.Int("min_requests", guard.Config().MinRequests),
 		zap.Duration("open_duration", guard.Config().OpenDuration))
 
+	// 账号合并（第三期，§7.3）。
+	//
+	// 三个协作对象必须分别注入：Store 管操作记录，Converger 管"一个事务内
+	// 改挂绑定 + 撤销令牌 + 写事件 + 写审计"，Locker 管同一目标的串行化。
+	// 合成一个对象会让人误以为它们在同一个事务里。
+	mergeRepo := postgres.NewMergeRepository(db)
+	mergeSvc := appmerge.New(appmerge.Deps{
+		Ops:              mergeRepo,
+		Converger:        postgres.NewMergeConverger(db),
+		Accounts:         accounts,
+		Locker:           cache.NewMergeLocker(rdb),
+		Audit:            auditRepo,
+		Logger:           logger,
+		RemoteIdempotent: cfg.Merge.RemoteIdempotent,
+	})
+	// 补偿时需要读应用策略（Resume 不做前置校验，但仍需要 app 上下文）。
+	mergeSvc.SetAppLookup(appRepo.FindByID)
+	mergeCompensator := appmerge.NewCompensator(mergeSvc, mergeRepo, logger)
+
 	authflowSvc := authflow.New(authflow.Config{
 		CallbackBaseURL: cfg.Server.CallbackBaseURL,
 		ExchangeTimeout: cfg.Auth.ExchangeTimeout,
@@ -232,6 +260,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Accounts:   accounts,
 		Audit:      auditRepo,
 		Logger:     logger,
+		Merge:      mergeSvc,
 	})
 
 	tokenSvc := token.New(token.Config{
@@ -362,6 +391,15 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		ExportDir:  cfg.Audit.ExportDir,
 	})
 
+	// D 组：账号合并运维。
+	adminMergeSvc := adminmerge.New(adminmerge.Deps{
+		Ops:        mergeRepo,
+		Merger:     mergeSvc,
+		Impactor:   postgres.NewMergeImpactor(db),
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+	})
+
 	// 审计导出 worker：与在线请求分离部署是架构建议，当前同进程；
 	// 领取用 SQL 原子更新（FOR UPDATE SKIP LOCKED），多副本不会重复导出。
 	var auditExporter *auditexport.Service
@@ -399,6 +437,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminObs:     adminObsSvc,
 		AdminEvent:   adminEventSvc,
 		AdminAudit:   adminAuditSvc,
+		AdminMerge:   adminMergeSvc,
 	}
 	_ = adminDeps
 
@@ -438,6 +477,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 	app.dispatcher = outboxDispatcher
 	app.exporter = auditExporter
+	app.compensator = mergeCompensator
 
 	logger.Info("装配完成",
 		zap.String("version", Version),
@@ -467,6 +507,13 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer a.bgWG.Done()
 			a.exporter.Run(bgCtx)
+		}()
+	}
+	if a.compensator != nil {
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			a.compensator.Run(bgCtx)
 		}()
 	}
 
@@ -531,6 +578,9 @@ func (a *App) Logger() *zap.Logger { return a.log }
 
 // DB 返回数据库句柄。
 func (a *App) DB() *gorm.DB { return a.db }
+
+// Accounts 返回账号体系端口（集成测试用：构造 source/target 账号）。
+func (a *App) Accounts() domainaccount.Provider { return a.accounts }
 
 // Redis 返回 Redis 客户端。
 func (a *App) Redis() *redis.Client { return a.rdb }

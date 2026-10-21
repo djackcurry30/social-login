@@ -258,6 +258,35 @@ DL_ANON=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 [ "$DL_ANON" = "401" ] || fail "匿名下载期望 401，实际 $DL_ANON"
 ok "匿名下载被拒绝（401）"
 
+# 15.7 D 组：账号合并运维
+#
+# 合并记录由业务链路产生（用户绑定冲突触发），单靠管理端无法凭空造一条。
+# 这里验证路由、鉴权、参数校验与"查不到即 404"的口径；
+# 真正的三次事务与本地收敛由 test/acceptance 的集成用例覆盖。
+step "15.7 D 组：账号合并运维"
+
+MO=$(curl -s -m 5 "$BASE_URL/admin/v1/merge-operations?page_size=5" -H "$AUTH")
+echo "$MO"
+echo "$MO" | grep -q '"items":' || fail "合并操作列表查询失败: $MO"
+ok "合并操作可查"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/merge-operations?status=bogus" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "非法 status 期望 400，实际 $CODE"
+ok "非法 status → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/merge-operations/99999999" -H "$AUTH")
+[ "$CODE" = "404" ] || fail "不存在的合并期望 404，实际 $CODE"
+ok "不存在的合并 → 404"
+
+# retry 必须带 reason：账号归属的变更不能没有理由地重复执行。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/merge-operations/99999999/retry" \
+  -H "$AUTH" -H "Content-Type: application/json" -d '{"reason":""}')
+[ "$CODE" = "400" ] || fail "缺 reason 期望 400，实际 $CODE"
+ok "retry 缺 reason → 400"
+
 # 16. logout
 step "16. POST /admin/v1/auth/logout"
 curl -s -m 3 -X POST "$BASE_URL/admin/v1/auth/logout" -H "$AUTH" >/dev/null

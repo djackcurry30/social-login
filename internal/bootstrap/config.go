@@ -29,6 +29,24 @@ type Config struct {
 	ProviderGuard ProviderGuardConfig `mapstructure:"provider_guard"`
 	// Audit 是审计相关配置（H 组异步导出）。
 	Audit AuditConfig `mapstructure:"audit"`
+	// Merge 是账号合并配置（第三期）。
+	Merge MergeConfig `mapstructure:"merge"`
+}
+
+// MergeConfig 是账号合并的运行期配置。
+//
+// ⚠️ 这里没有"是否启用合并"的开关：合并是应用级策略
+// （applications.policy.merge.mode），不是服务级开关。服务级关掉合并会让
+// 所有 auto 应用静默退化成 manual，与 §7.5.4「静默降级比报错更危险」相悖。
+type MergeConfig struct {
+	// RemoteIdempotent 声明用户中心的 Merge 是否真正按幂等键去重（§D3）。
+	//
+	// 为 false（默认）时，补偿任务【不会】自动重试失败的合并，只把记录标为
+	// dead 等人工推进。理由：非幂等的 Merge 被重复执行会重复迁移订单/资产，
+	// 比"合并没做完"严重得多（§7.3 明确要求）。
+	//
+	// 接入真实用户中心后，必须在其契约确认幂等后再打开。
+	RemoteIdempotent bool `mapstructure:"remote_idempotent"`
 }
 
 // AuditConfig 是审计配置。
@@ -282,6 +300,9 @@ func setDefaults(v *viper.Viper) {
 	// 配置为空字符串即关闭 worker（见 AuditConfig.ExportWorkerOn）。
 	v.SetDefault("audit.export_dir", "./var/exports")
 	v.SetDefault("audit.export_file_ttl", "168h")
+
+	// 合并补偿默认关闭自动重试（安全默认）。
+	v.SetDefault("merge.remote_idempotent", false)
 }
 
 // normalizeAndValidate 做归一化与启动期校验。

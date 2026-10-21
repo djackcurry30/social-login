@@ -302,3 +302,25 @@ type adminSessionModel struct {
 }
 
 func (adminSessionModel) TableName() string { return "admin_sessions" }
+
+// mergeOperationModel 是账号合并操作（00001 建表 + 00005 补列）。
+//
+// 这张表的存在意义只有一个：让"跨服务合并"在调用远端【之前】就落库，
+// 从而任何一步失败都能被补偿任务扫到（修正 P0-3）。
+type mergeOperationModel struct {
+	ID             int64     `gorm:"column:id;primaryKey"`
+	AppID          int64     `gorm:"column:app_id"`
+	IdempotencyKey string    `gorm:"column:idempotency_key"`
+	TargetUserID   string    `gorm:"column:target_user_id"`
+	SourceUserID   string    `gorm:"column:source_user_id"`
+	IdentityID     *int64    `gorm:"column:identity_id"`
+	Status         string    `gorm:"column:status"`
+	Reason         *string   `gorm:"column:reason"`
+	Attempts       int       `gorm:"column:attempts"`
+	LastError      *string   `gorm:"column:last_error"`
+	RemoteResult   JSONMap   `gorm:"column:remote_result;type:jsonb"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+	UpdatedAt      time.Time `gorm:"column:updated_at"`
+}
+
+func (mergeOperationModel) TableName() string { return "merge_operations" }

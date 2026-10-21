@@ -19,6 +19,7 @@ import (
 
 	"go.uber.org/zap"
 
+	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
 	"github.com/djackcurry30/social-login/internal/domain/account"
 	"github.com/djackcurry30/social-login/internal/domain/audit"
@@ -58,6 +59,19 @@ type Deps struct {
 	Accounts   account.Provider
 	Audit      audit.Writer
 	Logger     *zap.Logger
+	// Merge 是账号合并能力（第三期，§7.2 / §7.3）。
+	//
+	// 定义成接口而不是具体类型：授权流程是最核心的链路，不该因为合并包的
+	// 内部演进被牵连；而且三条冲突分支（auto / confirm / manual）可以用
+	// 假实现覆盖，不必拉起数据库。
+	//
+	// 为 nil 时冲突一律按"拒绝"处理——不允许因为少装一个依赖就静默放行。
+	Merge MergeExecutor
+}
+
+// MergeExecutor 是账号合并的端口（实现见 application/merge）。
+type MergeExecutor interface {
+	Execute(ctx context.Context, req appmerge.Request) (*appmerge.Result, error)
 }
 
 // Service 是授权流程服务。
