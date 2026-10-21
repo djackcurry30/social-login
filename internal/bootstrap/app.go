@@ -38,6 +38,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminidentity"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
@@ -400,6 +401,21 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:     logger,
 	})
 
+	// C 组：身份与绑定。
+	//
+	// Bindings 同时充当查询与干预入口：ListAdmin 走同一批过滤条件，
+	// ForceUnbind/Transfer 在仓储内用事务写事件，避免"改了本地没发通知"。
+	bindingAdminRepo := postgres.NewBindingAdminRepository(db)
+	adminIdentitySvc := adminidentity.New(adminidentity.Deps{
+		Identities:  postgres.NewIdentityAdminRepository(db),
+		IdentityGet: identityRepo,
+		Claims:      claimRepo,
+		Bindings:    bindingAdminRepo,
+		Writer:      bindingAdminRepo,
+		AdminAudit:  adminAuditRepo,
+		Logger:      logger,
+	})
+
 	// 审计导出 worker：与在线请求分离部署是架构建议，当前同进程；
 	// 领取用 SQL 原子更新（FOR UPDATE SKIP LOCKED），多副本不会重复导出。
 	var auditExporter *auditexport.Service
@@ -437,7 +453,8 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminObs:     adminObsSvc,
 		AdminEvent:   adminEventSvc,
 		AdminAudit:   adminAuditSvc,
-		AdminMerge:   adminMergeSvc,
+		AdminMerge:    adminMergeSvc,
+		AdminIdentity: adminIdentitySvc,
 	}
 	_ = adminDeps
 

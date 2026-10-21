@@ -81,3 +81,58 @@ type Repository interface {
 	// CountActive 统计某业务账号的活跃绑定数，用于判断"这是最后一个登录方式"。
 	CountActive(ctx context.Context, appID int64, externalUserID string) (int, error)
 }
+
+// AdminFilter 是管理端 C 组的绑定查询条件（与关系）。
+type AdminFilter struct {
+	AppID          int64
+	ExternalUserID string
+	// Status 为空表示不过滤——管理端要能看到 unbound 的历史。
+	Status     string
+	IdentityID int64
+	Page       int
+	PageSize   int
+}
+
+// AdminLister 是管理端绑定查询端口。
+type AdminLister interface {
+	ListAdmin(ctx context.Context, f AdminFilter) ([]Binding, int64, error)
+}
+
+// AdminWriter 是管理端对绑定的干预操作（强制解绑 / transfer 旁路）。
+//
+// 两者都必须【与 outbox 事件、审计同事务】：业务方靠 binding.removed 事件
+// 维护自己的数据，只管本地改而不发事件，会让两边长期不一致且无迹可寻。
+type AdminWriter interface {
+	// ForceUnbind 强制解绑（客服处理用户申诉）。
+	// 返回被解绑的绑定记录（调用方用于审计与响应）。
+	ForceUnbind(ctx context.Context, in AdminUnbindInput) (*Binding, error)
+	// Transfer 把 identity 从原账号转到新账号，原账号保留（§7.2 的 transfer 旁路）。
+	Transfer(ctx context.Context, in AdminTransferInput) (*Binding, error)
+}
+
+// AdminUnbindInput 是强制解绑入参。
+type AdminUnbindInput struct {
+	AppID      int64
+	BindingID  int64
+	Reason     string
+	Event      *AdminEvent
+	At         time.Time
+}
+
+// AdminTransferInput 是 transfer 入参。
+type AdminTransferInput struct {
+	AppID      int64
+	BindingID  int64
+	TargetUser string
+	Reason     string
+	Event      *AdminEvent
+	At         time.Time
+}
+
+// AdminEvent 是要与干预操作同事务写入的 outbox 事件。
+type AdminEvent struct {
+	EventID       string
+	Type          string
+	SchemaVersion int
+	Payload       map[string]any
+}

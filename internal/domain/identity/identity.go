@@ -83,3 +83,25 @@ func (q FindQuery) Validate() error {
 	}
 	return nil
 }
+
+// AdminQuery 是管理端 C 组的身份多维查询条件（与关系）。
+//
+// ExternalUserID 走 oauth_bindings 反查：身份本身不存账号归属（约束 C4），
+// 但运维定位问题时最常见的入口恰恰是"这个账号绑了哪些身份"。
+type AdminQuery struct {
+	AppID          int64
+	Platform       string
+	OpenID         string
+	IdentityKey    string
+	ExternalUserID string
+	Page           int
+	PageSize       int
+}
+
+// AdminLister 是管理端身份查询端口。
+//
+// 独立于 Repository：授权链路只需要 Upsert / FindByXxx，把管理端的多维查询
+// 塞进去会让核心接口为运维需求背债。
+type AdminLister interface {
+	ListAdmin(ctx context.Context, q AdminQuery) ([]Identity, int64, error)
+}

@@ -258,6 +258,41 @@ DL_ANON=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 [ "$DL_ANON" = "401" ] || fail "匿名下载期望 401，实际 $DL_ANON"
 ok "匿名下载被拒绝（401）"
 
+# 15.65 C 组：身份与绑定查询 + 强制解绑入口
+#
+# 合并过后最常见的问题是"到底谁绑了谁"。这里验证查询链路与
+# 强制解绑的校验口径（真库上的解绑 + 事件写入由 test/acceptance 覆盖）。
+step "15.65 C 组：身份与绑定"
+
+IDS=$(curl -s -m 5 "$BASE_URL/admin/v1/identities?app_id=$APP_ID&page_size=5" -H "$AUTH")
+echo "$IDS"
+echo "$IDS" | grep -q '"items":' || fail "身份查询失败: $IDS"
+ok "身份可查"
+
+BS=$(curl -s -m 5 "$BASE_URL/admin/v1/bindings?app_id=$APP_ID&page_size=5" -H "$AUTH")
+echo "$BS" | grep -q '"items":' || fail "绑定查询失败: $BS"
+ok "绑定可查（含已解绑历史）"
+
+AB=$(curl -s -m 5 "$BASE_URL/admin/v1/accounts/acc-probe-user/bindings?app_id=$APP_ID" -H "$AUTH")
+echo "$AB" | grep -q '"items":' || fail "按账号查绑定失败: $AB"
+ok "按账号查绑定"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/bindings?app_id=$APP_ID&status=deleted" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "非法绑定状态期望 400，实际 $CODE"
+ok "非法绑定状态 → 400"
+
+# 强制解绑必须带 reason：没有理由地改变"谁能登录"是不可接受的。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X DELETE "$BASE_URL/admin/v1/bindings/99999999" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "缺 reason 期望 400，实际 $CODE"
+ok "强制解绑缺 reason → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X DELETE "$BASE_URL/admin/v1/bindings/99999999?reason=%E5%AE%A2%E6%9C%8D%E7%94%B3%E8%AF%89" -H "$AUTH")
+[ "$CODE" = "404" ] || fail "不存在的绑定期望 404，实际 $CODE"
+ok "不存在的绑定 → 404"
+
 # 15.7 D 组：账号合并运维
 #
 # 合并记录由业务链路产生（用户绑定冲突触发），单靠管理端无法凭空造一条。

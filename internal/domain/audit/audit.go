@@ -18,6 +18,9 @@ const (
 	ActionUnbind = "unbind"
 	ActionMerge  = "merge"
 	ActionRevoke = "revoke"
+	// ActionTransfer 是管理端把 identity 从旧账号转到新账号（§7.2 的 transfer 旁路）。
+	// 与 bind 分开：它既不是用户主动绑定，也不是平台撤销，排障时必须能一眼区分。
+	ActionTransfer = "transfer"
 )
 
 // 审计结果。

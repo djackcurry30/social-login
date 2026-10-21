@@ -71,7 +71,7 @@ var Permissions = map[Role]map[string]struct{}{
 		"app:read": {}, "config:read": {}, "token:read": {},
 		"identity:read": {}, "binding:read": {}, "event:read": {},
 		"audit:read": {}, "key:read": {}, "merge:read": {},
-		"binding:write": {}, "token:revoke": {}, "merge:retry": {},
+		"binding:write": {}, "binding:transfer": {}, "token:revoke": {}, "merge:retry": {},
 	},
 	// config_admin = viewer + 应用/渠道/密钥/事件写权限。
 	RoleConfigAdmin: {

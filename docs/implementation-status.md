@@ -723,12 +723,39 @@ TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:15432/social_login?ssl
 TEST_REDIS_ADDR="127.0.0.1:16379" go test ./test/acceptance/ -run Merge -v
 ```
 
-### 13.8 尚未交付
+### 13.8 管理端 C 组（身份与绑定）
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/admin/v1/identities` | `identity:read` |
+| GET | `/admin/v1/identities/{id}?app_id=` | `identity:read` |
+| GET | `/admin/v1/bindings` | `binding:read` |
+| GET | `/admin/v1/accounts/{externalUserId}/bindings` | `binding:read` |
+| DELETE | `/admin/v1/bindings/{id}` | `binding:write` |
+| POST | `/admin/v1/bindings/{id}/transfer` | `binding:transfer` |
+
+实现要点：
+
+- **按 `external_user_id` 查身份走 `EXISTS` 子查询而不是 JOIN**：一个账号可有
+  多个身份，JOIN 会产生重复行，让 `total` 与列表长度对不上。
+- **claim 只返回哈希前 8 位**：库里只有哈希与信封加密密文（§8.5），
+  回显明文等于给"管理端账号被盗"额外送一批手机号。
+- **强制解绑与 transfer 都在仓储内用事务**，同一事务写 outbox 事件
+  （`binding.removed`）。业务方靠事件同步自己的 user 表；只管本地改而不发事件，
+  两边会长期不一致且无迹可寻。
+- **transfer 只动一条绑定**，不迁移账号数据、不撤销令牌——原账号仍可正常登录，
+  只是少了这个登录方式。这是它与 merge 的本质差别（§7.2 的旁路）。
+- **路径里只有 binding id** 时，仓储用显式跨应用作用域先读出真实 `app_id`，
+  再据此写入事件与审计——不由调用方"猜"应用归属（C1 要求显式声明）。
+- **重复解绑幂等**：已 unbound 的再解一次返回成功但不产生新事件，
+  避免客服重复点击产生一串重复通知。
+
+### 13.9 尚未交付
 
 1. **confirm 模式的验证流程**：当前返回 `BIND.MERGE_REQUIRED`，
    由 `POST /v1/bind/resolve` 承接验证（短信 / 已绑定渠道）。端点与短信通道未做。
 2. **login 链路的 claim 归并**（`on_login=claim_verified` / `detect_only`）：
    `finishLogin` 目前只做 detect_only 的提示，`claim_verified` 的写数据路径未接。
-3. **C 组**（身份与绑定查询、强制解绑、`transfer` 旁路）与 **J 组**（claim 一致性）。
+3. **J 组**（claim 一致性与 mismatch 排查）：未做。C 组已在 §13.8 交付。
 4. **HTTPAccountProvider**：`account.provider=http` 仍显式报错，等用户中心联调。
 5. **管理端前端**：D 组接口已就绪，页面未做。

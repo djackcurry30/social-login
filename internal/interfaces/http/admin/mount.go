@@ -123,6 +123,20 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.GET("/audit-logs/export/:taskId/download", adminmw.Require("audit:read"), auditH.Download)
 		}
 
+		// C 组：身份与绑定（§15.4）
+		//
+		// 读权限给 viewer；解绑给 binding:write，transfer 单独一个
+		// binding:transfer —— 它改变"谁能用这个渠道登录"，与普通绑定写不同级。
+		if deps.AdminIdentity != nil {
+			idH := handler.NewIdentitiesHandler(deps.AdminIdentity, deps.Logger)
+			api.GET("/identities", adminmw.Require("identity:read"), idH.ListIdentities)
+			api.GET("/identities/:id", adminmw.Require("identity:read"), idH.GetIdentity)
+			api.GET("/bindings", adminmw.Require("binding:read"), idH.ListBindings)
+			api.GET("/accounts/:externalUserId/bindings", adminmw.Require("binding:read"), idH.ListAccountBindings)
+			api.DELETE("/bindings/:id", adminmw.Require("binding:write"), idH.ForceUnbind)
+			api.POST("/bindings/:id/transfer", adminmw.Require("binding:transfer"), idH.Transfer)
+		}
+
 		// D 组：账号合并运维（§15.4）
 		//
 		// 读与推进分开：读给 viewer，retry/resolve 会改变账号归属事实，

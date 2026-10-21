@@ -25,6 +25,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
+	"github.com/djackcurry30/social-login/internal/application/adminidentity"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
@@ -48,6 +49,8 @@ type Deps struct {
 	AdminAudit *adminaudit.Service
 	// AdminMerge 是 D 组（账号合并运维）用例。
 	AdminMerge *adminmerge.Service
+	// AdminIdentity 是 C 组（身份与绑定）用例。
+	AdminIdentity *adminidentity.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。
