@@ -42,6 +42,13 @@ security:
   # 变更它会导致已入库的 claim 哈希全部无法匹配，即"按手机号归并"能力整体失效。
   claim_salt: "dev-claim-salt-do-not-use-in-prod"
   app_secret_salt: "dev-app-secret-salt-do-not-use-in-prod"
+  # 签名密钥状态文件目录（F 组轮换用）。
+  #
+  # 留空则管理端的 rotate/retire 会明确拒绝——只改内存的轮换在重启后就失效，
+  # 那是最容易骗过运维的假象。
+  # ⚠️ 目录权限 0700、文件 0600；这是"没有 KMS 时的可用实现"，
+  # 生产应按 §8.3 换成 KMS / 配置中心托管。
+  key_dir: "./var/keys"
 
 jwt:
   access_token_ttl: "15m"

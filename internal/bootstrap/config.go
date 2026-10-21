@@ -152,6 +152,14 @@ type SecurityConfig struct {
 	ClaimSalt string `mapstructure:"claim_salt"`
 	// AppSecretSalt 是应用密钥哈希的静态盐。
 	AppSecretSalt string `mapstructure:"app_secret_salt"`
+	// KeyDir 是签名密钥状态文件的目录（F 组轮换用）。
+	//
+	// 留空则不支持管理端轮换：rotate/retire 会因为没有持久化而拒绝执行——
+	// 只改内存的轮换在重启后就失效，那是最容易骗过运维的假象。
+	//
+	// ⚠️ 这是"没有 KMS 时的可用实现"（§8.3 要求私钥由 KMS 托管）。
+	// 目录权限 0700、文件 0600，且必须排除在版本库与公开备份之外。
+	KeyDir string `mapstructure:"key_dir"`
 }
 
 // JWTConfig 是签名配置。
@@ -333,6 +341,9 @@ func setDefaults(v *viper.Viper) {
 
 	// 短信通道默认日志实现（仅开发可用，见 normalizeAndValidate 的生产校验）。
 	v.SetDefault("sms.provider", "log")
+
+	// 签名密钥状态目录：默认放本地 data 目录，便于开发环境直接演练轮换。
+	v.SetDefault("security.key_dir", "./var/keys")
 
 	v.SetDefault("ratelimit.enabled", false)
 	v.SetDefault("ratelimit.notify_per_minute", 120)

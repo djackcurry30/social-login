@@ -411,6 +411,47 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 [ "$CODE" = "400" ] || fail "撤销查询缺标识期望 400，实际 $CODE"
 ok "撤销查询缺标识 → 400"
 
+# 15.95 F 组：签名密钥
+#
+# 只验证列表与两条关键拒绝：真实 rotate 会改变运行实例的密钥状态，
+# 反复跑会让状态文件累积，不适合放在冒烟脚本里。
+# 轮换的完整语义（JWKS 双公钥、retire 前置校验、重启恢复）由
+# internal/pkg/jwtkit 与 internal/application/adminkey 的单测覆盖。
+step "15.95 F 组：签名密钥"
+
+KEYS=$(curl -s -m 5 "$BASE_URL/admin/v1/signing-keys" -H "$AUTH")
+echo "$KEYS"
+echo "$KEYS" | grep -q '"items":' || fail "密钥列表查询失败: $KEYS"
+echo "$KEYS" | grep -q '"status":"signing"' || fail "应有一把 signing 密钥: $KEYS"
+ok "密钥可查"
+
+# 列表绝不能出现私钥材料。
+if echo "$KEYS" | grep -qi 'PRIVATE KEY\|private_key'; then
+  fail "密钥列表泄露了私钥"
+fi
+ok "密钥列表不含私钥材料"
+
+PREVIEW=$(curl -s -m 5 "$BASE_URL/admin/v1/signing-keys/jwks-preview" -H "$AUTH")
+echo "$PREVIEW" | grep -q '"keys":' || fail "JWKS 预览失败: $PREVIEW"
+echo "$PREVIEW" | grep -q '"kty":"EC"' || fail "JWKS 预览应含 EC 公钥: $PREVIEW"
+ok "JWKS 预览可查"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/signing-keys/rotate" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"reason":"x"}')
+[ "$CODE" = "400" ] || fail "轮换缺 reason 期望 400，实际 $CODE"
+ok "轮换缺 reason → 400"
+
+# 当前签名密钥不能下线：这是防止"一怒之下下线，全站旧 token 立刻失效"。
+ACTIVE_KID=$(echo "$KEYS" | sed -n 's/.*"kid":"\([^"]*\)".*/\1/p' | head -1)
+if [ -n "$ACTIVE_KID" ]; then
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+    -X POST "$BASE_URL/admin/v1/signing-keys/$ACTIVE_KID/retire" -H "$AUTH" \
+    -H "Content-Type: application/json" -d '{"reason":"验收：尝试下线当前密钥"}')
+  [ "$CODE" = "409" ] || fail "下线当前签名密钥期望 409，实际 $CODE"
+  ok "下线当前签名密钥 → 409"
+fi
+
 # 16. logout
 step "16. POST /admin/v1/auth/logout"
 curl -s -m 3 -X POST "$BASE_URL/admin/v1/auth/logout" -H "$AUTH" >/dev/null

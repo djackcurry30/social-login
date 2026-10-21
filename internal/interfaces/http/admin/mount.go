@@ -137,6 +137,18 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.POST("/bindings/:id/transfer", adminmw.Require("binding:transfer"), idH.Transfer)
 		}
 
+		// F 组：签名密钥（§15.4）
+		//
+		// rotate / retire 是高危操作：一次错误的 retire 会让全站旧 token
+		// 立刻验签失败。因此必须 key:write（config_admin 及以上）。
+		if deps.AdminKey != nil {
+			kH := handler.NewSigningKeysHandler(deps.AdminKey, deps.Logger)
+			api.GET("/signing-keys", adminmw.Require("key:read"), kH.List)
+			api.GET("/signing-keys/jwks-preview", adminmw.Require("key:read"), kH.JWKSPreview)
+			api.POST("/signing-keys/rotate", adminmw.Require("key:write"), kH.Rotate)
+			api.POST("/signing-keys/:kid/retire", adminmw.Require("key:write"), kH.Retire)
+		}
+
 		// E 组：会话与令牌（§15.4）
 		//
 		// 查询给 viewer（排查客诉的第一步就是看会话列表）；

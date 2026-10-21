@@ -27,6 +27,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminidentity"
+	"github.com/djackcurry30/social-login/internal/application/adminkey"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/application/adminsession"
@@ -54,6 +55,8 @@ type Deps struct {
 	AdminIdentity *adminidentity.Service
 	// AdminSession 是 E 组（会话与令牌）用例。
 	AdminSession *adminsession.Service
+	// AdminKey 是 F 组（签名密钥轮换）用例。
+	AdminKey *adminkey.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。

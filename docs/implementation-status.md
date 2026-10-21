@@ -976,3 +976,105 @@ oauth:revoked_user:{appID}:{user}  = unixNano   TTL = access TTL + 1min
 - `rl:identity`：需要 identity 上下文，接在授权流程内部（防止撞库与暴力绑定）
 - `rl:platform:{platform}:day`：需要 `Provider.Metadata` 增加日配额字段
 - 管理端按应用调整阈值（当前是服务级配置，与 `provider_guard` 同级）
+
+---
+
+## 16. 第四期（下）：签名密钥轮换（F 组）
+
+### 16.1 把四步轮换变成两个按钮
+
+§8.3 的轮换顺序是硬约束：
+
+```
+① 生成新密钥并开始签名
+② JWKS 同时发布新旧两把公钥
+③ 等旧 token 全部过期（> access TTL）
+④ 从 JWKS 移除旧密钥
+```
+
+顺序颠倒的后果很具体：提前下线旧密钥 = 所有用它签的 token **立刻验签失败**，
+业务方那边表现为"刚才还能用的令牌突然无效了"，而本服务一切正常。
+
+因此实现上把 ① ② 合成 `rotate`，把 ③ ④ 合成 `retire`，并让 `retire`
+**在服务端强制执行 ③**——不是靠运维记得等 15 分钟。
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/admin/v1/signing-keys` | `key:read` |
+| GET | `/admin/v1/signing-keys/jwks-preview` | `key:read` |
+| POST | `/admin/v1/signing-keys/rotate` | `key:write` |
+| POST | `/admin/v1/signing-keys/{kid}/retire` | `key:write` |
+
+### 16.2 retire 的前置校验
+
+判据不是 `created_at` 而是 **`demoted_at`（停止签名的时刻）**：
+
+一把已经 signing 了三个月的密钥，即使刚 rotate 出去，
+也还有大量用它签发的 token 没过期——用 `created_at + TTL` 判断会直接放行，
+那正是最危险的情况。
+
+```
+可下线时刻 = demoted_at + access_ttl + 1min 宽限
+```
+
+1 分钟宽限不是随手加的：JWT 的 `exp` 与服务端时钟存在毫秒级偏差，
+恰好卡在边界上的 token 会因"服务端认为过期、验签方认为还没"而失败。
+
+拒绝时返回 `retirable_at` 与 `wait_seconds`——运维能据此安排窗口，
+而不是反复点按钮试。
+
+### 16.3 密钥存哪（§8.3 的妥协与边界）
+
+文档要求"私钥由 KMS / 配置中心托管"。**当前没有 KMS**，因此退化为
+`security.key_dir` 下的状态文件（目录 0700 / 文件 0600），并在代码与配置里
+明确标注"生产应换 KMS"。
+
+为什么必须有持久化，而不能只改内存：只改内存时进程一重启就回到配置里那把
+旧密钥——**轮换等于没做，而且 JWKS 会突然少一把公钥**，旧 token 全部验签失败。
+所以：
+
+- 未配置 `key_dir` 时 `rotate` / `retire` **明确拒绝**，不造"轮换成功"的假象
+- 启动时**优先**从状态文件加载（高于 `jwt.signing_keys` 配置）
+- 状态文件存在但读不出来时**不回退**到配置：那会让正在生效的密钥被无声替换
+
+落盘内容：当前签名密钥存私钥（PKCS#8 PEM），**旧密钥只存公钥**（SPKI PEM）。
+旧密钥已经不需要签名，继续持有私钥只会扩大泄漏面。
+
+写入用"临时文件 + 原子 rename"：直接覆盖时若进程在写一半崩溃，
+会留下无法解析的文件——那就意味着服务重启后无法签发令牌。
+
+### 16.4 并发
+
+`Signer` 原先的注释是"keys 在构造后只读，无需加锁"。轮换打破了这个前提，
+因此三处读路径（Issue / Parse / JWKS / List）都加了读锁，
+`Rotate` / `Retire` 持写锁。`Issue` 只在"取密钥"这一刻持读锁，
+签名运算本身不占锁——否则轮换期间签发会排队。
+
+### 16.5 实测（本地 compose）
+
+```
+rotate  → published_keys: 2，JWKS 返回 2 个 kid
+retire  → 409，wait_seconds: 957，details.retirable_at 有值
+list    → 旧密钥 status=published，带 demoted_at / retirable_at
+重启   → 日志"签名密钥从状态文件加载（管理端轮换过）"，active 仍是新 kid
+```
+
+### 16.6 测试
+
+- `jwtkit`：8 例
+  - rotate 后旧 token 仍可验签（第 2 步的核心）
+  - 不能下线当前签名密钥 / 不能提前下线（含 `retirable_at` 断言）
+  - TTL 后可下线且旧 token 失效
+  - 列表给出 `retirable_at`
+  - 文件存储往返（重启后 active 正确、旧 token 仍可验签、旧密钥无私钥）
+  - JWKS 不含私钥字段
+- `adminkey`：8 例
+  - 缺 reason / 未配置 store 拒绝 / 落盘失败不切换内存 / 提前 retire 拒绝
+
+### 16.7 尚未交付
+
+- **KMS 接入**：当前是单 KEK + 本地文件，`KeyStore` 已经是接口，
+  换 KMS 只需要新实现
+- **紧急轮换流程**（密钥泄漏）：需要"立即切换 + 撤销受影响 token"的组合动作，
+  当前 `rotate` + `tokens/revoke` 可人工拼出，但没有一键入口
+- **轮换周期提醒**：90 天建议值没有内置检查

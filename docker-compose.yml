@@ -124,6 +124,9 @@ services:
       # 审计导出文件（§15.4 H 组）。不挂卷的话容器一重启，
       # 已完成的导出任务就变成"元数据说成功、文件却不在"。
       - export-data:/app/var/exports
+      # 签名密钥状态（F 组轮换）。不挂卷的话容器重启后轮换结果丢失，
+      # JWKS 会突然换一把，业务方缓存的公钥全部失效。
+      - key-data:/app/var/keys
     depends_on:
       pg:
         condition: service_healthy
@@ -135,3 +138,4 @@ services:
 volumes:
   pg-data:
   export-data:
+  key-data:

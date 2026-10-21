@@ -41,6 +41,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
 	"github.com/djackcurry30/social-login/internal/application/adminidentity"
+	"github.com/djackcurry30/social-login/internal/application/adminkey"
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/application/adminsession"
@@ -119,7 +120,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 	appSecretHasher := buildAppSecretHasher(cfg, logger)
 
-	signer, err := buildSigner(cfg, logger)
+	signer, keyStore, err := buildSigner(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -425,6 +426,21 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:      logger,
 	})
 
+	// F 组：签名密钥轮换。
+	//
+	// keyStore 可能为 nil（未配置 security.key_dir）：此时 rotate/retire
+	// 会明确拒绝，而不是只改内存造出"轮换成功"的假象。
+	var keyStorePort adminkey.KeyStore
+	if keyStore != nil {
+		keyStorePort = keyStore
+	}
+	adminKeySvc := adminkey.New(adminkey.Deps{
+		Signer:     signer,
+		Store:      keyStorePort,
+		AdminAudit: adminAuditRepo,
+		Logger:     logger,
+	})
+
 	// E 组：会话与令牌。
 	adminSessionSvc := adminsession.New(adminsession.Deps{
 		Sessions:       sessionRepo,
@@ -475,6 +491,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminMerge:    adminMergeSvc,
 		AdminIdentity: adminIdentitySvc,
 		AdminSession:  adminSessionSvc,
+		AdminKey:      adminKeySvc,
 	}
 	_ = adminDeps
 

@@ -109,7 +109,7 @@ COPY configs/config.yaml /app/configs/config.yaml
 # root:root 新建，运行用户 uid=100(app) 随即失去写权限，表现是
 # "导出任务永远 failed: permission denied"，且启动阶段毫无提示。
 RUN chown -R app:app /app \
- && mkdir -p /app/var/exports \
+ && mkdir -p /app/var/exports /app/var/keys \
  && chown -R app:app /app/var
 
 USER app

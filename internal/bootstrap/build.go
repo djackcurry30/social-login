@@ -77,16 +77,51 @@ func buildAppSecretHasher(cfg *Config, logger *zap.Logger) *crypto.AppSecretHash
 }
 
 // buildSigner 构造 JWT 签名器。
-func buildSigner(cfg *Config, logger *zap.Logger) (*jwtkit.Signer, error) {
+// buildSigner 构造签名器，并返回密钥存储（供管理端轮换后持久化）。
+//
+// 加载优先级（从高到低）：
+//  1. security.key_dir 下由管理端 rotate 生成的状态文件
+//  2. jwt.signing_keys 配置的私钥文件
+//  3. 开发模式的临时密钥
+//
+// 第 1 条必须优先：否则管理端轮换过的密钥在重启后会被配置里的旧密钥顶掉，
+// 轮换等于没做，而且 JWKS 会突然少一把公钥，旧 token 全部验签失败。
+func buildSigner(cfg *Config, logger *zap.Logger) (*jwtkit.Signer, *jwtkit.FileStore, error) {
+	var store *jwtkit.FileStore
+	if cfg.Security.KeyDir != "" {
+		store = jwtkit.NewFileStore(cfg.Security.KeyDir)
+		if store.Exists() {
+			keys, err := store.Load()
+			if err != nil {
+				// 状态文件存在但读不出来时【不能静默回退】到配置：
+				// 那会让正在生效的密钥被无声替换。
+				return nil, nil, err
+			}
+			signer, err := jwtkit.NewSigner(jwtkit.Options{
+				Issuer: cfg.Server.Issuer,
+				TTL:    cfg.JWT.AccessTokenTTL,
+				Keys:   keys,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			logger.Info("签名密钥从状态文件加载（管理端轮换过）",
+				zap.String("active_kid", signer.ActiveKID()),
+				zap.Int("published_kids", len(signer.Kids())),
+				zap.String("path", store.Path()))
+			return signer, store, nil
+		}
+	}
+
 	keys := make([]jwtkit.Key, 0, len(cfg.JWT.SigningKeys))
 	for i, k := range cfg.JWT.SigningKeys {
 		if k.PrivateKeyFile == "" {
-			return nil, errs.Newf(errs.CodeConfigInvalid,
+			return nil, nil, errs.Newf(errs.CodeConfigInvalid,
 				"jwt.signing_keys[%d] 缺少 private_key_file", i)
 		}
 		key, err := jwtkit.LoadPrivateKeyPEM(k.PrivateKeyFile, k.KID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		keys = append(keys, key)
 	}
@@ -103,15 +138,14 @@ func buildSigner(cfg *Config, logger *zap.Logger) (*jwtkit.Signer, error) {
 		Keys:   keys,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	logger.Info("签名密钥就绪",
 		zap.String("active_kid", signer.ActiveKID()),
 		zap.Int("published_kids", len(signer.Kids())))
-	return signer, nil
+	return signer, store, nil
 }
 
-// buildAccountProvider 构造账号体系实现（约束 C4）。
 // buildSMSSender 构造验证码发送通道。
 //
 // release 模式下的 "log" 已在 normalizeAndValidate 里被拒绝，
