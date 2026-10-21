@@ -443,7 +443,12 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
 ok "轮换缺 reason → 400"
 
 # 当前签名密钥不能下线：这是防止"一怒之下下线，全站旧 token 立刻失效"。
-ACTIVE_KID=$(echo "$KEYS" | sed -n 's/.*"kid":"\([^"]*\)".*/\1/p' | head -1)
+#
+# ⚠️ 必须按 status=signing 定位，不能取第一条——列表按创建顺序返回，
+# 轮换过之后第一条是"仅发布"的旧密钥，对它的 retire 是合法的（200）。
+ACTIVE_KID=$(echo "$KEYS" \
+  | grep -o '"kid":"[^"]*","algorithm":"[^"]*","status":"signing"' \
+  | head -1 | sed -n 's/"kid":"\([^"]*\)".*/\1/p')
 if [ -n "$ACTIVE_KID" ]; then
   CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
     -X POST "$BASE_URL/admin/v1/signing-keys/$ACTIVE_KID/retire" -H "$AUTH" \

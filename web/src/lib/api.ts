@@ -107,6 +107,24 @@ import type {
   ProviderMetadata,
   ProviderHealth,
   OverviewStats,
+  IdentityListOutput,
+  IdentityDetail,
+  BindingListOutput,
+  BindingItem,
+  MergeListOutput,
+  MergeOperation,
+  MergeImpact,
+  SessionListOutput,
+  ForceOfflineOutput,
+  RevocationView,
+  SigningKeyInfo,
+  RotateKeyOutput,
+  AuditRecord,
+  AdminAuditRecord,
+  AuditListOutput,
+  ExportTask,
+  GrantListOutput,
+  AdminGrant,
 } from '@/lib/types'
 
 export const AuthApi = {
@@ -214,4 +232,221 @@ export const ProvidersApi = {
   health: () =>
     api<{ probed_at: string; items: ProviderHealth[] }>('/providers/health'),
   overview: () => api<OverviewStats>('/health/overview'),
+}
+// --- C 组：身份与绑定 ---
+
+export const IdentitiesApi = {
+  list: (q: {
+    app_id?: number
+    platform?: string
+    open_id?: string
+    identity_key?: string
+    external_user_id?: string
+    page?: number
+    page_size?: number
+  }) => api<IdentityListOutput>(`/identities${qs(q)}`),
+  get: (id: number, appId: number) =>
+    api<IdentityDetail>(`/identities/${id}?app_id=${appId}`),
+  bindings: (q: {
+    app_id?: number
+    external_user_id?: string
+    status?: string
+    identity_id?: number
+    page?: number
+    page_size?: number
+  }) => api<BindingListOutput>(`/bindings${qs(q)}`),
+  /** 某账号的全部绑定（含已解绑历史） */
+  accountBindings: (appId: number, externalUserId: string) =>
+    api<BindingListOutput>(
+      `/accounts/${encodeURIComponent(externalUserId)}/bindings?app_id=${appId}`,
+    ),
+  /**
+   * 强制解绑。reason 走 body：DELETE 带 body 在部分客户端会被丢弃，
+   * 后端同时接受 query 兜底，这里用 body 与其它高危操作保持一致的写法。
+   */
+  forceUnbind: (id: number, reason: string, appId?: number) =>
+    api<{ binding: BindingItem }>(`/bindings/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ reason, app_id: appId }),
+    }),
+  /** transfer 旁路：把 identity 从旧账号转到新账号，旧账号保留 */
+  transfer: (id: number, targetUserID: string, reason: string, appId?: number) =>
+    api<{ binding: BindingItem }>(`/bindings/${id}/transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ target_user_id: targetUserID, reason, app_id: appId }),
+    }),
+}
+
+// --- D 组：合并运维 ---
+
+export const MergesApi = {
+  list: (q: {
+    app_id?: number
+    status?: string
+    user_id?: string
+    page?: number
+    page_size?: number
+  }) => api<MergeListOutput>(`/merge-operations${qs(q)}`),
+  get: (id: number) => api<{ merge_operation: MergeOperation }>(`/merge-operations/${id}`),
+  impact: (id: number) => api<{ impact: MergeImpact }>(`/merge-operations/${id}/impact`),
+  /**
+   * 人工重试。⚠️ 后端复用原幂等键，这里不需要传任何键——
+   * 换新键会让用户中心当成一次新合并，可能重复迁移数据。
+   */
+  retry: (id: number, reason: string) =>
+    api<{ ok: true }>(`/merge-operations/${id}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  /** 标记人工已核对处理，停止补偿重试（置 dead，不是 done） */
+  resolve: (id: number, reason: string) =>
+    api<{ ok: true }>(`/merge-operations/${id}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+}
+
+// --- E 组：会话与令牌 ---
+
+export const SessionsApi = {
+  list: (q: {
+    app_id?: number
+    external_user_id?: string
+    device_id?: string
+    active?: string
+    page?: number
+    page_size?: number
+  }) => api<SessionListOutput>(`/tokens${qs(q)}`),
+  /** 强制下线：撤全部 refresh_token + 写账号撤销水位 */
+  forceOffline: (appId: number, externalUserID: string, reason: string) =>
+    api<ForceOfflineOutput>('/tokens/revoke', {
+      method: 'POST',
+      body: JSON.stringify({
+        app_id: appId,
+        external_user_id: externalUserID,
+        reason,
+      }),
+    }),
+  revocation: (appId: number, externalUserID?: string, jti?: string) =>
+    api<RevocationView>(
+      `/revoked-jti${qs({ app_id: appId, external_user_id: externalUserID, jti })}`,
+    ),
+}
+
+// --- F 组：签名密钥 ---
+
+export const SigningKeysApi = {
+  list: () => api<{ items: SigningKeyInfo[] }>('/signing-keys'),
+  jwksPreview: () => api<{ keys: Array<Record<string, unknown>> }>('/signing-keys/jwks-preview'),
+  /** 轮换第 1·2 步：新密钥开始签名，旧密钥继续发布在 JWKS */
+  rotate: (reason: string) =>
+    api<RotateKeyOutput>('/signing-keys/rotate', {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  /** 轮换第 3·4 步：下线旧密钥（后端强制"旧 token 已过期"前置校验） */
+  retire: (kid: string, reason: string) =>
+    api<{ ok: true }>(`/signing-keys/${encodeURIComponent(kid)}/retire`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+}
+
+// --- H 组：审计 ---
+
+export const AuditApi = {
+  /** 业务审计（跨应用，可按 app_id 过滤） */
+  business: (q: {
+    app_id?: number
+    action?: string
+    result?: string
+    external_user_id?: string
+    platform?: string
+    trace_id?: string
+    from?: string
+    to?: string
+    page?: number
+    page_size?: number
+  }) => api<AuditListOutput<AuditRecord>>(`/audit-logs${qs(q)}`),
+  /** 管理端审计 */
+  admin: (q: {
+    action?: string
+    result?: string
+    subject_id?: string
+    target_type?: string
+    target_id?: string
+    from?: string
+    to?: string
+    page?: number
+    page_size?: number
+  }) => api<AuditListOutput<AdminAuditRecord>>(`/audit-logs/admin${qs(q)}`),
+  exports: (q?: { page?: number; page_size?: number }) =>
+    api<AuditListOutput<ExportTask>>(`/audit-logs/exports${qs(q ?? {})}`),
+  submitExport: (inp: {
+    app_id?: number
+    action?: string
+    result?: string
+    from?: string
+    to?: string
+    reason: string
+  }) =>
+    api<ExportTask>('/audit-logs/export', {
+      method: 'POST',
+      body: JSON.stringify(inp),
+    }),
+  getExport: (taskId: string) => api<ExportTask>(`/audit-logs/export/${taskId}`),
+  /**
+   * 下载导出文件。
+   *
+   * 用 fetch + blob 而不是 <a href>：下载走鉴权接口，直链没有 Authorization
+   * 头会被 401。审计含 openid/IP/UA，不能做成公开直链。
+   */
+  download: async (taskId: string): Promise<Blob> => {
+    const token = getToken()
+    const res = await fetch(`/admin/v1/audit-logs/export/${taskId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) {
+      throw await toApiError(res)
+    }
+    return await res.blob()
+  },
+}
+
+// --- K 组：管理员授权 ---
+
+export const GrantsApi = {
+  list: (q?: {
+    subject_id?: string
+    include_revoked?: boolean
+    page?: number
+    page_size?: number
+  }) => api<GrantListOutput>(`/admin-grants${qs(q ?? {})}`),
+  grant: (inp: {
+    subject_id: string
+    role: string
+    scope_app_id?: number
+    expires_at?: string
+    reason: string
+  }) =>
+    api<{ grant: AdminGrant }>('/admin-grants', {
+      method: 'POST',
+      body: JSON.stringify(inp),
+    }),
+  revoke: (id: number, reason: string) =>
+    api<{ ok: true }>(`/admin-grants/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ reason }),
+    }),
+}
+
+/** qs 把查询参数拼成 `?a=1&b=2`，自动跳过空值。 */
+function qs(q: Record<string, unknown>): string {
+  const p = new URLSearchParams()
+  for (const [k, v] of Object.entries(q)) {
+    if (v === undefined || v === null || v === '') continue
+    p.set(k, String(v))
+  }
+  const s = p.toString()
+  return s ? `?${s}` : ''
 }

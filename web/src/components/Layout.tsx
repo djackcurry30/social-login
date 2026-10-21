@@ -26,6 +26,22 @@ const NAV = [
       { label: '观测看板', to: '/observability' },
     ],
   },
+  {
+    title: '身份与账号',
+    items: [
+      { label: '身份与绑定', to: '/identities' },
+      { label: '会话与令牌', to: '/sessions' },
+      { label: '合并运维', to: '/merges' },
+    ],
+  },
+  {
+    title: '审计与系统',
+    items: [
+      { label: '审计日志', to: '/audit' },
+      { label: '签名密钥', to: '/signing-keys' },
+      { label: '管理员授权', to: '/admin-grants' },
+    ],
+  },
 ]
 
 export default function Layout() {

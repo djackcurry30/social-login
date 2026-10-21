@@ -163,3 +163,226 @@ export interface OverviewStats {
   unhealthy_providers: number
   by_platform: Record<string, number>
 }
+// --- C 组（身份与绑定）---
+
+export interface IdentityItem {
+  id: number
+  app_id: number
+  platform: string
+  provider_app_id: string
+  open_id: string
+  identity_key: string
+  profile_snapshot?: Record<string, unknown>
+  first_seen_at: string
+  last_login_at?: string
+  profile_synced_at?: string
+}
+
+export interface ClaimItem {
+  id: number
+  claim_type: string
+  /** 只返回哈希前缀：库里没有明文，后端也不回显 */
+  value_hash_prefix?: string
+  verified: boolean
+  source: string
+  verified_at?: string
+  revoked_at?: string
+  created_at: string
+}
+
+export interface BindingItem {
+  id: number
+  app_id: number
+  external_user_id: string
+  identity_id: number
+  status: 'active' | 'unbound'
+  is_primary: boolean
+  bind_source: string
+  bound_at: string
+  unbound_at?: string
+}
+
+export interface IdentityDetail {
+  identity: IdentityItem
+  claims: ClaimItem[]
+  bindings: BindingItem[]
+}
+
+export interface IdentityListOutput {
+  items: IdentityItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface BindingListOutput {
+  items: BindingItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// --- D 组（合并运维）---
+
+export type MergeStatus = 'pending' | 'done' | 'failed' | 'dead' | 'rejected'
+
+export interface MergeOperation {
+  id: number
+  app_id: number
+  idempotency_key: string
+  target_user_id: string
+  source_user_id: string
+  identity_id?: number
+  status: MergeStatus
+  reason?: string
+  attempts: number
+  last_error?: string
+  remote_result?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface MergeListOutput {
+  items: MergeOperation[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface MergeImpact {
+  Bindings: number
+  Tokens: number
+  Identities: string[]
+}
+
+// --- E 组（会话与令牌）---
+
+export interface SessionTokenItem {
+  id: number
+  app_id: number
+  external_user_id: string
+  device_id?: string
+  scope?: string
+  revoked: boolean
+  revoked_reason?: string
+  expires_at: string
+  created_at: string
+  rotated_from?: number
+  active: boolean
+}
+
+export interface SessionListOutput {
+  items: SessionTokenItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ForceOfflineOutput {
+  revoked_tokens: number
+  revoked_at: string
+  /** 未开启 check_revocation 的调用方仍可能接受旧令牌的剩余秒数 */
+  effective_window_seconds: number
+}
+
+export interface RevocationView {
+  app_id: number
+  external_user_id: string
+  revoked_at?: string
+  jti?: string
+  jti_revoked?: boolean
+}
+
+// --- F 组（签名密钥）---
+
+export interface SigningKeyInfo {
+  kid: string
+  algorithm: string
+  status: 'signing' | 'published'
+  created_at: string
+  demoted_at?: string
+  retirable_at?: string
+}
+
+export interface RotateKeyOutput {
+  new_kid: string
+  previous_kid?: string
+  retirable_at?: string
+  published_keys: number
+}
+
+// --- H 组（审计）---
+
+export interface AuditRecord {
+  id: number
+  app_id?: number
+  external_user_id?: string
+  platform?: string
+  scene?: string
+  client?: string
+  action: string
+  result: string
+  error_code?: string
+  client_ip?: string
+  user_agent?: string
+  trace_id?: string
+  detail?: Record<string, unknown>
+  created_at: string
+}
+
+export interface AdminAuditRecord {
+  id: number
+  subject_id: string
+  action: string
+  target_type: string
+  target_id: string
+  reason?: string
+  before_state?: Record<string, unknown>
+  after_state?: Record<string, unknown>
+  result: string
+  error_code?: string
+  created_at: string
+}
+
+export interface AuditListOutput<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ExportTask {
+  task_id: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  row_count: number
+  file_size: number
+  error_code?: string
+  error_message?: string
+  criteria?: Record<string, unknown>
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  expires_at?: string
+  download_path?: string
+}
+
+// --- K 组（管理员授权）---
+
+export interface AdminGrant {
+  id: number
+  subject_id: string
+  role: string
+  scope_app_id?: number
+  granted_by: string
+  granted_at: string
+  expires_at?: string
+  revoked_at?: string
+  effective: boolean
+}
+
+export interface GrantListOutput {
+  items: AdminGrant[]
+  total: number
+  page: number
+  page_size: number
+}
