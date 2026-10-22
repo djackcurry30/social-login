@@ -16,6 +16,7 @@ import SessionsPage from '@/pages/SessionsPage'
 import SigningKeysPage from '@/pages/SigningKeysPage'
 import AuditPage from '@/pages/AuditPage'
 import AdminGrantsPage from '@/pages/AdminGrantsPage'
+import EventsPage from '@/pages/EventsPage'
 
 export default function App() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/apps/:id" element={<AppDetailPage />} />
         <Route path="/channels" element={<ChannelsPage />} />
         <Route path="/observability" element={<ObservabilityPage />} />
+        <Route path="/events" element={<EventsPage />} />
         <Route path="/identities" element={<IdentitiesPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/merges" element={<MergesPage />} />

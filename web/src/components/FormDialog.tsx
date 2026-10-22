@@ -49,6 +49,14 @@ interface FormDialogProps {
   fields?: FieldDef[]
   /** 是否需要 reason 输入（默认 true） */
   requireReason?: boolean
+  /**
+   * reason 是否可选（默认 false = 必填）。
+   *
+   * 只对 requireReason=true 生效。用于"常规运维动作但记下来更好"的场景，
+   * 典型是死信重投：重投本身不需要理由，但记下"为什么现在重投"，
+   * 事后能回答"这条是谁捞出来的、当时怎么判断的"。
+   */
+  reasonOptional?: boolean
   submitLabel?: string
   destructive?: boolean
   /** 额外的只读内容，例如影响面预估 */
@@ -59,7 +67,13 @@ interface FormDialogProps {
 const MIN_REASON = 4
 
 export default function FormDialog(props: FormDialogProps) {
-  const { open, onOpenChange, fields = [], requireReason = true } = props
+  const {
+    open,
+    onOpenChange,
+    fields = [],
+    requireReason = true,
+    reasonOptional = false,
+  } = props
   const [values, setValues] = useState<Record<string, string>>({})
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
@@ -79,7 +93,8 @@ export default function FormDialog(props: FormDialogProps) {
   if (!open) return null
 
   const fieldsOk = fields.every((f) => !f.required || (values[f.name] ?? '').trim() !== '')
-  const reasonOk = !requireReason || reason.trim().length >= MIN_REASON
+  const reasonOk =
+    !requireReason || reasonOptional || reason.trim().length >= MIN_REASON
   const canSubmit = fieldsOk && reasonOk && !busy
 
   const submit = async () => {
@@ -162,7 +177,11 @@ export default function FormDialog(props: FormDialogProps) {
             <div className="space-y-1.5">
               <Label htmlFor="fd-reason">
                 操作原因（≥{MIN_REASON} 字符）
-                <span className="text-destructive ml-0.5">*</span>
+                {reasonOptional ? (
+                  <span className="text-muted-foreground ml-1 font-normal">选填</span>
+                ) : (
+                  <span className="text-destructive ml-0.5">*</span>
+                )}
               </Label>
               <Textarea
                 id="fd-reason"
@@ -171,7 +190,7 @@ export default function FormDialog(props: FormDialogProps) {
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
               />
-              {!reasonOk && reason.length > 0 ? (
+              {!reasonOk && reason.length > 0 && !reasonOptional ? (
                 <div className="text-xs text-destructive">reason 至少 {MIN_REASON} 字符</div>
               ) : null}
             </div>

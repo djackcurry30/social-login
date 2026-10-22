@@ -457,6 +457,46 @@ if [ -n "$ACTIVE_KID" ]; then
   ok "下线当前签名密钥 → 409"
 fi
 
+# 15.96 G 组：事件投递与死信
+#
+# 只验证查询口径与两条拒绝：真实的 dead 状态需要制造投递失败
+# （应用配一个坏地址并等满退避），不适合放在冒烟脚本里。
+# 重投保持 event_id 不变这一点由 application/adminevent 的单测覆盖。
+step "15.96 G 组：事件投递与死信"
+
+EV=$(curl -s -m 5 "$BASE_URL/admin/v1/events/outbox?page_size=5" -H "$AUTH")
+echo "$EV"
+echo "$EV" | grep -q '"items":' || fail "事件列表查询失败: $EV"
+ok "事件可查"
+
+DEAD=$(curl -s -m 5 "$BASE_URL/admin/v1/events/outbox?status=dead&page_size=1" -H "$AUTH")
+echo "$DEAD" | grep -q '"total":' || fail "按状态查询失败: $DEAD"
+ok "按状态筛选可查"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/events/outbox?status=bogus" -H "$AUTH")
+[ "$CODE" = "400" ] || fail "非法 status 期望 400，实际 $CODE"
+ok "非法 status → 400"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  "$BASE_URL/admin/v1/events/outbox/99999999" -H "$AUTH")
+[ "$CODE" = "404" ] || fail "不存在的事件期望 404，实际 $CODE"
+ok "不存在的事件 → 404"
+
+# 已送达不能重投、非死信不能重投：对不存在的事件应报 404（先取事件）。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/events/outbox/99999999/retry" -H "$AUTH" \
+  -H "Content-Type: application/json" -d '{"reason":"验收：重投不存在的事件"}')
+[ "$CODE" = "404" ] || fail "重投不存在的事件期望 404，实际 $CODE"
+ok "重投不存在的事件 → 404"
+
+# 丢弃必须写理由：这条校验先于"事件是否存在"，所以是 400 而不是 404。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X POST "$BASE_URL/admin/v1/events/outbox/99999999/discard" -H "$AUTH" \
+  -H "Content-Type: application/json" -d '{"reason":""}')
+[ "$CODE" = "400" ] || fail "丢弃缺 reason 期望 400，实际 $CODE"
+ok "丢弃缺 reason → 400"
+
 # 15.97 K 组：管理员授权
 #
 # 核心边界：admin:grant 只有 super_admin 有（能改"谁能进管理端"的人

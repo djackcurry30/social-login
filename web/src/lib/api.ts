@@ -125,6 +125,8 @@ import type {
   ExportTask,
   GrantListOutput,
   AdminGrant,
+  EventListOutput,
+  EventOutboxItem,
 } from '@/lib/types'
 
 export const AuthApi = {
@@ -449,4 +451,37 @@ function qs(q: Record<string, unknown>): string {
   }
   const s = p.toString()
   return s ? `?${s}` : ''
+}
+
+// --- G 组：事件与死信 ---
+
+export const EventsApi = {
+  list: (q: {
+    app_id?: number
+    status?: string
+    event_type?: string
+    from?: string
+    to?: string
+    page?: number
+    page_size?: number
+  }) => api<EventListOutput>(`/events/outbox${qs(q)}`),
+  /** 详情带 payload——列表刻意不返回，单条事件体可能很大 */
+  get: (id: number) => api<{ event: EventOutboxItem }>(`/events/outbox/${id}`),
+  /**
+   * 死信重投。
+   *
+   * ⚠️ 后端保持原 event_id 不变：业务方按它去重，换新 ID 会被当成新事件
+   * 处理两次。所以重投不需要、也不允许传任何 ID。
+   */
+  retry: (id: number, reason: string) =>
+    api<{ ok: true }>(`/events/outbox/${id}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  /** 人工丢弃：必须写理由，会记审计 */
+  discard: (id: number, reason: string) =>
+    api<{ ok: true }>(`/events/outbox/${id}/discard`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
 }

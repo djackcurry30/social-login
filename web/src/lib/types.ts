@@ -388,3 +388,42 @@ export interface GrantListOutput {
   page: number
   page_size: number
 }
+
+// --- G 组（事件与死信）---
+
+/**
+ * 事件投递状态。
+ *
+ * - pending    待投递（排队中，或在等下一次重试）
+ * - sent       已送达
+ * - dead       死信：重试耗尽，或被对方明确拒收（4xx）
+ * - skipped    已跳过：应用没配 webhook_url（配置状态，不是故障）
+ * - discarded  已丢弃（人工，必须写理由）
+ */
+export type EventStatus = 'pending' | 'sent' | 'dead' | 'skipped' | 'discarded'
+
+export interface EventOutboxItem {
+  id: number
+  app_id: number
+  /** 业务方按它去重；重投时保持不变 */
+  event_id: string
+  event_type: string
+  schema_version: number
+  status: EventStatus
+  /** 已尝试投递次数（最大 5） */
+  attempts: number
+  next_retry_at?: string
+  /** 最近一次失败原因（对方返回的原文） */
+  last_error?: string
+  created_at: string
+  sent_at?: string
+  /** 只有详情接口返回：列表不带 payload，单条事件体可能很大 */
+  payload?: Record<string, unknown>
+}
+
+export interface EventListOutput {
+  items: EventOutboxItem[]
+  total: number
+  page: number
+  page_size: number
+}

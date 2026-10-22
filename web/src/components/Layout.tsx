@@ -56,6 +56,9 @@ const NAV: NavGroup[] = [
     title: '运行与审计',
     items: [
       { label: '观测看板', to: '/observability' },
+      // 导航标签用「事件投递」而不是「事件死信」：死信只是其中一个状态，
+      // 第一次进来的人看到这个词会不知道该不该点。
+      { label: '事件投递', to: '/events' },
       { label: '审计日志', to: '/audit' },
     ],
   },
