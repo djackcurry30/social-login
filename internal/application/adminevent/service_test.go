@@ -11,6 +11,7 @@ import (
 
 type fakeStore struct {
 	item      *event.Event
+	getErr    error
 	restored  int64
 	discarded int64
 }
@@ -25,7 +26,12 @@ func (f *fakeStore) MarkRetry(context.Context, int64, int, time.Time, string) er
 }
 func (f *fakeStore) MarkDead(context.Context, int64, int, string) error { return nil }
 func (f *fakeStore) MarkSkipped(context.Context, int64, string) error   { return nil }
-func (f *fakeStore) Get(context.Context, int64) (*event.Event, error)   { return f.item, nil }
+func (f *fakeStore) Get(context.Context, int64) (*event.Event, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.item, nil
+}
 func (f *fakeStore) List(context.Context, event.Filter) ([]*event.Event, int64, error) {
 	return nil, 0, nil
 }
@@ -125,5 +131,37 @@ func TestListRejectsBadTimeRange(t *testing.T) {
 	svc, _ := svcWith(event.StatusDead)
 	if _, err := svc.List(context.Background(), ListInput{From: "2026-01-01"}); err == nil {
 		t.Fatal("非 RFC3339 时间必须拒绝")
+	}
+}
+
+// TestMissingEventIs404 守住一个上线才发现的口径问题：
+// 仓储返回哨兵 event.ErrNotFound，用例层若不翻译，httputil 会把它
+// 归一化成 500 —— 运维看到 500 会以为服务崩了，实际只是这条事件不在了。
+//
+// 三个入口都走同一条 load 路径，所以一起断言：只修 Get 而漏掉 Retry/Discard，
+// 依然会让"点重投"变成 500。
+func TestMissingEventIs404(t *testing.T) {
+	st := &fakeStore{getErr: event.ErrNotFound}
+	svc := New(Deps{Events: st})
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"Get", func() error { _, err := svc.Get(ctx, 999); return err }},
+		{"Retry", func() error { return svc.Retry(ctx, 999, nil, "测试：重投不存在的事件") }},
+		{"Discard", func() error {
+			return svc.Discard(ctx, 999, DiscardInput{Reason: "测试：丢弃不存在的事件"})
+		}},
+	}
+	for _, c := range cases {
+		err := c.call()
+		if err == nil {
+			t.Fatalf("%s: 不存在的事件必须报错", c.name)
+		}
+		if code := errs.CodeOf(err); code != errs.CodeNotFound {
+			t.Fatalf("%s: 应为 NOT_FOUND，实际=%v", c.name, code)
+		}
 	}
 }

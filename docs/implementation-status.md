@@ -1415,3 +1415,89 @@ G 组此前没有任何验收覆盖（接口在二期就交付了，但一直没
 
 管理端前端至此覆盖 A/B/C/D/E/F/G/H/I/K —— **十组页面齐全**，只剩 J 组
 （claim 一致性，属三期遗留）没有页面。
+
+### 20.9 实机部署验证（2026-10-22）
+
+镜像构建成功，容器启动，`/healthz` 200，G 组四个路由全部注册。验收脚本
+在 15.96 处**抓到一个真实缺陷**：
+
+```
+FAIL: 不存在的事件期望 404，实际 500
+```
+
+#### 缺陷：事件不存在时返回 500
+
+`postgres.EventRepository.Get` 正确返回了哨兵错误 `event.ErrNotFound`，
+但 `adminevent.Service.Get` 直接把它透出去：
+
+```go
+e, err := s.deps.Events.Get(ctx, id)
+if err != nil {
+    return nil, err        // ← err 是普通 error，不是 *errs.Error
+}
+```
+
+`httputil.Fail` 里 `errs.From(err)` 对普通 error 返回 nil，于是被归一化成
+500。运维看到 500 会以为服务崩了，实际只是"这条事件不在了"——可能被清理
+任务删了、或者前端拼错了 id。
+
+修复是在用例层加 `load()` 统一翻译（基础设施层不该依赖 HTTP 语义）：
+
+```go
+func (s *Service) load(ctx context.Context, id int64) (*event.Event, error) {
+    e, err := s.deps.Events.Get(ctx, id)
+    if err != nil {
+        if errors.Is(err, event.ErrNotFound) {
+            return nil, errs.New(errs.CodeNotFound, "事件不存在").WithDetail("id", id)
+        }
+        return nil, err
+    }
+    return e, nil
+}
+```
+
+`Get` / `Retry` / `Discard` 三个入口全走它——只修 `Get` 会让"点重投"
+仍然 500。单测 `TestMissingEventIs404` 一次断言三个入口。
+
+**为什么之前没发现**：G 组是唯一一组"接口二期就交付、但既没有验收脚本
+断言、也没有覆盖 404 路径的单测"的模块。其它组（C/D/E/F/H/K）都有
+`adminxxx.CodedNotFound` 的显式翻译，只有它漏了。这次补上验收覆盖才暴露。
+
+#### 实测通过的链路（HTTP，真库）
+
+```
+GET  /admin/v1/events/outbox?status=dead     total=1，命中 evt_demo_dead_001
+GET  /admin/v1/events/outbox/37              payload 完整返回
+POST /admin/v1/events/outbox/37/retry        → pending, attempts=0, next_retry_at 已设
+        （随后被 dispatcher 领取，应用未配 webhook → skipped，链路真实跑通）
+POST /admin/v1/events/outbox/38/discard      → discarded
+POST /admin/v1/events/outbox/38/discard(空)  → 400
+POST /admin/v1/events/outbox/38/retry        → 200（discarded 允许捞回）
+GET  /admin/v1/events/outbox?status=bogus    → 400
+```
+
+前端：`/admin` 200，bundle `index-DmDVo5Qz.js` 内含「事件投递」「死信」
+「events/outbox」，与本地构建产物一致。
+
+验收脚本在修复前跑到 15.96 停止，**此前 54 条断言全部通过**。
+
+#### ⚠️ 未完成：镜像重建
+
+修复提交后需要重建镜像才能让运行实例生效，但本次验证期间本机
+Rancher Desktop 的 docker API 代理反复中断：
+
+```
+docker-proxy: error accepting client connection: bad file descriptor
+failed to connect to the backend: timed out dialing Hyper-V socket
+```
+
+容器本身健康（HTTP 全通），只有 Windows 侧的 docker CLI 通道断了。
+`rdctl shell` 也被执行沙箱拦在 `wsl.exe` 上，无法从虚拟机内操作。
+
+VM 配置是 qemu / 2GB 内存 / 2 CPU —— 构建 Go + Node 时极易被压垮，
+这可能是代理反复死锁的根因。**建议把内存调到 6GB** 后再重建：
+
+```bash
+docker compose up -d --build app
+bash scripts/acceptance-admin.sh   # 预期 18 步 73 条断言全过
+```

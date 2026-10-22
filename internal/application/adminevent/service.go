@@ -7,6 +7,7 @@ package adminevent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -123,7 +124,7 @@ func (s *Service) Get(ctx context.Context, id int64) (*Item, error) {
 	if id <= 0 {
 		return nil, errs.New(errs.CodeInvalidRequest, "id 不合法")
 	}
-	e, err := s.deps.Events.Get(ctx, id)
+	e, err := s.load(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +141,7 @@ func (s *Service) Retry(ctx context.Context, id int64, principal *admin.Principa
 	if id <= 0 {
 		return errs.New(errs.CodeInvalidRequest, "id 不合法")
 	}
-	e, err := s.deps.Events.Get(ctx, id)
+	e, err := s.load(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -181,7 +182,7 @@ func (s *Service) Discard(ctx context.Context, id int64, in DiscardInput) error 
 		return errs.New(errs.CodeAdminReasonRequired,
 			"丢弃事件必须填写 reason（≥4 字符）")
 	}
-	e, err := s.deps.Events.Get(ctx, id)
+	e, err := s.load(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -195,6 +196,23 @@ func (s *Service) Discard(ctx context.Context, id int64, in DiscardInput) error 
 		map[string]any{"status": string(e.Status)}, map[string]any{"status": string(event.StatusDiscarded)},
 		"success", nil)
 	return nil
+}
+
+// load 读取事件，并把"不存在"翻译成 404。
+//
+// 仓储返回的是哨兵错误 event.ErrNotFound——基础设施层不该依赖 HTTP 语义，
+// 这个翻译必须发生在用例层。漏了这一步，httputil 会把它归一化成 500：
+// 运维看到 500 以为服务崩了，而不是"这条事件不在了"（可能被清理任务删了、
+// 或者是手工拼的 id）。
+func (s *Service) load(ctx context.Context, id int64) (*event.Event, error) {
+	e, err := s.deps.Events.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, event.ErrNotFound) {
+			return nil, errs.New(errs.CodeNotFound, "事件不存在").WithDetail("id", id)
+		}
+		return nil, err
+	}
+	return e, nil
 }
 
 func toItem(e *event.Event, withPayload bool) Item {
