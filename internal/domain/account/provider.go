@@ -13,6 +13,12 @@ import (
 // ErrNotFound 表示账号在用户中心不存在。
 var ErrNotFound = errors.New("account: not found")
 
+// ErrMultipleAccounts 表示按凭证反查命中了多个账号。
+//
+// 这不是"随便挑一个"的场景（§7.4 通用护栏）：一个手机号对应多个账号说明
+// 用户中心的唯一性已经被破坏，自动归并进去无论选哪个都是错的。
+var ErrMultipleAccounts = errors.New("account: multiple accounts matched")
+
 // 账号状态。
 type Status string
 

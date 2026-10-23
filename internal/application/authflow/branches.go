@@ -47,6 +47,24 @@ func (s *Service) finishLogin(
 
 	case errors.Is(err, binding.ErrNotFound):
 		// 未绑定分支（约束 C4）。
+		//
+		// 先给 claim_verified 一次机会：应用显式允许"同一个人从不同渠道来
+		// 应该登进同一个账号"时，用本次已验证的凭证去找既有账号并归并过去
+		// （§7.4 的 S2 行为）。未命中再落到 on_unbound_login 的三种档位。
+		//
+		// 注意它只在【未绑定】时才有意义：已经有绑定的身份走上面的主路径，
+		// 那条路上任何 claim 归并都是多余的，而且会掩盖数据异常。
+		if app.Policy.Merge.OnLogin == tenant.OnLoginClaimVerified {
+			merged, mErr := s.tryClaimMerge(ctx, app, tc, idn, accClaims, out, meta, started)
+			if mErr != nil {
+				s.auditLogin(ctx, app.ID, idn.ID, "", tc,
+					audit.ResultFailure, errs.CodeOf(mErr), meta, started)
+				return nil, mErr
+			}
+			if merged != nil {
+				return merged, nil
+			}
+		}
 
 	default:
 		return nil, err

@@ -33,6 +33,24 @@ func TestPolicyValidateEnforcesConfigConsistency(t *testing.T) {
 			policy: base(nil),
 		},
 		{
+			// 登录期归并是显式开关：配了就要真的生效，所以取值必须能通过校验。
+			name: "auto + on_login=claim_verified 合法",
+			policy: base(func(p *Policy) {
+				p.Merge.Mode = MergeModeAuto
+				p.Merge.OnLogin = OnLoginClaimVerified
+			}),
+		},
+		{
+			// 拼错一个字母如果被放行，归并会静默不生效，而配置看起来是开着的。
+			name: "auto + on_login 拼错必须拒绝",
+			policy: base(func(p *Policy) {
+				p.Merge.Mode = MergeModeAuto
+				p.Merge.OnLogin = "claim_verify"
+			}),
+			wantErr:   true,
+			errSubstr: "未知的 on_login 取值",
+		},
+		{
 			name: "confirm + verification=none 必须拒绝",
 			policy: base(func(p *Policy) {
 				p.Merge.Mode = MergeModeConfirm

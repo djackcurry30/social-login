@@ -146,6 +146,40 @@ export default function AppDetailPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* 策略是直接编辑 JSON，字段多且语义绕。这里把最容易配错的三项摊开讲，
+              尤其是 on_login：它配错不会报错，只会"看起来开着、实际不生效"。 */}
+          <details className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+            <summary className="cursor-pointer font-medium">
+              最容易配错的三个字段（点开）
+            </summary>
+            <div className="mt-2 space-y-2 leading-relaxed text-muted-foreground">
+              <p>
+                <code className="font-mono text-foreground">merge.on_login</code>{' '}
+                —— 登录时要不要按已验证的手机号/邮箱，把新渠道的身份归并到已有账号。
+                <code className="font-mono">off</code> 不归并（默认）；
+                <code className="font-mono">detect_only</code> 只返回提示、不动数据；
+                <code className="font-mono">claim_verified</code> 命中就归并
+                （仅 <code className="font-mono">mode=auto</code> 可配）。
+                配成其它值会被校验拒绝——否则归并会静默不生效。
+              </p>
+              <p>
+                <code className="font-mono text-foreground">
+                  merge.allow_cross_platform_auto
+                </code>{' '}
+                —— 是否允许微信手机号归并到支付宝账号。默认{' '}
+                <code className="font-mono">false</code>
+                ：两边手机号可能属于不同实名主体，自动绑定等于替用户做了决定。
+              </p>
+              <p>
+                <code className="font-mono text-foreground">on_unbound_login</code> ——
+                三方身份没有绑定任何账号时怎么办：
+                <code className="font-mono">need_register</code> 引导注册（默认）、
+                <code className="font-mono">auto_create</code> 自动建号、
+                <code className="font-mono">session_only</code> 只发受限令牌。
+              </p>
+            </div>
+          </details>
+
           <Textarea
             rows={16}
             className="font-mono text-xs"

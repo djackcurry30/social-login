@@ -104,6 +104,31 @@ echo "$PUT"
 echo "$PUT" | grep -q '"allowed_redirect_uris"' || fail "policy 未保存"
 ok "policy saved"
 
+# 9.1 登录期凭证归并（merge.on_login）的策略校验
+#
+# 这一项决定"用户从新渠道用同一个已验证手机号登录时，是否归并到已有账号"。
+# 必须在配置层拦住拼写错误：若把 claim_verified 写成 claim_verify 还放行，
+# 归并会静默不生效，而运维以为已经打开了。
+step "9.1 on_login 策略校验"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X PUT "$BASE_URL/admin/v1/apps/$APP_ID/policy" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"policy":{"on_unbound_login":"need_register","merge":{"mode":"auto","verification":"sms","on_login":"claim_verified","notify_source_account":true,"source_disposal":"mark_merged","allow_cross_platform_auto":false},"allowed_redirect_uris":["http://localhost:3000/callback"]},"reason":"冒烟测试：验证 claim_verified 可配"}')
+[ "$CODE" = "200" ] || fail "auto + claim_verified 期望 200，实际 $CODE"
+ok "auto + claim_verified 可配"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+  -X PUT "$BASE_URL/admin/v1/apps/$APP_ID/policy" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"policy":{"on_unbound_login":"need_register","merge":{"mode":"auto","verification":"sms","on_login":"claim_verify","notify_source_account":true,"source_disposal":"mark_merged"},"allowed_redirect_uris":["http://localhost:3000/callback"]},"reason":"冒烟测试：验证拼写错误被拒"}')
+[ "$CODE" = "400" ] || fail "拼错的 on_login 期望 400，实际 $CODE"
+ok "拼错的 on_login → 400"
+
+# 恢复第 9 步的配置：后续登录流程按 confirm/off 的语义执行。
+curl -s -o /dev/null -m 5 \
+  -X PUT "$BASE_URL/admin/v1/apps/$APP_ID/policy" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"policy":{"on_unbound_login":"need_register","merge":{"mode":"confirm","verification":"sms","on_login":"off","notify_source_account":true,"source_disposal":"mark_merged"},"allowed_redirect_uris":["http://localhost:3000/callback"]},"reason":"恢复冒烟测试基线配置"}'
+ok "配置已恢复基线"
+
 # 10. validate policy
 step "10. POST /admin/v1/apps/$APP_ID/policy/validate"
 VAL=$(curl -s -m 3 \

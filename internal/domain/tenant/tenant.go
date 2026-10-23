@@ -185,6 +185,16 @@ func (p Policy) Validate() (*ValidationResult, error) {
 				"mode=auto 时 verification 不可为 none：自动归并的依据必须是平台侧已验证凭证（R4 红线 1）").
 				WithDetail("field", "merge.verification")
 		}
+		// auto 下 on_login 决定"登录时是否按已验证凭证归并"。取值必须显式合法：
+		// 写错一个字母（如 claim_verify）会让归并静默不生效，而配置看起来是开着的——
+		// 这正是 §7.5.4 "静默降级比报错更危险"要避免的情形。
+		switch p.Merge.OnLogin {
+		case OnLoginOff, OnLoginDetectOnly, OnLoginClaimVerified:
+		default:
+			return nil, errs.Newf(errs.CodeConfigInvalid, "未知的 on_login 取值: %s", p.Merge.OnLogin).
+				WithDetail("field", "merge.on_login").
+				WithDetail("valid", []string{OnLoginOff, OnLoginDetectOnly, OnLoginClaimVerified})
+		}
 	case MergeModeConfirm:
 		// confirm 模式的全部意义就是验证；none 会让它退化成 auto 却丢掉安全红线。
 		if p.Merge.Verification == VerificationNone {

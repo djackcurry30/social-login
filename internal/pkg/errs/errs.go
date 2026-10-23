@@ -61,6 +61,8 @@ const (
 	CodeAccountUnavailable  Code = "ACCOUNT.UNAVAILABLE"
 	CodeAccountNotFound     Code = "ACCOUNT.NOT_FOUND"
 	CodeAccountNotSupported Code = "ACCOUNT.NOT_SUPPORTED"
+	// CodeAccountMultiple 表示按凭证反查到多个账号（数据不一致，需人工处理）。
+	CodeAccountMultiple Code = "ACCOUNT.MULTIPLE_MATCH"
 
 	// 管理端专用（§15）。CodeAuthAdmin* 与 CodeAuth* 业务端解耦：
 	// 管理端请求的鉴权失败走 CodeUnauthorized 与 CodeForbidden 即可，
@@ -121,6 +123,8 @@ var defaults = map[Code]meta{
 	CodeAccountUnavailable:  {http.StatusServiceUnavailable, true},
 	CodeAccountNotFound:     {http.StatusNotFound, false},
 	CodeAccountNotSupported: {http.StatusNotImplemented, false},
+	// 命中多个账号是"数据侧不一致"，重试不会变好，也不该由调用方自动重试。
+	CodeAccountMultiple: {http.StatusConflict, false},
 
 	// 管理端错误码。
 	//
