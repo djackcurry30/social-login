@@ -109,6 +109,24 @@ func (r *AppRepository) MarkUCSyncFailed(ctx context.Context, appID int64, reaso
 	return nil
 }
 
+// CountSyncFailed 统计当前"同步失败且未恢复"的应用数（供 /metrics 采集）。
+//
+// 只在 uc_sync_error 非空时计数：MarkUCSynced 会把该列清空，所以它天然是
+// "当前还坏着"的集合，而不是"历史失败过"的累计值——后者会随时间单调增长，
+// 对告警没有意义（一条三天前已自愈的失败不该继续触发报警）。
+//
+// 用原生 SQL 的理由同 MarkUCSynced：走 GORM 的 Count 会带上模型默认作用域，
+// 而这个统计本来就该横跨全部应用（跨租户的运维视图）。
+func (r *AppRepository) CountSyncFailed(ctx context.Context) (int64, error) {
+	var n int64
+	if err := r.db.WithContext(ctx).
+		Raw(`SELECT count(*) FROM applications WHERE uc_sync_error IS NOT NULL`).
+		Scan(&n).Error; err != nil {
+		return 0, errs.Wrap(errs.CodeInternal, "统计应用同步失败数失败", err)
+	}
+	return n, nil
+}
+
 // truncateRunes 按字符（不是字节）截断，避免把中文截成半个字导致库里存进
 // 非法 UTF-8 —— PostgreSQL 的 text 列遇到非法字节会直接拒绝写入，
 // 那时真正的同步失败原因就被这个"写日志失败"盖掉了。

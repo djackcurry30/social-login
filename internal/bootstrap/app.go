@@ -25,6 +25,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/infrastructure/cache"
 	"github.com/djackcurry30/social-login/internal/infrastructure/persistence/postgres"
 	"github.com/djackcurry30/social-login/internal/infrastructure/providerguard"
+	infraratelimit "github.com/djackcurry30/social-login/internal/infrastructure/ratelimit"
 	"github.com/djackcurry30/social-login/internal/infrastructure/webhook"
 	httpapi "github.com/djackcurry30/social-login/internal/interfaces/http"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/handler"
@@ -268,6 +269,14 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	authflowSvc := authflow.New(authflow.Config{
 		CallbackBaseURL: cfg.Server.CallbackBaseURL,
 		ExchangeTimeout: cfg.Auth.ExchangeTimeout,
+		// 已绑定用户的回源核对：状态闸门 + 平台侧凭证变更换绑。
+		// 只在真实用户中心下启用：桩的账号在进程内存里，重启即空，
+		// 核对会把所有老用户误判成"账号不存在"。
+		AccountCheck: authflow.AccountCheckConfig{
+			Enabled:            cfg.Account.Provider == "http",
+			AllowOnUnavailable: cfg.Account.Gate.AllowOnUnavailable,
+			Timeout:            cfg.Account.Gate.Timeout,
+		},
 	}, authflow.Deps{
 		Tenant:     tenantSvc,
 		Sources:    sources,
@@ -283,6 +292,10 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		// J 组：回源核对失败时落一条漂移记录（§8.5）。
 		// 这是 best-effort 写入，失败不影响登录。
 		Mismatches: claimMismatchRepo,
+		// 身份维度限流（rl:identity）。开关与阈值都跟随 ratelimit.enabled，
+		// 与接入层的两档一起生效或一起关闭——分两个开关只会让人忘记打开。
+		IdentityLimiter: infraratelimit.NewIdentityLimiter(
+			rdb, cfg.RateLimit.Enabled, cfg.RateLimit.IdentityPerMinute),
 	})
 
 	tokenSvc := token.New(token.Config{
@@ -677,6 +690,44 @@ func New(ctx context.Context, opts Options) (*App, error) {
 				return 0
 			}
 			return sec
+		})
+
+	// 应用注册同步的失败数：这是"某个应用的所有登录都挂"的唯一先行指标。
+	//
+	// 为什么用采集时查库而不是同步失败时 Inc 一个计数器：需要的是"当前还坏着
+	// 几个"（MarkUCSynced 会清空 uc_sync_error，所以该列非空即"还没修好"），
+	// 而累计计数只增不减，告警会因为历史失败一直处于 firing。
+	//
+	// 挂掉时返回 0 而不是保留上一次的值：数据库不可用时别的告警（连接池、
+	// HTTP 5xx）已经会响，这里再叠加一条只会产生噪音。
+	metricsReg.GaugeFunc("social_login_uc_sync_failed",
+		"当前未同步到用户中心的应用数（非 0 表示这些应用的登录会失败）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			n, err := appRepo.CountSyncFailed(ctx)
+			if err != nil {
+				logger.Warn("采集应用同步失败数失败", zap.Error(err))
+				return 0
+			}
+			return float64(n)
+		})
+
+	// 应用总数：单独暴露只为让"同步失败数"有分母。
+	//
+	// 没有它，"uc_sync_failed == apps_total" 就只能靠人眼看管理端，
+	// 而"全挂"和"挂了一个"的处置完全不同（前者查对端，后者查该应用配置）。
+	metricsReg.GaugeFunc("social_login_apps_total",
+		"应用总数（用于判断同步失败是单租户问题还是全链路问题）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			n, err := appRepo.Count(ctx)
+			if err != nil {
+				logger.Warn("采集应用总数失败", zap.Error(err))
+				return 0
+			}
+			return float64(n)
 		})
 
 	app.router = httpapi.NewRouter(httpapi.RouterDeps{

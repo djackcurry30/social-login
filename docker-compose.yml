@@ -156,6 +156,12 @@ services:
       SOCIAL_LOGIN_ACCOUNT_PROVIDER: ${ACCOUNT_PROVIDER:-stub}
       SOCIAL_LOGIN_ACCOUNT_HTTP_BASE_URL: ${ACCOUNT_BASE_URL:-http://usercenter:8099}
       SOCIAL_LOGIN_ACCOUNT_HTTP_TOKEN: ${UC_TOKEN:-dev-usercenter-token}
+      # 已绑定用户登录时回源核对账号（状态闸门 + 平台侧凭证变更换绑）。
+      # allow_on_unavailable=false 表示对端不可用时拒绝登录（架构 §6.2）。
+      SOCIAL_LOGIN_ACCOUNT_GATE_ALLOW_ON_UNAVAILABLE: ${ACCOUNT_GATE_ALLOW:-false}
+      # 入站限流：默认关闭。本地想验证时用 RATE_LIMIT_ENABLED=true 起来。
+      SOCIAL_LOGIN_RATELIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      SOCIAL_LOGIN_RATELIMIT_IDENTITY_PER_MINUTE: ${RATE_LIMIT_IDENTITY:-30}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:

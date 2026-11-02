@@ -49,6 +49,13 @@ type RateLimitConfig struct {
 	NotifyPerMinute int `mapstructure:"notify_per_minute"`
 	// AppIPPerMinute 是业务端应用的上限（app + 客户端 IP）。
 	AppIPPerMinute int `mapstructure:"app_ip_per_minute"`
+	// IdentityPerMinute 是单个三方身份每分钟的上限（rl:identity，防撞库）。
+	//
+	// 与上面两档不同，它作用在授权流程内部：中间件看不到身份，
+	// 只有平台返回 open_id、本服务 Upsert 出 identity 之后才有主语。
+	// 阈值取 30：正常用户一分钟内不可能完成 30 次完整授权往返。
+	// 留空或 <=0 时取 infrastructure/ratelimit 的默认值（30）。
+	IdentityPerMinute int `mapstructure:"identity_per_minute"`
 }
 
 // SMSConfig 是短信通道配置。
@@ -189,6 +196,23 @@ type AccountConfig struct {
 	// 用户中心按 app_key 隔离账号空间，未注册的应用一律 400 APP.UNKNOWN。
 	// 所以"应用已注册"是登录的前置条件，这一组配置不是可选的润色项。
 	Sync AccountSync `mapstructure:"sync"`
+	// Gate 是"已绑定用户登录时回源核对账号"的策略（P1）。
+	Gate AccountGate `mapstructure:"gate"`
+}
+
+// AccountGate 是回源核对的开关与取舍。
+//
+// 这一组配置存在的唯一理由：它决定了"用户中心挂了会不会导致所有登录失败"。
+// 架构 §6.2 选的是会——无法确认账号是否被停用，就不签发令牌。这是安全优先
+// 的默认；牺牲的是可用性（对端故障 = 全站登录故障）。
+type AccountGate struct {
+	// AllowOnUnavailable 为 true 时，用户中心不可用仍放行登录。
+	//
+	// 打开前请确认能接受：在用户中心故障窗口内，已被停用/注销的账号
+	// 依然可以登录（因为本服务无从得知）。
+	AllowOnUnavailable bool `mapstructure:"allow_on_unavailable"`
+	// Timeout 是单次回源超时，默认 1s。
+	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 // AccountSync 是应用注册同步的配置。

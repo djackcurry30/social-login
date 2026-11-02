@@ -1,0 +1,108 @@
+# 统一登录接入服务 · 告警规则
+#
+# 用法（Prometheus）：
+#   rule_files:
+#     - /etc/prometheus/rules/social-login-alerts.yaml
+#
+# 设计原则：**只对"指标已经存在、但没人盯着看就会静默出事"的四项告警。**
+# 指标在 internal/bootstrap/app.go 注册，采集口径是"采集时查库"，因此这些
+# 表达式反映的是当前状态，不是累计值——重复告警不会因为历史事件而一直响。
+#
+# 阈值不是拍脑袋的：
+#   - 对账周期 5 分钟（accountsync.DefaultInterval）→ 同步类告警的 for 必须
+#     大于一个周期，否则一次瞬时失败就会打醒人。
+#   - 合并补偿任务是分钟级推进 → 滞后超过 5 分钟基本等于卡死。
+#   - 漂移是慢变量 → 用 30 分钟窗口过滤"刚发生、正在自愈"的噪声。
+
+groups:
+  - name: social-login
+    rules:
+      # 死信 = 重试已经耗尽，系统自己不会再试。非 0 就必须有人处理，
+      # 否则业务方永远收不到那次事件（令牌吊销、解绑通知等）。
+      - alert: SocialLoginOutboxDead
+        expr: social_login_outbox_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: social-login
+        annotations:
+          summary: "事件投递出现死信（{{ $value }} 条）"
+          description: >-
+            outbox 里已有 {{ $value }} 条事件重试耗尽。这些事件不会再被投递，
+            业务方（例如缓存了令牌的系统）不会收到变更通知。
+            处理：查 outbox 表的 last_error，确认目标可达后用管理端重投。
+
+      # 待投递积压：能自愈，但持续升高说明投递跟不上或目标在超时。
+      # 与死信分开告警，否则两者会互相淹没。
+      - alert: SocialLoginOutboxBacklog
+        expr: social_login_outbox_pending > 500
+        for: 15m
+        labels:
+          severity: warning
+          service: social-login
+        annotations:
+          summary: "事件投递积压（{{ $value }} 条待投递）"
+          description: >-
+            积压持续 15 分钟超过 500 条，说明投递速率低于产生速率，
+            或下游 webhook 大面积超时。此时死信通常紧随其后。
+
+      # 合并补偿滞后：远端已合并、本地未提交的窗口。这个窗口里两个账号
+      # 都还能登录，用户的资产/数据归属是错的。
+      - alert: SocialLoginMergeCompensationLag
+        expr: social_login_merge_compensation_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+          service: social-login
+        annotations:
+          summary: "合并补偿滞后 {{ $value }} 秒"
+          description: >-
+            最久未推进的合并操作已等待 {{ $value }} 秒。这段时间里源账号与
+            目标账号都处于可登录状态，数据归属不一致。
+            处理：查 merge_operations 中 status=pending 的记录与补偿任务日志。
+
+      # 凭证漂移未闭环：说明有用户本该被自动归并，但被"宁可漏归并"的护栏
+      # 拦住了。它不是故障，但持续累积意味着数据在慢慢分叉。
+      - alert: SocialLoginClaimMismatchOpen
+        expr: social_login_claim_mismatch_open > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: social-login
+        annotations:
+          summary: "凭证漂移未闭环（{{ $value }} 条）"
+          description: >-
+            有 {{ $value }} 条凭证漂移超过 30 分钟未处理。每条对应一个
+            "本服务认为身份 A 持有该手机号、用户中心却指向别处"的分歧。
+            处理：管理端凭证页按 kind 分类处理（撤销本地 claim 或人工归并）。
+
+      # 应用未同步到用户中心 = 该应用的所有登录都会失败（APP.UNKNOWN）。
+      # 这是"单租户故障"，最容易被误判成"某个应用偶发登录失败"。
+      - alert: SocialLoginUCSyncFailed
+        expr: social_login_uc_sync_failed > 0
+        for: 10m
+        labels:
+          severity: critical
+          service: social-login
+        annotations:
+          summary: "{{ $value }} 个应用未同步到用户中心"
+          description: >-
+            这些应用在用户中心不存在，该应用的登录会返回 APP.UNKNOWN（不可重试）。
+            对账每 5 分钟重放一次，因此持续 10 分钟说明不是瞬时故障——
+            大概率是服务 token 错、app_code 非法，或用户中心不可用。
+            处理：SELECT app_code, uc_sync_error FROM applications
+                  WHERE uc_sync_error IS NOT NULL;
+
+      # 同步全挂：通常意味着用户中心不可用或鉴权配置错。
+      # 与上一条的区别是"范围"，这条直接指向对端/配置而不是单个应用。
+      - alert: SocialLoginUCSyncAllFailed
+        expr: social_login_uc_sync_failed > 0 and social_login_uc_sync_failed >= social_login_apps_total
+        for: 10m
+        labels:
+          severity: critical
+          service: social-login
+        annotations:
+          summary: "全部应用同步失败，用户中心可能不可用"
+          description: >-
+            所有应用都未同步。优先检查 /readyz 与 usercenter 的健康状态，
+            以及 accounts.http.token 是否与对端一致。

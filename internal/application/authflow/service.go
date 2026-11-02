@@ -45,6 +45,27 @@ type Config struct {
 	// （用户断网），但 Exchange 一旦发出就无法撤销——授权码可能已被平台消费。
 	// 因此必须让这次调用跑完并落库，否则会出现"code 没了、token 也没拿到"。
 	ExchangeTimeout time.Duration
+	// AccountCheck 控制"已绑定用户登录时回源核对账号"的行为（见 accountgate.go）。
+	AccountCheck AccountCheckConfig
+}
+
+// AccountCheckConfig 是回源核对的策略。
+type AccountCheckConfig struct {
+	// Enabled 是总开关。
+	//
+	// 装配时按 account.provider 决定：只有 http（真实用户中心）才打开。
+	// 桩实现的账号存在进程内存里，重启即空——此时"回源核对"会把每一个
+	// 有本地绑定的老用户都判成 ACCOUNT.NOT_FOUND，那不是发现了数据分叉，
+	// 是桩模式本身就有的语义。
+	Enabled bool
+	// AllowOnUnavailable 决定用户中心不可用时是否仍放行登录。
+	//
+	// 默认 false（拒绝），对应架构 §6.2：无法确认账号是否被停用，就不签发令牌。
+	// 代价是用户中心的可用性直接传导到登录链路；若有"登录可用性优先于封禁
+	// 实时性"的场景，把它打开即可，但要在运维文档里写清楚这个选择的含义。
+	AllowOnUnavailable bool
+	// Timeout 是单次回源的超时，留空取 1s。
+	Timeout time.Duration
 }
 
 // Deps 是依赖集合。
@@ -73,6 +94,20 @@ type Deps struct {
 	// 属于管理端（adminidentity）。为 nil 时跳过记录并打 Warn——
 	// 漂移记录是旁路证据，不能因为它缺装就让登录失败。
 	Mismatches identity.MismatchRecorder
+	// IdentityLimiter 是身份维度限流（架构 §6.3 的 rl:identity）。
+	//
+	// 为 nil 时不做限流：它挡的是脚本重放与暴力绑定，不是登录的正确性前提。
+	// 放在应用层而不是接入层中间件，是因为"身份"只有平台返回 open_id
+	// 之后才存在——中间件那时候看到的还只是 app + IP。
+	IdentityLimiter IdentityLimiter
+}
+
+// IdentityLimiter 是身份维度限流端口（实现见 infrastructure/ratelimit）。
+//
+// 返回 (是否放行, 建议重试秒数)。实现必须在自身故障时放行——限流组件
+// 挂掉不该演变成"全站登录 429"。
+type IdentityLimiter interface {
+	Allow(ctx context.Context, identityID int64) (bool, int)
 }
 
 // MergeExecutor 是账号合并的端口（实现见 application/merge）。
@@ -449,6 +484,25 @@ func (s *Service) handleCallback(ctx context.Context, tc *ticket.Context, in Cal
 	if err != nil {
 		s.auditLogin(ctx, app.ID, 0, "", tc, audit.ResultFailure, errs.CodeOf(err), meta, started)
 		return nil, err
+	}
+
+	// 身份维度限流（rl:identity）。
+	//
+	// 位置在 Upsert 之后：这是第一次能拿到 identityID 的时刻。放在这里
+	// 而不是更后面，是因为它要挡在 persistClaims、用户中心调用与签发令牌
+	// 之前——那些才是真正有成本、且被脚本重放时最该止损的部分。
+	//
+	// 超限用 RATE.LIMITED 而不是 PROVIDER.REJECTED：调用方重试一次就能
+	// 成功，必须让它知道这是"暂时"，否则业务方会把 429 记成登录失败。
+	if s.deps.IdentityLimiter != nil {
+		if ok, retry := s.deps.IdentityLimiter.Allow(ctx, idn.ID); !ok {
+			limitErr := errs.New(errs.CodeRateLimited, "该身份的登录请求过于频繁，请稍后重试").
+				WithDetail("retry_after_seconds", retry).
+				WithRetryAfter(retry * 1000)
+			s.auditLogin(ctx, app.ID, idn.ID, "", tc,
+				audit.ResultFailure, errs.CodeRateLimited, meta, started)
+			return nil, limitErr
+		}
 	}
 
 	// 归并依据落库（第一期为第二/三期的归并能力准备数据）。

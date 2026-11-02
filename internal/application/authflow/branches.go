@@ -41,7 +41,16 @@ func (s *Service) finishLogin(
 	b, err := s.deps.Bindings.FindActiveByIdentity(ctx, app.ID, idn.ID)
 	switch {
 	case err == nil:
-		// 已有活跃绑定：直接登录该账号，这是最常见的主路径。
+		// 已有活跃绑定：这是最常见的主路径。
+		//
+		// 签发令牌前先回源核对（accountgate.go）：账号是否被停用/注销，
+		// 以及平台这次返回的凭证是否与用户中心一致。这一步是 P1 补的——
+		// 在此之前，账号在用户中心被停用后用户仍能登录，直到本地绑定被清理。
+		if gErr := s.gateBoundAccount(ctx, app, b, accClaims); gErr != nil {
+			s.auditLogin(ctx, app.ID, idn.ID, b.ExternalUserID, tc,
+				audit.ResultFailure, errs.CodeOf(gErr), meta, started)
+			return nil, gErr
+		}
 		return s.issueAuthCode(ctx, app, tc, idn, b.ExternalUserID,
 			identity.ScopeOpenIDProfile, out, audit.ResultSuccess, meta, started)
 
