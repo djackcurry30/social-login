@@ -48,6 +48,9 @@ const NAV: NavGroup[] = [
     title: '账号运营',
     items: [
       { label: '身份与绑定', to: '/identities' },
+      // 放在"身份与绑定"之后：它回答的是身份那一层的问题
+      // （"这个手机号为什么没归并进来"），不是配置问题也不是审计问题。
+      { label: '凭证一致性', to: '/claims' },
       { label: '会话与令牌', to: '/sessions' },
       { label: '合并运维', to: '/merges' },
     ],

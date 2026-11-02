@@ -38,6 +38,9 @@ func (f *fakeClaims) Insert(context.Context, identity.ClaimUpsertInput) (*identi
 func (f *fakeClaims) ListByIdentity(context.Context, int64, int64) ([]identity.Claim, error) {
 	panic("unexpected ListByIdentity")
 }
+func (f *fakeClaims) FindByID(context.Context, int64, int64) (*identity.Claim, error) {
+	panic("unexpected FindByID")
+}
 func (f *fakeClaims) Revoke(context.Context, int64, int64, string, string, time.Time) error {
 	panic("unexpected Revoke")
 }
@@ -98,7 +101,7 @@ type fakeAccounts struct {
 
 func accKey(c account.Claim) string { return c.Type + ":" + c.Value }
 
-func (f *fakeAccounts) GetByClaim(_ context.Context, c account.Claim) (*account.Account, error) {
+func (f *fakeAccounts) GetByClaim(_ context.Context, _ string, c account.Claim) (*account.Account, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -107,7 +110,7 @@ func (f *fakeAccounts) GetByClaim(_ context.Context, c account.Claim) (*account.
 	}
 	return nil, account.ErrNotFound
 }
-func (f *fakeAccounts) Get(context.Context, string) (*account.Account, error) {
+func (f *fakeAccounts) Get(context.Context, string, string) (*account.Account, error) {
 	panic("unexpected Get")
 }
 func (f *fakeAccounts) Create(context.Context, account.CreateRequest) (*account.Account, error) {
@@ -125,6 +128,19 @@ func (fakeHasher) Hash(_ int64, claimType, value string) string {
 	return "h:" + claimType + ":" + value
 }
 
+// fakeMismatches 记录 J 组的漂移写入（§8.5）。
+//
+// 用切片累积而不是只存最后一条：同一次登录理论上可能命中多条漂移，
+// 断言"记了几条、分别是什么类型"才有意义。
+type fakeMismatches struct {
+	got []identity.MismatchRecordInput
+}
+
+func (f *fakeMismatches) Record(_ context.Context, in identity.MismatchRecordInput) error {
+	f.got = append(f.got, in)
+	return nil
+}
+
 // --- fixture ---
 
 const testPhone = "13800000000"
@@ -138,6 +154,7 @@ type claimFix struct {
 	ids  *fakeIdentities
 	bd   *fakeBindings
 	acc  *fakeAccounts
+	mm   *fakeMismatches
 	tk   *fakeTickets
 	app  *tenant.Application
 	tc   *ticket.Context
@@ -168,8 +185,9 @@ func newClaimFix(opts ...func(*tenant.Policy, *claimFix)) *claimFix {
 		meta: reqmeta.Meta{TraceID: "trace-1", ClientIP: "1.2.3.4"},
 		cl: &fakeClaims{verified: map[string]*identity.Claim{
 			claimKey(identity.ClaimTypePhone, "h:"+identity.ClaimTypePhone+":"+testPhone): {
-				AppID: 5, IdentityID: 8, Type: identity.ClaimTypePhone,
-				Verified: true, Source: identity.SourceWeChatPhone,
+				ID: 7, AppID: 5, IdentityID: 8, Type: identity.ClaimTypePhone,
+				ValueHash: "h:" + identity.ClaimTypePhone + ":" + testPhone,
+				Verified:  true, Source: identity.SourceWeChatPhone,
 			},
 		}},
 		ids: &fakeIdentities{byID: map[int64]*identity.Identity{
@@ -183,6 +201,7 @@ func newClaimFix(opts ...func(*tenant.Policy, *claimFix)) *claimFix {
 			identity.ClaimTypePhone + ":" + testPhone: {UserID: "user-A", Status: account.StatusActive},
 		}},
 		tk: &fakeTickets{},
+		mm: &fakeMismatches{},
 	}
 	for _, o := range opts {
 		o(&f.app.Policy, f)
@@ -194,6 +213,7 @@ func newClaimFix(opts ...func(*tenant.Policy, *claimFix)) *claimFix {
 		Bindings:   f.bd,
 		Accounts:   f.acc,
 		Hasher:     fakeHasher{},
+		Mismatches: f.mm,
 	})
 	return f
 }
@@ -264,6 +284,22 @@ func TestClaimMergeRequiresAccountBackCheck(t *testing.T) {
 	if len(f.bd.activated) != 0 {
 		t.Fatal("被拒绝时不得建立绑定")
 	}
+	// J 组的数据来源：拒绝归并的那一刻必须留下漂移证据，
+	// 否则运营永远不知道"有一批用户被静默地漏归并了"。
+	if len(f.mm.got) != 1 {
+		t.Fatalf("应记录 1 条漂移，实际 %d", len(f.mm.got))
+	}
+	m := f.mm.got[0]
+	if m.Kind != identity.MismatchAccountMismatch {
+		t.Fatalf("漂移类型应为 account_mismatch，实际 %q", m.Kind)
+	}
+	if m.ClaimID != 7 || m.IdentityID != 8 {
+		t.Fatalf("漂移记录应指向命中的 claim 及其身份: %+v", m)
+	}
+	// 两侧账号都要留下，运维才能判断"以哪边为准"。
+	if m.ExpectedUserID != "user-A" || m.ActualUserID != "user-B" {
+		t.Fatalf("应记录分叉两侧的账号: %+v", m)
+	}
 }
 
 // TestClaimMergeSkipsWhenAccountMissing 覆盖"claim 还在、账号已注销"。
@@ -274,6 +310,13 @@ func TestClaimMergeSkipsWhenAccountMissing(t *testing.T) {
 	_, handled, err := f.run()
 	if err != nil || handled {
 		t.Fatalf("用户中心查不到账号时应跳过，err=%v handled=%v", err, handled)
+	}
+	// "用户中心查无此人"是最常见的漂移（换号 / 解绑），必须留证。
+	if len(f.mm.got) != 1 || f.mm.got[0].Kind != identity.MismatchAccountNotFound {
+		t.Fatalf("应记录 account_not_found 漂移，实际 %+v", f.mm.got)
+	}
+	if f.mm.got[0].ExpectedUserID != "user-A" {
+		t.Fatalf("应记录本地认为的归属账号，实际 %q", f.mm.got[0].ExpectedUserID)
 	}
 }
 
@@ -288,6 +331,11 @@ func TestClaimMergeMultipleAccountsIsRejected(t *testing.T) {
 	}
 	if code := errs.CodeOf(err); code != errs.CodeAccountMultiple {
 		t.Fatalf("应为 ACCOUNT.MULTIPLE_MATCH，实际 %v", code)
+	}
+	// 这一分支会让登录失败，漂移记录更要在返回前落库——
+	// 否则用户看到的是一次失败登录，运维那边什么都没有。
+	if len(f.mm.got) != 1 || f.mm.got[0].Kind != identity.MismatchMultipleAccounts {
+		t.Fatalf("应记录 multiple_accounts 漂移，实际 %+v", f.mm.got)
 	}
 }
 

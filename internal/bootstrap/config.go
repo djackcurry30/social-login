@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/viper"
 
+	"github.com/djackcurry30/social-login/internal/application/accountsync"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
 
@@ -183,11 +184,41 @@ type AccountConfig struct {
 	// Provider 是 stub | http。stub 仅供开发与测试。
 	Provider string      `mapstructure:"provider"`
 	HTTP     HTTPAccount `mapstructure:"http"`
+	// Sync 是应用注册同步的开关与节奏（契约 v1.1 §2.6）。
+	//
+	// 用户中心按 app_key 隔离账号空间，未注册的应用一律 400 APP.UNKNOWN。
+	// 所以"应用已注册"是登录的前置条件，这一组配置不是可选的润色项。
+	Sync AccountSync `mapstructure:"sync"`
+}
+
+// AccountSync 是应用注册同步的配置。
+type AccountSync struct {
+	// Enabled 关闭后不再同步（也不启动对账循环）。
+	//
+	// 存在的意义是应急：如果用户中心侧出问题且暂时无法修，关掉它可以避免
+	// 每 5 分钟一轮的无谓调用与错误日志。关掉之后新建的应用【不会】注册，
+	// 该应用登录会 400 APP.UNKNOWN——这个代价必须由运维知情地承担。
+	Enabled bool `mapstructure:"enabled"`
+	// Interval 是全量对账周期，默认 5m。
+	Interval time.Duration `mapstructure:"interval"`
+	// Timeout 是单次注册调用的超时，默认 3s（与登录链路一致）。
+	Timeout time.Duration `mapstructure:"timeout"`
+	// Workers 是单轮对账的并发数，默认 4。
+	Workers int `mapstructure:"workers"`
 }
 
 // HTTPAccount 是用户中心 HTTP 客户端配置。
 type HTTPAccount struct {
-	BaseURL string        `mapstructure:"base_url"`
+	BaseURL string `mapstructure:"base_url"`
+	// Token 是服务间鉴权用的 Bearer token。
+	//
+	// 与渠道凭据一样属于密钥材料：生产环境应由 KMS / 密钥管理系统注入
+	// 环境变量（SOCIAL_LOGIN_ACCOUNT_HTTP_TOKEN），不要写进配置文件。
+	Token string `mapstructure:"token"`
+	// Timeout 是单次调用总超时，默认 3s。
+	//
+	// 比 httpx 的默认 5s 短：用户中心是登录链路的同步依赖，
+	// 整条链路预算 8s，Exchange+UserInfo 已占 5s。
 	Timeout time.Duration `mapstructure:"timeout"`
 }
 
@@ -304,6 +335,12 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("account.provider", "stub")
 	v.SetDefault("account.http.timeout", "3s")
+	// 应用注册同步默认开启：它在 stub 模式下自动不生效（没有注册端口），
+	// 所以"默认开"不会给演示环境带来额外失败路径。
+	v.SetDefault("account.sync.enabled", true)
+	v.SetDefault("account.sync.interval", "5m")
+	v.SetDefault("account.sync.timeout", "3s")
+	v.SetDefault("account.sync.workers", 4)
 
 	v.SetDefault("auth.env", "prod")
 	v.SetDefault("auth.exchange_timeout", "5s")
@@ -396,6 +433,24 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		c.Server.ShutdownTimeout = 15 * time.Second
+	}
+
+	// 应用注册同步：留空取默认值，过密直接报错。
+	if c.Account.Sync.Interval <= 0 {
+		c.Account.Sync.Interval = accountsync.DefaultInterval
+	}
+	if c.Account.Sync.Timeout <= 0 {
+		c.Account.Sync.Timeout = accountsync.DefaultTimeout
+	}
+	if c.Account.Sync.Interval < 10*time.Second {
+		// 全量对账会把每个应用 upsert 一遍。周期过密时，对端的写压力会随
+		// 应用数线性放大，而收益只是"漂移被发现得更早"——那是分钟级的差别，
+		// 不值得用对端稳定性去换。
+		return errs.Newf(errs.CodeConfigInvalid,
+			"account.sync.interval 不能小于 10s（当前 %s）", c.Account.Sync.Interval)
+	}
+	if c.Account.Sync.Workers < 0 {
+		c.Account.Sync.Workers = 0 // 0 交给 accountsync 用默认值
 	}
 
 	// 生产模式的强校验。

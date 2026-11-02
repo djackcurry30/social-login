@@ -49,6 +49,7 @@ func newConfirmHarness(t *testing.T) (*harness, *appmerge.Service, *captureSende
 
 	stub := h.stubProvider()
 	src, err := stub.Create(ctx, domainaccount.CreateRequest{
+		AppKey:         h.appCode,
 		IdempotencyKey: "confirm-src",
 		Claims: []domainaccount.Claim{
 			{Type: "phone", Value: "13800138000", Source: "sms_verified"},
@@ -57,7 +58,7 @@ func newConfirmHarness(t *testing.T) (*harness, *appmerge.Service, *captureSende
 	if err != nil {
 		t.Fatalf("创建 source 账号失败: %v", err)
 	}
-	dst, err := stub.Create(ctx, domainaccount.CreateRequest{IdempotencyKey: "confirm-dst"})
+	dst, err := stub.Create(ctx, domainaccount.CreateRequest{AppKey: h.appCode, IdempotencyKey: "confirm-dst"})
 	if err != nil {
 		t.Fatalf("创建 target 账号失败: %v", err)
 	}

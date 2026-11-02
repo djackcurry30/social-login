@@ -147,6 +147,9 @@ func (s *Service) autoCreateAndBind(
 	started time.Time,
 ) (*CallbackOutput, error) {
 	acc, err := s.deps.Accounts.Create(ctx, account.CreateRequest{
+		// 账号建在哪个应用下：账号空间按应用隔离（C1），这不是路由细节，
+		// 是"这个账号属于谁的业务"的判定。
+		AppKey:    app.AppCode,
 		Claims:    accClaims,
 		Nickname:  profileString(out.Profile, "nickname"),
 		AvatarURL: profileString(out.Profile, "avatar_url"),

@@ -71,8 +71,23 @@ export interface Application {
   Status: number // 1=enabled, 0=disabled
   AccountMode: string
   Policy: Policy
+  /** 用户中心注册状态（运维字段）：未同步的应用，其登录会被对端拒绝 */
+  AccountSync: AccountSyncState
   CreatedAt: string
   UpdatedAt: string
+}
+
+/**
+ * 应用在用户中心的注册状态。
+ *
+ * 为什么要展示：同步是旁路的（失败不阻塞建应用），不显示的话，运维要等到
+ * "这个应用的登录全部失败"才知道它根本没注册上。
+ */
+export interface AccountSyncState {
+  /** 最近一次成功同步时间；null 表示从未同步过 */
+  SyncedAt: string | null
+  /** 最近一次失败原因（成功后由后端清空） */
+  LastError: string
 }
 
 export interface CreateAppInput {
@@ -164,6 +179,25 @@ export interface OverviewStats {
   healthy_providers: number
   unhealthy_providers: number
   by_platform: Record<string, number>
+  /** 未闭环的凭证漂移数：非 0 说明有一批用户本该被归并、却被拦住了（J 组） */
+  claim_mismatch_open: number
+  /** 账号体系现状：桩或真实用户中心 */
+  account_center: AccountCenterInfo
+}
+
+/**
+ * 账号体系的"当前实现"标记。
+ *
+ * 为什么要有它：stub 与 http 在外部表现上几乎一样（都能登录成功、都能发令牌），
+ * 差别只在账号落在哪里。用户中心未就绪期间，这个标记是唯一不会看错的地方。
+ */
+export interface AccountCenterInfo {
+  /** stub | http */
+  provider: string
+  base_url?: string
+  /** true 仅表示"接的是真实用户中心"，不代表连通性 */
+  production_ready: boolean
+  note?: string
 }
 // --- C 组（身份与绑定）---
 
@@ -180,16 +214,86 @@ export interface IdentityItem {
   profile_synced_at?: string
 }
 
+/**
+ * 凭证状态。
+ *
+ * - verified    已验证且生效：可以作为归并依据
+ * - unverified  未验证（用户手填，永不参与自动归并）
+ * - revoked     已撤销：号码已释放，可被其他身份占用
+ *
+ * 由后端下发而不是前端从 verified + revoked_at 推：撤销只置 revoked_at、
+ * 不改 verified 位，前端自己推会把"已撤销"算成"已验证"。
+ */
+export type ClaimStatus = 'verified' | 'unverified' | 'revoked'
+
 export interface ClaimItem {
   id: number
+  app_id: number
+  identity_id: number
   claim_type: string
   /** 只返回哈希前缀：库里没有明文，后端也不回显 */
   value_hash_prefix?: string
+  status: ClaimStatus
   verified: boolean
   source: string
   verified_at?: string
   revoked_at?: string
   created_at: string
+}
+
+export interface ClaimListOutput {
+  items: ClaimItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/**
+ * 凭证明细漂移的类型（后端 claim_mismatches.kind）。
+ *
+ * - account_not_found  用户中心查无此凭证（换号 / 解绑）
+ * - account_mismatch   用户中心说归 A，本地绑定挂在 B（最危险）
+ * - multiple_accounts  该凭证在用户中心命中多个账号（数据已脏）
+ * - identity_missing   claim 指向的身份已被删除
+ */
+export type MismatchKind =
+  | 'account_not_found'
+  | 'account_mismatch'
+  | 'multiple_accounts'
+  | 'identity_missing'
+
+export interface ClaimMismatch {
+  id: number
+  app_id: number
+  claim_id: number
+  identity_id: number
+  claim_type: string
+  value_hash_prefix?: string
+  platform: string
+  claim_source: string
+  kind: MismatchKind
+  /** 本地绑定认为该凭证属于谁 */
+  expected_user_id?: string
+  /** 用户中心说它属于谁 */
+  actual_user_id?: string
+  detail?: string
+  status: 'open' | 'resolved'
+  /** >1 说明这处漂移长期存在，每次登录都命中 */
+  occurrences: number
+  first_seen_at: string
+  last_seen_at: string
+  resolved_at?: string
+  resolved_by?: string
+  resolution?: string
+}
+
+export interface MismatchListOutput {
+  items: ClaimMismatch[]
+  total: number
+  page: number
+  page_size: number
+  /** 未闭环总数：不受筛选影响，是"这个应用还有多少条待处理"的全量信号 */
+  open_total: number
 }
 
 export interface BindingItem {

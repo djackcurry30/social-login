@@ -272,8 +272,32 @@ type Application struct {
 	Status        int16
 	AccountMode   string
 	Policy        Policy
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// AccountSync 是"这个应用有没有被用户中心认识"的运维状态。
+	//
+	// 它不是业务不变量：业务代码（登录/绑定/合并）不该读它，只有管理端展示
+	// 与同步任务会碰。放在聚合上而不是单独建表，是因为它和应用一一对应、
+	// 且总跟应用一起读（列表页），单独建表只多一次 join 和一次"忘记更新"。
+	AccountSync AccountSyncState
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// AccountSyncState 是应用与用户中心的注册同步状态（契约 v1.1 §2.6）。
+//
+// 为什么要落库：同步是【旁路】的（失败不阻塞建应用），如果状态只进日志，
+// 运维要回答"这个应用到底注册到用户中心了吗"就只能翻日志，而日志早就滚掉了。
+// 落到行上，管理端才能直接显示"已同步 / 未同步 + 原因"。
+type AccountSyncState struct {
+	// SyncedAt 是最近一次成功同步的时间。nil 表示从未成功同步过。
+	//
+	// 注意它不等于"现在可用"：对端随时可能回滚或被清理，而下次对账要等到
+	// 下一个周期。要判断可用性只能看登录时的实际错误码。
+	SyncedAt *time.Time
+	// LastError 是最近一次失败原因（成功后清空）。
+	//
+	// 成功后必须清空——否则管理端会永久显示一个已经修好的旧错误，
+	// 运维会去排查一个不存在的问题。
+	LastError string
 }
 
 // Enabled 判断应用是否启用。

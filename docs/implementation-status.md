@@ -1,8 +1,8 @@
 # 实现状态对照 · 设计规划 vs 当前代码
 
 > 基线：`docs/architecture-design.md`（§5.3 业务端 API、§13 分期路线、§15.4 管理端 API）
-> 代码：commit `d4bf54d`（main）+ 第二期改动（未提交）
-> 核对时间：2026-10-19（第二期交付后复核）
+> 代码：main + §23/§24（未提交）
+> 核对时间：2026-10-29（第四期第 1 组交付后复核）
 > 核对方式：逐条比对路由注册、包结构、表结构与依赖，不依据注释宣称
 
 ---
@@ -11,13 +11,20 @@
 
 | 维度 | 规划 | 已实现 | 完成度 |
 | --- | --- | --- | --- |
-| 业务端 API（§5.3） | 14 | 12 | 86% |
-| 渠道适配器（§4） | 4 平台 / 9 场景 | 4 平台 / 10 场景 | 100% |
-| 管理端 API（§15.4） | 54 端点 / 11 组 | 22 端点 / 3 组 | 41% |
-| 管理端前端 | 11 组界面 | 3 模块 6 页 | 约 30% |
-| 分期路线 | 四期 | 第一期、第二期完成；三/四期未开始 | — |
+| 业务端 API（§5.3） | 14 | 15（含 `/.well-known/openid-configuration`） | **100%** |
+| 渠道适配器（§4） | 4 平台 / 9 场景 | 4 平台 / 10 场景 | **100%**（代码；实渠道未联调） |
+| 管理端 API（§15.4） | 53 端点 / 11 组 | 59 端点 / 11 组 | **100%**（多出 6 个辅助端点） |
+| 管理端前端 | 11 组界面 | 11 组 / 14 页 | **100%** |
+| 第一期 · 骨架与最小闭环 | 10 项 | 10 项 | **100%** |
+| 第二期 · 真实渠道 | 7 项 | 7 项 | **100%**（代码） |
+| 第三期 · 绑定与合并 | 12 项 | 7 项 + 3 项部分 + 2 项未做 | **约 71%**（按工作量 85%） |
+| 第四期 · 生产化 | 21 项 | 8 项 | **约 38%**（按工作量 35%） |
+| **合计** | **50 项** | **32 完成 / 3 部分 / 15 未做** | **约 64%**（部分项按半计 67%） |
 
-**一句话**：第一期（骨架 + 最小闭环 + 管理端 A/B/I 组）与第二期（微信 4 场景 / 支付宝 3 场景 / Apple 2 场景 / 渠道熔断 / 服务端通知）已交付；第三期（合并）与第四期（生产化）未动。
+**一句话**：前三期的**功能面**基本闭环（业务端 14 个接口、管理端 11 组 53 个端点、
+11 组前端页面全部到位），剩下的缺口集中在**第四期生产化**——KMS、配置热更新、
+账号注销合规、双人复核、管理员开户、两档限流、tracing 与告警规则、压测演练。
+另有三处第三期「能配不生效」的遗留，见 §25。
 
 **原先的 P0 缺陷已修复**（见 §1）。
 
@@ -827,8 +834,9 @@ POST /v1/bind/resolve        （app 凭据；Bearer 优先，其次 body 断言�
    用"已绑定渠道再授权一次"证明控制权的方式未做。
 2. **login 链路的 claim 归并**（`on_login=claim_verified` / `detect_only`）：
    `finishLogin` 目前只做 detect_only 的提示，`claim_verified` 的写数据路径未接。
-3. **J 组**（claim 一致性与 mismatch 排查）：未做。C 组已在 §13.8 交付。
-4. **HTTPAccountProvider**：`account.provider=http` 仍显式报错，等用户中心联调。
+3. ~~**J 组**（claim 一致性与 mismatch 排查）~~：已于 §22 交付（`claim_mismatches` 表 + 3 个端点 + 前端页面）。
+4. ~~**HTTPAccountProvider**~~：已于 §23 交付（`account.provider=http` 可用，
+   契约见 `infrastructure/account/http.go` 文件头；实机联调待用户中心就绪）。
 5. **管理端前端**：D 组接口已就绪，页面未做。
 
 ---
@@ -1245,7 +1253,7 @@ grep -o '"kid":"[^"]*","algorithm":"[^"]*","status":"signing"'
 
 ### 18.6 尚未做
 
-- J 组页面（claim 一致性）与 G 组事件死信的**前端**（接口已有）
+- ~~J 组页面（claim 一致性）与 G 组事件死信的**前端**~~：均已交付（G 组见 §19，J 组见 §22）
 - 应用详情页里还没有"该应用的合并策略"可视化（策略在 A 组的 policy 编辑器里）
 - 分页只有上一页/下一页，没有页码跳转（审计量级上来后会需要）
 
@@ -1408,13 +1416,12 @@ G 组此前没有任何验收覆盖（接口在二期就交付了，但一直没
 
 - `npm run build`（`tsc -b` 全量类型检查）与 `npm test` 8 例通过
 - `web/dist` 已同步进 `internal/embedweb/dist`，`go build ./...` 通过
-- ⚠️ **容器未重建**：本次改动期间本机 Docker daemon 未运行
-  （`npipe:////./pipe/docker_engine` 连接失败），因此没有实机跑过页面与验收脚本。
-  启动 Docker Desktop 后执行 `docker compose up -d --build app` +
-  `bash scripts/acceptance-admin.sh` 即可验证。
+- ~~⚠️ **容器未重建**~~：已于 2026-10-23 重建镜像并实机验证（详见 §22.11），
+  `acceptance-admin.sh` 17 步全过。当时 Docker daemon 未运行（`npipe:////./pipe/docker_engine`
+  连接失败），所以本节改动在交付时只过了单测。
 
-管理端前端至此覆盖 A/B/C/D/E/F/G/H/I/K —— **十组页面齐全**，只剩 J 组
-（claim 一致性，属三期遗留）没有页面。
+管理端前端至此覆盖 A/B/C/D/E/F/G/H/I/K —— 十组页面齐全（J 组随后在 §22 补齐，
+现为十一组齐全）。
 
 ### 20.9 实机部署验证（2026-10-22）
 
@@ -1613,3 +1620,998 @@ bash scripts/acceptance-admin.sh   # 预期 18 步 73 条断言全过
 3. **端到端集成测试**：本节的验证靠单测覆盖分支。真实回调链路需要 stub 渠道
    能返回指定 openid + 手机号，当前 stub 是固定值，造不出"新渠道同手机号"的
    场景。补这个要先扩展 stub。
+
+---
+
+## 22. J 组 · 凭证一致性运维（第三期收尾）
+
+J 组是第三期最后一块，也是"合并功能上线前的兜底"（§15.6：合并是高风险操作，
+没有管理端兜底就不能上线）。它解决的问题在前面的实现里其实已经埋下了伏笔：
+21.3 的回源核对会在数据不一致时**拒绝归并**，但那时的处理只是打一行 warn。
+用户侧看到的是"我明明同一个手机号，怎么又注册了一个号"，运维侧什么都没有。
+
+### 22.1 交付清单
+
+| 方法 | 路径 | 说明 | 权限 |
+| --- | --- | --- | --- |
+| GET | `/admin/v1/claims` | 凭证查询（app_id / claim_type / identity_id / status） | `identity:read` |
+| GET | `/admin/v1/claims/mismatches` | 漂移记录，含 `open_total` 全量未闭环数 | `identity:read` |
+| POST | `/admin/v1/claims/{id}/revoke` | 人工失效凭证（需 `reason`），顺带闭环漂移 | `identity:write` |
+
+前端新增「账号运营 → 凭证一致性」页（`ClaimsPage.tsx`），两个视图：
+默认「漂移待处理」（要干活的）、另一个「全部凭证」（要查证的）。
+导航至此覆盖 A/B/C/D/E/F/G/H/I/J/K —— **十一组齐全**。
+
+### 22.2 为什么要有 `claim_mismatches` 这张表
+
+架构 §8.5 写的是"记录 `identity.claim_mismatch` 事件"，实现上做了扩展，
+理由值得写下来：
+
+**事件表回答不了"还剩几条"**。outbox 是外发队列，投递成功就出队；
+而 J 组的核心动作是"看还有多少条待处理、逐条判断后闭环"。这要求记录有
+**可变更的状态**，只有事实表能做。所以这里是"事实表 + open/resolved 状态机"，
+事件（如果需要外发）只是从这张表派生的同一件事。
+
+表结构的关键字段：
+
+| 字段 | 作用 |
+| --- | --- |
+| `kind` | 四类漂移：`account_not_found` / `account_mismatch` / `multiple_accounts` / `identity_missing`，有 CHECK 约束 |
+| `expected_user_id` | 本地绑定认为该凭证属于谁 |
+| `actual_user_id` | 用户中心说它属于谁（可为空） |
+| `occurrences` | 重复命中次数 |
+| `status` | `open` / `resolved` + 处理人、理由、时间 |
+
+### 22.3 去重：漂移是状态，不是事件
+
+这是本节最重要的设计决定。
+
+用户换了手机号之后，**每次登录**都会命中同一处不一致。如果每次都插一行，
+一周就能把表写爆；更糟的是"待处理条数"会随登录量上下浮动，那个数字就失去意义。
+
+所以 `(app_id, claim_id, kind)` 在 `status='open'` 时**部分唯一索引唯一**，
+重复命中只累加 `occurrences`、刷新 `last_seen_at`：
+
+```sql
+CREATE UNIQUE INDEX uk_claim_mismatch_open
+    ON claim_mismatches (app_id, claim_id, kind)
+    WHERE status = 'open';
+```
+
+写入用 `INSERT ... ON CONFLICT (app_id, claim_id, kind) WHERE status='open'
+DO UPDATE`。谓词必须再写一遍 PostgreSQL 才做索引推断——这也是这里没用
+GORM `clause.OnConflict` 的原因（它表达不了部分索引的条件，写成全集会在
+"已闭环记录存在"时误报冲突，而那种情况本应允许新增一行）。
+
+注意 `first_seen_at` **不被** DO UPDATE 覆盖：首次出现时间是判断"这处漂移
+存在多久"的依据。
+
+### 22.4 撤销与闭环必须绑定
+
+`POST /claims/{id}/revoke` 做两件事：撤销 claim、把该 claim 名下 open 的漂移
+标为 resolved。两者缺一不可：
+
+- **只撤销不闭环**：`claim_mismatch` 计数永远降不下来。一个只涨不落的指标，
+  第二次就没人看了。
+- **只闭环不撤销**：下一次登录还会命中同一条 claim，再记一条新的漂移——
+  那是假的修复。
+
+撤销的入参有两道硬约束：`app_id` 必填（凭证按应用隔离，id 属于哪个应用
+必须显式声明）、`reason` ≥ 4 字符（进 `admin_audit_logs.reason`）。
+审计同时写 `before_state` / `after_state`——撤销之后原记录只剩 `revoked_at`，
+事后想知道"当时它是否已验证、来源是什么"只能靠 before 快照。
+
+重复撤销返回 200 但带 `already_revoked: true`，而不是静默成功：运维要能分清
+"是我撤的"还是"别人已经在另一个工单处理过"。
+
+### 22.5 登录链路的写入是旁路
+
+`claimmerge.resolveClaim` 的三个失败分支现在各写一条漂移：
+
+| 分支 | kind | expected / actual |
+| --- | --- | --- |
+| `identity.ErrNotFound` | `identity_missing` | 空 / 空 |
+| `account.ErrNotFound` | `account_not_found` | 本地绑定账号 / 空 |
+| `account.ErrMultipleAccounts` | `multiple_accounts` | 本地绑定账号 / 空 |
+| `acc.UserID != b.ExternalUserID` | `account_mismatch` | 本地绑定账号 / 用户中心账号 |
+
+三个实现选择：
+
+1. **best-effort**：写失败只打 Error，绝不让登录失败。漂移记录是旁路证据，
+   主流程是"拒绝归并"，两者不该互相牵连。
+2. **`context.WithoutCancel`**：证据不该随请求取消而丢失。用户断网、前端超时
+   都会取消入站 ctx，但"这里发生过一次不一致"是运维必须知道的事实。
+3. **3 秒超时**：WithoutCancel 之后没有任何取消了，必须自己兜住，
+   否则一次数据库抖动会让登录请求挂住。
+
+### 22.6 权限与数据可见性
+
+- `identity:write` 是新权限，只给 `operator`。撤销一条 claim 会改变"下一次登录
+  被归并到哪个账号"，属于账号运营动作；`config_admin` 管的是接入配置，不该有。
+- 凭证值仍然只回哈希前缀（8 位）。完整哈希可用于"拿一批疑似手机号离线反查
+  库中是否匹配"，而管理端账号被盗的代价不该包括一整批手机号。
+- `claims` / `claim_mismatches` 两张表的查询都带 `app_id`；`claim_mismatches`
+  已加入 `scopedTables`，业务侧误用会直接 panic（与 `identity_claims` 同口径）。
+
+### 22.7 前端：概念先讲清楚
+
+参照 G 组「事件死信」的教训（术语直接摆上来没人看得懂），这一页开头就把
+两套数据的关系写清楚：
+
+> `identity_claims` 记的是"某次授权中平台证明过这个号属于他"，平台不会主动撤销；
+> 用户中心说的是"这个号现在属于谁"。两者会漂移。
+> **漂移 = 有人本该被归并进来，但因为数据不一致被拦住了。**
+
+顶部常驻一条横幅显示 `open_total`：非 0 时用警示色，并说明"这些用户本该被
+自动归并、但被拦住了，逐条确认后撤销对应凭证即可释放号码"；为 0 时也补一句
+"长期为 0 而业务侧一直反馈同手机号没合并，要先确认应用是否开了
+`on_login = claim_verified`，否则核对根本不会发生"——避免把"没配"误读成"没问题"。
+
+四类漂移各有一句 `hint`（悬浮展示）：说清"两边怎么对不上"和"该怎么办"。
+
+### 22.8 测试与验收
+
+`application/adminidentity/claims_test.go`：9 例
+
+| 用例 | 守住什么 |
+| --- | --- |
+| 非法 status / kind | `REQUEST.INVALID`，不落到仓储 |
+| 已撤销筛选 | 换号排查必须能看已撤销的记录 |
+| 哈希截断 + 状态计算 | 只回 8 位；撤销只置 `revoked_at` 不改 `verified`，status 不能推错 |
+| `open_total` 全量 | 不受筛选影响（翻页时不能误以为处理完了） |
+| revoke 缺 app_id / reason | 分别 `REQUEST.INVALID` / `ADMIN.REASON_REQUIRED` |
+| revoke 不存在 | **404**（不是被 errs.From 归一化的 500） |
+| revoke 正常 | 撤销 + 闭环 + 出参带撤销时间与闭环条数 |
+| revoke 幂等 | `already_revoked=true` 且不重复调用仓储 |
+
+`application/authflow/claimmerge_test.go` 新增断言：三个失败分支各写了正确的
+`kind` 与两侧账号（含"多账号命中会返回错误、漂移记录仍须在返回前落库"）。
+
+`scripts/acceptance-claims.sh`：15 步实机验收。造数走 SQL（身份只能由真实授权
+产生，没有 API 可直接建），清理走 trap：
+
+```
+1-6   登录 / 列表结构 / 非法 status / 非法 kind / open_total / 401
+7-8   缺 reason → 400；不存在的凭证 → 404
+9     造数：应用 + 身份 + 已验手机号 + 一条 account_not_found 漂移
+10-11 能查到凭证（且不泄露完整哈希）、能查到漂移（open_total=1）
+12-13 撤销 → 闭环 1 条 → 凭证转 revoked、漂移转 resolved、open_total=0
+14    重复撤销幂等
+15    审计留痕 claim.revoke（target_id = claim id）
+```
+
+### 22.9 仍未交付
+
+1. **`existing_binding` 验证方式**（21.7 遗留）：需要给 `/v1/authorize` 加
+   验证用途模式，侵入核心链路，单独排期。
+2. **漂移的自动发现**：当前只有"回源核对失败"这一路会写漂移。定期全表扫描
+   （对照用户中心批量核对）没做——那是离线任务，量级与限流都要单独设计。
+3. **`claim.invalidated` 反向通知**（§8.5 第 2 条，仅建议）：用户中心主动推送
+   换号事件 → 本服务自动撤销 claim。有了它，多数漂移根本不会产生；当前靠
+   人工撤销兜底。
+4. **漂移的趋势与告警**：`/health/overview` 现在有 `claim_mismatch_open`
+   这个瞬时值（见 22.10），但没有时间序列，也没有"新增速率"告警。
+   阈值告警要接监控系统，不在本服务内做。
+
+### 22.10 顺手补上：漂移数进总览
+
+§15.4 I 组要求的摘要里本来就有"claim 不一致数"，一直没接（当时没有数据源）。
+现在数据具备了，补上：
+
+- `GET /admin/v1/health/overview` 增加 `claim_mismatch_open`（全平台未闭环数）
+- 读取失败只打 warn，该字段保持 0——单个指标取不到不该让整个看板 500，
+  运维这时更需要的是渠道健康状态
+- 观测看板增加第 5 张卡片，非 0 时用警示色，点击直达「凭证一致性」页
+
+为什么要在总览里放：漂移数只躺在 J 组页面里，运维不会主动点进去。
+放在每天都会扫一眼的看板上，才有可能被处理。
+
+### 22.11 实机验证（2026-10-23）
+
+镜像重建后 `docker compose up -d --build`，`migrate` 一次性容器输出：
+
+```
+OK   00006_claim_mismatch.sql (77.96ms)
+goose: successfully migrated database to version: 6
+```
+
+`\d claim_mismatches` 核对：18 列、4 个索引（含 `uk_claim_mismatch_open` 部分唯一索引）、
+2 个 CHECK 约束，与迁移文件一致。
+
+| 验证项 | 结果 |
+| --- | --- |
+| `scripts/acceptance-claims.sh` | **15 步全过**（含 404 不被归一化成 500、哈希前缀、闭环、幂等、审计留痕） |
+| `scripts/acceptance-admin.sh`（回归） | **17 步全过** —— 上一轮的 G 组 404 修复与 claim 归并没有破坏既有链路 |
+| 去重语义 | 同一 `(claim, kind)` 连续命中 3 次 → `rows=1 occurrences=3` |
+| 闭环后复发 | 标记 resolved 后再命中 → `rows=2 open=1 resolved=1`（新增一行，不复用） |
+| `claim_mismatch_open` | 无漂移时 0，插一条后 1，清理后 0 |
+| 前端 | `/admin/` 200 且加载新 bundle；`/admin/claims` SPA fallback 200；bundle 内含页面文案 |
+
+**踩到的坑**（已修进脚本）：`psql -tA` 执行 `INSERT ... RETURNING id` 会额外打印一行
+命令标签 `INSERT 0 1`。把它一起塞进 shell 变量后，后续 SQL 的 VALUES 列表变成
+`VALUES (1\nINSERT 0 1, 'phone', ...)`，报 `syntax error at or near "INSERT"`——
+错误位置指在第 4 行，跟真正的出错原因（变量内容）完全不像。改成
+`WITH t AS (INSERT ... RETURNING id) SELECT id FROM t` 后只输出纯值。
+
+---
+
+## 23. HTTPAccountProvider（接入真实用户中心）
+
+第三期一直挂着的最后一块：`account.provider=http` 此前是显式报错，
+账号只能存在进程内存里（`StubProvider`），生产不可用。
+
+> ⚠️ 本节描述的是契约 v1（无应用维度）。**已于 §27 升级到 v1.1**：
+> 路径加 `/v1/apps/{app_key}` 前缀、补错误信封与换绑端点。下面的路径表仅作历史记录。
+
+### 23.1 契约由本服务定义，不去适配对方现状
+
+用户中心是外部系统，它现在可能没有、或者有几个形态各异的内部接口。
+本服务需要的四件事各有硬性语义要求（强一致读、幂等键、命中多账号必须报错），
+这些语义没法从"对方恰好有这么一个接口"里推出来。所以这里的路径与报文
+就是**对用户中心的接口要求**，写进联调文档，而不是做成一个可配置的万能适配器。
+
+| 方法 | 路径 | 语义 |
+| --- | --- | --- |
+| GET | `/accounts/{user_id}` | 200 账号 / 404 不存在 |
+| GET | `/accounts/by-claim?type=&value=` | 200 / 404 / **409 命中多个账号** |
+| POST | `/accounts` | 需 `Idempotency-Key`；404/405/501 表示不提供该能力；409 表示凭证被占用 |
+| POST | `/accounts/merge` | 需 `Idempotency-Key`；404 target/source 不存在；409 拒绝合并 |
+
+账号报文：`{"user_id","status":"active|frozen|closed","claims":[{"type","value","source"}],"extra":{}}`。
+合并报文：`{"merged":bool,"already_merged":bool,"remote_ref":{}}`。
+
+`GetByClaim` 的 409 不是"请求冲突"，而是"这个凭证在用户中心对应多个账号"
+——说明唯一性已经坏了，必须让调用方走人工排查，而不是随手挑一个。
+
+### 23.2 三条实现纪律
+
+1. **不重试**（§5.5 / C6）。httpx 本身不带重试，这里也不加。登录链路的
+   失败单位是"整次授权"，由接入方重新发起；Merge 的重试走
+   `merge_operations` 的幂等键，不是 HTTP 层重试。
+2. **错误码翻译**。httpx 是给三方渠道写的，传输层错误用 `PROVIDER.*` 表达。
+   但本接口的调用对象是用户中心——对外出现 `PROVIDER.TIMEOUT` 会让排障的人
+   去翻渠道日志。所以统一翻成 `ACCOUNT.UNAVAILABLE`，并保留 `retryable`。
+3. **响应校验**。对端返回缺 `user_id`、或 `status` 不在枚举内时直接拒绝。
+   否则垃圾值会以"账号状态非 active，跳过归并"的形式出现在业务层——
+   看起来像数据问题，实际是契约不符，排障方向完全错。
+
+### 23.3 配置与启动自检
+
+```yaml
+account:
+  provider: "http"
+  http:
+    base_url: "https://uc.internal"
+    token: ""        # 生产走 SOCIAL_LOGIN_ACCOUNT_HTTP_TOKEN
+    timeout: "3s"
+```
+
+- `base_url` 为空 / 缺 scheme / 非 http(s) → 启动失败（`CONFIG.INVALID`），
+  不带着空地址跑。空地址不会"启动就崩"，而是每次登录拼出相对 URL 再失败，
+  日志里看不出是配置问题。
+- **超时默认 3s**（httpx 默认 5s）：用户中心是登录链路的同步依赖，
+  整条链路预算 8s，Exchange+UserInfo 已占 5s。慢到 3s 没回就让本次登录失败，
+  比拖死整个请求好。
+- `token` 为空只打 Warn 不报错——内网无鉴权联调环境确实存在，
+  但生产缺 token 的现象是"所有登录都 ACCOUNT.UNAVAILABLE"，很难联想到鉴权，
+  所以必须喊出来。
+- `provider` 保持默认 `stub`（本地/演示可跑）；生产模式下 stub 会被启动自检拒绝。
+
+### 23.4 测试
+
+`infrastructure/account/http_test.go`：19 例，用 `httptest` 起假用户中心
+（跳过 HTTP 层就等于没测协议映射）。
+
+| 用例组 | 守住什么 |
+| --- | --- |
+| 配置校验 ×3 + 尾斜杠 | 空地址/错 scheme 启动即失败；`//accounts` 不会出现 |
+| Get | 解析、404→ErrNotFound、缺 user_id 拒绝、未知 status 拒绝 |
+| GetByClaim | 查询参数正确、**409→ErrMultipleAccounts** |
+| Create | **必须带 Idempotency-Key**、缺键不发请求、404/405/501→NOT_SUPPORTED、409→BIND.IDENTITY_TAKEN |
+| Merge | 幂等键必传、`already_merged` 解析、请求体字段 |
+| 错误归一化 | 5xx→ACCOUNT.UNAVAILABLE(可重试)、超时→ACCOUNT.UNAVAILABLE(可重试)、4xx 不可重试且保留对端错误片段 |
+
+### 23.5 仍未做
+
+- **实机联调**：对端尚未开始建设。已用假对端（`internal/testsupport/mockusercenter`
+  + `test/acceptance/account_http_test.go`）把协议映射、幂等键、降级行为跑通；
+  真实对端的强一致读、幂等实现、容量与延迟仍需联调。**完整状态标记与联调步骤见
+  `docs/user-center-integration.md`，见 §26。**
+- **契约版本化**：路径与报文目前是 v1，对端演进时需要有版本协商（`/v1/accounts`）。
+- **批量核对**：`identity_claims` 与用户中心的全量对账仍是离线任务（见 §22.9）。
+
+---
+
+## 24. 指标导出（`/metrics`）
+
+§11 要求的观测能力此前完全缺失：没有 `/metrics`，所有指标只存在于日志里，
+上线等于盲飞。
+
+### 24.1 为什么手写而不引 Prometheus SDK
+
+1. 需要的类型只有 counter 与 gauge。直方图用 `<name>_sum` / `<name>_count`
+   两个 counter 就能算平均与总量；分位数不是当前需求（要看 P99 时再加 histogram）。
+2. 引 SDK 会带来依赖树、全局注册表和一套初始化约定，而指标总量是两位数以内。
+3. 手写输出可以在测试里**逐字节断言**，行为完全可预期。
+
+`internal/pkg/metrics`：`Registry` / `Counter`（带标签）/ `GaugeFunc`（采集时求值）
+/ `Handler()`，输出 Prometheus 文本格式 0.0.4。
+
+### 24.2 导出的指标
+
+| 指标 | 类型 | 含义 |
+| --- | --- | --- |
+| `social_login_http_requests_total{method,route,status}` | counter | 全部端点的请求数 |
+| `social_login_http_request_duration_seconds_sum/_count{method,route}` | counter | 平均耗时（rate 后相除） |
+| `social_login_claim_mismatch_open` | gauge | 未闭环凭证漂移数（J 组数据） |
+| `social_login_outbox_dead` | gauge | 死信数（必须人工处理） |
+| `social_login_outbox_pending` | gauge | 待投递数（持续升高说明投递跟不上） |
+| `social_login_merge_compensation_lag_seconds` | gauge | 最久未推进的合并已等待秒数（§11 明确要求） |
+
+**登录成功率不单独建指标**：`/v1/oauth/callback` 的 2xx 比例就是它，
+HTTP 指标里能算。为它再维护一套埋点只多一个会漂移的口径。
+
+gauge 用 `GaugeFunc` 在采集时查库（带 2s 超时），不是让业务代码每次 Push：
+业务代码不需要知道指标存在，采集频率也由 Prometheus 决定。查库失败只 Warn
+并返回 0——一个指标取不到不该让整个 `/metrics` 挂掉。
+
+### 24.3 两条必须守住的实现细节
+
+**标签基数**：`route` 标签取 gin 的路由模板（`c.FullPath()`），**不是原始路径**。
+用原始路径会让 `/apps/1`、`/apps/2`… 每个 id 变成一条时间序列，几百个应用就能
+把 Prometheus 打爆——这是"指标比业务先挂"的典型原因。未命中路由统一归为
+`unmatched`，否则扫描器的随机路径会无限建序列。
+
+**中间件顺序**：`Metrics` 必须挂在 `Recovery` 的**外层**。洋葱模型下，
+handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer 随后执行
+才能读到 500；反过来会把它记成 200——监控上看一切正常，实际在 500。
+
+### 24.4 部署要求（不是建议）
+
+`/metrics` **不做鉴权**：Prometheus 抓取端通常只支持简单鉴权，而指标内容不含凭据。
+安全边界靠网络——部署时必须确保该路径只对监控网段开放（网关/安全组），
+**不要暴露到公网**。
+
+### 24.5 测试
+
+- `pkg/metrics`：8 例。逐字节格式比对、gauge 采集时求值、标签转义
+  （引号/换行/反斜杠——不转义会让整个抓取被解析器拒绝）、同名异类型 panic、
+  标签数量不符 panic、100×100 并发累加不丢、Content-Type。
+- `middleware`：4 例。**路由模板合并**（3 个 id → 1 条序列）、
+  unmatched 折叠、**panic 记 500**（中间件顺序回归）、耗时 sum/count。
+
+### 24.6 仍未做
+
+- **实机抓取验证**：容器未重建（Docker daemon 不可用），`/metrics` 尚未在
+  真实进程上抓取过。启动后 `curl :8080/metrics | grep social_login` 验证。
+- **Tracing**：只有 trace_id 串日志，没有 OpenTelemetry 上报。
+- **直方图分位数**：要看 P99 需要加 histogram bucket，当前只有平均值。
+- **告警规则**：指标有了，但没有配套的告警表达式（`outbox_dead > 0`、
+  `merge_compensation_lag_seconds > 300`、`claim_mismatch_open > 0`）。
+
+---
+
+## 25. 整体完成度对照（2026-10-29 复核）
+
+本节回答一个问题：**离 `§13 分期落地路线` 的原始规划还差什么。**
+核对方式是读代码与迁移文件，不看注释里的承诺——历史上出现过三次
+「注释说做了、代码没有」的情况（`claim_verified`、`/metrics`、`summary` 指标）。
+
+### 25.1 四期逐项
+
+| 期 | 规划项 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 一 | 五张核心表 | ✅ | `00001_init.sql` |
+| 一 | IdentitySource 抽象 + Provider SPI | ✅ | `domain/identitysource/`、`provider.Register` |
+| 一 | AccountProvider + Stub | ✅ | Stub 保留，HTTP 见 §23 |
+| 一 | 通用 OAuth2 适配器 | ✅ | `adapters/generic_oauth2` + `cmd/mockoauth2` |
+| 一 | 授权 / 回调 / 换令牌 + NEED_REGISTER | ✅ | `test/acceptance/flow_test.go` |
+| 一 | Ticket + bind_ticket + JWT | ✅ | |
+| 一 | JWKS + 密钥骨架 | ✅ | |
+| 一 | 凭据 AES-GCM 加密 | ✅ | 本地主密钥，KMS 见四期 |
+| 一 | outbox 表 + 投递骨架 | ✅ | |
+| 一 | 管理端 A/B/I 组 | ✅ | |
+| 二 | 微信 4 场景 | ✅ | app / mini_program / official_account / pc_qr |
+| 二 | 支付宝 3 场景 | ✅ | app / mini_program / web |
+| 二 | Apple 2 场景（client_secret 签发 / nonce / 首次 name-email / notify） | ✅ | |
+| 二 | 小程序 session_key 生命周期 | ✅ | §10.6 |
+| 二 | 熔断 + 四类阈值 + 三段超时 + WithoutCancel | ✅ | `pkg/guards/breaker`、`middleware.Timeout` |
+| 二 | 管理端 G/H 组 | ✅ | |
+| 三 | 绑定三件套 | ✅ | |
+| 三 | 合并行为配置化（3 mode × 3 on_login）+ 校验器 | ✅ | |
+| 三 | R4 红线（白名单 / 跨平台默认关） | ✅ | |
+| 三 | 三次独立事务 + 幂等键 + 补偿 | ✅ | |
+| 三 | 合并前回源核对（P0-6） | ✅ | |
+| 三 | 验证手段：sms | ✅ | |
+| 三 | 验证手段：existing_binding | ❌ | 只有 hint 常量，无验证路径（§26 待做） |
+| 三 | 验证手段：待合并账号手机号/邮箱验证 | ⚠️ | 走 sms 通道，独立入口未做 |
+| 三 | `source_disposal` 生效 | ❌ | 字段可存可解析，合并时无分支读它；事件里 `notify_source_account` **硬编码 true** |
+| 三 | 补偿滞后**告警** | ⚠️ | 指标有了（§24），告警规则/通知通道没有 |
+| 三 | HTTPAccountProvider | ⚠️ | 代码完成（§23），契约已升到 v1.1（§27），**无真实用户中心联调** |
+| 三 | 管理端 C/D/J 组 + 前端 | ✅ | |
+| 四 | jti 撤销黑名单（P0-5） | ✅ | §14 |
+| 四 | 密钥四步轮换 + F 组 | ✅ | §16 |
+| 四 | 会话/令牌 + E 组 | ✅ | §14 |
+| 四 | 管理员授权 K 组 | ✅ | §17 |
+| 四 | 审计导出 | ✅ | §12 |
+| 四 | 限流：notify + app×IP | ✅ | §15 |
+| 四 | 限流：`rl:identity`（防撞库） | ❌ | |
+| 四 | 限流：`rl:platform:day`（渠道日配额） | ❌ | |
+| 四 | Webhook 事件体系（签名/重试/去重/死信） | ✅ | 提前到二期交付，见 §11 |
+| 四 | 可观测性：`/metrics` | ✅ | §24（实机抓取待验证，见 §24.6） |
+| 四 | 可观测性：tracing | ❌ | 只有 trace_id 串日志 |
+| 四 | 可观测性：告警规则 | ❌ | 指标有，无 PromQL / 通知 |
+| 四 | KMS 信封加密 | ❌ | `KeyStore` 接口已留，实现仍是本地主密钥 |
+| 四 | 配置热更新 | ❌ | 改配置需重启 |
+| 四 | 账号注销与数据合规 | ❌ | 只有渠道侧 `account_delete` 回调，本侧无注销流程 |
+| 四 | `Unbind` 不支持的降级提示 | ❌ | 业务端解绑只改本地，不调渠道侧 |
+| 四 | 双人复核（`admin_approvals`） | ❌ | 表未建、流程未做 |
+| 四 | 管理员账号管理（创建/停用/改密） | ❌ | 只有 `cmd/adminseed` 引导 |
+| 四 | `ScopeAppID` 按应用鉴权 | ❌ | 字段存了，鉴权层明确忽略 |
+| 四 | 压测与故障演练 | ❌ | 无记录 |
+| 四 | 与用户中心联调压测（降级验证） | ❌ | 依赖对端 |
+
+### 25.2 统计
+
+| 期 | 项数 | 完成 | 部分 | 未做 |
+| --- | --- | --- | --- | --- |
+| 一 | 10 | 10 | 0 | 0 |
+| 二 | 7 | 7 | 0 | 0 |
+| 三 | 12 | 7 | 3 | 2 |
+| 四 | 21 | 8 | 0 | 13 |
+| **合计** | **50** | **32** | **3** | **15** |
+
+**按项数看：规划 50 项，完成 32 项、部分 3 项、未做 15 项 → 约 64%**
+（部分项按半数计为 65.5%）。
+
+但项数与工作量严重不成比例：完成的 32 项里有一批是"一个端点 + 一个页面"的量级，
+而未做的 13 项（四期）没有一项是补接口——KMS 涉及密钥迁移，账号注销涉及
+多表级联与外发通知，双人复核涉及审批状态机与所有高危端点的改造。
+**按工作量估，剩下约四成，且是最难的四成。**
+
+### 25.3 剩下 15 项，按上线必要性排序
+
+**A. 上线阻塞（3 项，不做不能上生产）**
+
+1. **真实用户中心联调 + 降级压测**——§23 代码就绪，契约已在 §27 升级到 v1.1
+   （应用维度、错误信封、换绑）并全量自测；等对端按 v1.1 实现。已备好假对端、
+   端到端验收与 16 项契约体检脚本（见 §26/§27 与 `docs/user-center-integration.md`）。
+   对端不提供 `GetByClaim` 强一致读与 `Merge` 幂等键，`mode=auto` 就不能开。
+2. `rl:identity`（按身份维度防撞库）——现在只有 app×IP 一档，
+   分布式撞库（同一批手机号换 IP）完全拦不住。
+3. `rl:platform:day`（渠道日配额）——渠道侧的日调用上限不做本地预拦，
+   超限后是渠道返回错误，用户看到的是"登录失败"，不是"稍后再试"。
+
+**B. 灰度前（5 项，先小流量再放量）**
+
+4. 账号注销与数据合规——合规硬要求；涉及多表级联删除/匿名化与外发通知。
+5. `Unbind` 平台侧解绑 + 不支持时的降级提示——现在业务端解绑只改本地，
+   用户在微信侧仍然是"已授权"状态，再次登录可能被渠道直接放行，与"已解绑"矛盾。
+6. 管理员账号管理（创建/停用/改密）——当前只能靠 `cmd/adminseed` 引导，
+   运维加人是直接改库，没有审计。
+7. KMS 信封加密——`PrivateKeyStore` 接口已留，换实现即可；但涉及存量密钥迁移，
+   越晚做迁移面越大。
+8. tracing（OpenTelemetry）——链路横跨用户中心 → 本服务 → 渠道，
+   现在只能靠 trace_id 在三个系统的日志里手工串。
+
+**C. 可延后（7 项）**
+
+9. `existing_binding` 验证方式——需给 `/v1/authorize` 加验证用途模式，
+   侵入核心链路，且已有 sms 兜底。
+10. `source_disposal` 生效 + `notify_source_account` 去硬编码——
+    R4 要求"被合并账号必须收到通知"，现在是**无条件通知**：方向安全（不会漏发），
+    但配置项关不掉，属于"能配不生效"。
+11. 告警规则（PromQL / 通知通道）——指标已导出，缺 `outbox_dead > 0`、
+    `merge_compensation_lag_seconds > 300`、`claim_mismatch_open > 0` 三条表达式。
+12. 双人复核（`admin_approvals` 表 + 审批流）。
+13. 配置热更新。
+14. `ScopeAppID` 按应用鉴权——字段存了，鉴权层明确忽略；多应用管理员
+    目前能看到全部应用。
+15. 压测与故障演练（含"远端 Merge 成功、本地提交失败"的补偿自愈演练，
+    P0-3 专项）。
+
+> 另有 1 项**非代码**阻塞：回调域名备案 + Apple Service ID / `.p8`
+> （§14 风险表 #6）。周期最长，应最早启动。
+
+### 25.4 管理端通用约定（§15.5）未落地的 5 条
+
+| 约定 | 状态 |
+| --- | --- |
+| `Idempotency-Key`（24h 结果缓存） | ❌ 全局未实现（业务侧合并有幂等键，管理端没有） |
+| 游标分页 `page_token` | ⚠️ 只有 `apps` 列表返回了字段且恒为空，其余全是 offset |
+| 高危操作 `dry_run` 影响面预估 | ⚠️ 只有 `policy:validate`；J 组 revoke、C 组解绑都没有 |
+| 前后快照 | ⚠️ J 组有 before/after；C 组解绑/transfer 只有 after |
+| 前端分页控件 / 合并策略可视化 | ⚠️ 仅审计页有上一页/下一页；应用详情页无合并策略视图 |
+
+### 25.5 结论
+
+- **功能面**（接口、页面、链路）确实接近完成：业务端 14 接口、管理端 11 组 53 端点、
+  11 组前端，全部在位且有多轮验收脚本覆盖。
+- **生产化面**还差得远：15 项里 8 项属于"上生产前必须有"（A 组 3 项 + B 组 5 项），
+  其中 1 项还是外部依赖（用户中心联调）、1 项是非代码（备案与 Apple 凭据）。
+- 三处「能配不生效」是当前最该修的**质量**问题——它们不会报错，只会让运维
+  以为自己配好了：`source_disposal`、`page_token`、`ScopeAppID`。
+
+---
+
+## 26. 用户中心未就绪：状态标记与联调准备
+
+用户中心是独立服务，目前**尚未开始设计与开发**。本服务的账号体系是 remote 模式
+（约束 C4，没有 `accounts` 表），因此它的 absence 会让一批功能处于"代码完成、
+语义未验证"的悬空状态。这一节做三件事：把状态标出来、把现在能验的验掉、
+把对端就绪后要做的事写成可执行清单。
+
+### 26.1 三个层次的标记
+
+| 层次 | 手段 | 谁看 |
+| --- | --- | --- |
+| 运行期 | `/admin/v1/health/overview` 返回 `account_center{provider, base_url, production_ready, note}`；观测看板顶部常驻标记条，stub 时警示色 | 运维、值班 |
+| 启动期 | `release` 模式禁止 `provider=stub`（已有）；`provider=http` 缺 base_url 启动即失败（已有） | 发布流程 |
+| 文档 | `docs/user-center-integration.md`：契约 v1 + 16 项进度标记 + 联调步骤 + 切换清单 | 对端团队、我方开发 |
+
+运行期标记的必要性：stub 与 http 在**外部表现上几乎一样**——都能登录成功、
+都能签发令牌、`/v1/userinfo` 都正常。差别只在账号存在哪里。没有标记的话，
+一个演示环境看起来和生产没有任何区别。
+
+### 26.2 把"等对端"变成"现在能验"
+
+| 交付物 | 作用 |
+| --- | --- |
+| `internal/testsupport/mockusercenter` | 契约的可执行版本：4 个端点 + 幂等键 + 多账号 409 + 故障注入（500/429/timeout/slow/multi）+ 调用记录（含幂等键） |
+| `cmd/mockusercenter` | 独立进程形态，给手工联调/演示用；`-seed` 预置账号，`-no-create` 模拟对端不提供建号 |
+| `test/acceptance/account_http_test.go` | 4 个端到端用例：真实登录流程 + `provider=http` |
+| `scripts/check-usercenter-contract.sh` | 对端交付时的契约体检（默认只读，`--write` 才创建数据） |
+
+端到端用例跑的是**真实链路**（authorize → 三方回调 → auto_create → 签发 auth_code →
+换令牌），不是直接调适配层，因此能验到"用户中心返回的 `user_id` 有没有真的
+被写进绑定与令牌 `sub`"——这一点在单测里根本看不见。
+
+### 26.3 实测结果（2026-10-29）
+
+```
+$ go test ./test/acceptance/ -run TestHTTPAccountProvider -v
+--- PASS: TestHTTPAccountProviderAutoCreate
+--- PASS: TestHTTPAccountProviderCreateUnsupported
+--- PASS: TestHTTPAccountProviderUnavailableFailsFast
+--- PASS: TestHTTPAccountProviderRateLimited
+ok  github.com/djackcurry30/social-login/test/acceptance  2.1s
+```
+
+| 用例 | 守住的语义 |
+| --- | --- |
+| AutoCreate | Create 恰好一次、带幂等键；令牌 `sub` = 对端 `user_id`（不是 open_id）；二次登录不再建号 |
+| CreateUnsupported | 对端 404 → `AUTH.INVALID_CONFIG`，文案提示改 `need_register`；不产生账号 |
+| UnavailableFailsFast | 5xx → 回跳 `ACCOUNT.UNAVAILABLE&retryable=true`；故障恢复后一次登录成功（无半截绑定） |
+| RateLimited | 429 → `RATE.LIMITED`（不与可用性故障混同） |
+
+```
+$ scripts/check-usercenter-contract.sh http://127.0.0.1:19091 "" --write --claim phone:19900000001
+  ok   连通性正常，未知账号返回 404
+  ok   by-claim 对不存在的凭证返回 404
+  ok   缺少 Idempotency-Key 时被拒绝（400）
+  ok   创建成功，user_id=uc-0001
+  ok   幂等键重放返回同一账号（uc-0001）
+  ok   写后立刻按凭证反查命中同一账号（强一致读成立）
+  ok   target==source 被拒绝（409）
+  ok   source 不存在返回 404
+==> 结果：通过 8 项，不符 0 项
+```
+
+### 26.4 写这个假对端时踩到的语义坑
+
+**`merge` 幂等重放不能原样返回首次结果。** 第一版在命中幂等键时
+`return prev`，于是重放返回 `merged=true, already_merged=false`——
+补偿任务会据此认为"又合并了一次"，进而重复推进本地收敛。
+正确语义是 `merged=false, already_merged=true`：**这次调用没有执行合并**。
+这个 bug 是被 `TestMergeMovesClaimsAndIsIdempotent` 的第二段断言抓出来的，
+而它在真实对端上会表现为"补偿重试把数据搬了两遍"，极难归因。
+
+### 26.5 仍然悬空的 5 项（全部依赖对端先给接口形态）
+
+1. `by-claim` 的**强一致读**——mock 天然强一致，证明不了对端
+2. `merge` 的**真幂等**——mock 是 20 行 map，证明不了对端事务边界
+3. `claim.invalidated` 反向通知（对端推换号事件，本侧自动失效 claim）——本侧接收端也没写
+4. 账号注销（本侧发起、对端执行）——契约未定义
+5. 批量对账（`identity_claims` vs 对端全量）——离线任务，量级与限流需单独设计
+
+### 26.6 切换时最容易踩的坑
+
+`stub` 生成的 `user_id` 形如 `u_stub_12_ab3f`，已经写进
+`oauth_bindings.external_user_id`。切到 http 后这些绑定与真实账号没有任何对应关系：
+登录能用（走已有绑定），但 `sub` 是对端不存在的 id，一旦触发合并/回源核对就
+`Get` 404 → 归并被跳过并记漂移。
+
+切换前必须清理或重建（开发/演示环境直接 `down -v` 即可）。
+SQL 与处理方式见 `docs/user-center-integration.md` §6.1。
+
+### 26.7 顺手修的看板错误：`apps_count` 恒为 0
+
+加账号体系标记时顺手看了同一条 overview，发现 `apps_count` 一直是 0——
+而库里当时有 160 个应用。原因是 `adminobs.Deps.OverviewGetter` 这个口子
+**从未接线**：`Service.Overview` 里有 `if s.deps.OverviewGetter != nil` 的分支，
+bootstrap 里却没给它赋值。
+
+修法：`AppRepository.Count(ctx)`（跨应用作用域 + `COUNT(*)`）+ bootstrap 接线。
+没有复用 `ListIDs`：它上限 500，超过之后数字会永远停在 500，而且不会有人察觉。
+
+**恒为 0 的指标比没有指标更糟**——它看起来像"还没有人接入"，而不是"统计坏了"。
+这类"永远返回同一个值"的口子以后加字段时应该顺手打一次真实请求确认。
+
+---
+
+## 27. 契约 v1.1 落地：应用维度、错误信封、换绑
+
+上一节（§25）列的"真实用户中心联调"是外部依赖，但**契约本身缺了应用维度**——这件事
+不等对端，我方先改。这一节是 `docs/user-center-mvp-design.md` §2 的实现记录。
+
+### 27.1 为什么必须先改
+
+`http.go` 的四个方法此前都不带应用标识。照那个契约实现，用户中心只能有一个**全局
+账号空间**：App1 里某人用手机号建过号，App2 同一号码首登会命中 App1 的账号，直接
+登进另一个业务的主体。这不是"多应用不方便"，是数据越权。
+
+同时 `Merge` 要求拒绝跨应用合并（R3），没有应用维度就没有判据。
+
+改的时机也重要：对端一行代码没写，现在改成本为零；等对端按 v1 写完再改，要双方
+改代码 + 重跑联调。
+
+### 27.2 五处契约变更
+
+| # | 变更 | 落点 |
+| --- | --- | --- |
+| 1 | 路径加应用前缀 `/v1/apps/{app_key}/accounts/...` | `Get` / `GetByClaim` / `Create` / `Merge` / `ReplaceClaim` |
+| 2 | `app_key` 用 `app_code`，不用 `applications.id` | 调用点传 `app.AppCode` |
+| 3 | 统一错误信封 `{code,message,retryable}`，按 code 翻译 | `classify()` |
+| 4 | 补换绑端点 `PUT .../claims/{type}` | `ClaimReplacer` 可选端口 |
+| 5 | 合并回传 `discarded_claims` | `MergeResult.DiscardedClaims` |
+
+### 27.3 三个设计决定
+
+**① 应用进路径，不进请求头。** 请求头漏了 = 未知租户，每个端点都得记得拦，日志和
+网关限流都看不见；路径漏了 = 404，不可能静默串租户。代价是 URL 变长，可以接受。
+
+**② 换绑做成可选端口 `ClaimReplacer`，不放进 `Provider`。** `Provider` 是登录链路的
+最小必需集合；换绑目前没有调用方（P1 才接"平台侧手机号变了"的识别）。并进去会让
+所有实现方（含测试替身）被迫实现一个当下无人调用的方法。调用方按需类型断言：
+
+```go
+if r, ok := provider.(account.ClaimReplacer); ok { ... }
+```
+
+**③ 裸 409 不再被猜成某一种具体原因。** 这是行为变化，值得单独说：
+
+| 场景 | 改前 | 改后 |
+| --- | --- | --- |
+| Create 收到 409 + `ACCOUNT.CLAIM_TAKEN` | `BIND.IDENTITY_TAKEN` | 同（不变） |
+| Create 收到 409 + `ACCOUNT.IDEMPOTENCY_IN_PROGRESS` | `BIND.IDENTITY_TAKEN`（**译错**） | `ACCOUNT.UNAVAILABLE` + 可重试 |
+| Create 收到裸 409 | `BIND.IDENTITY_TAKEN` | `ACCOUNT.UNAVAILABLE`，不可重试 |
+
+猜错比不猜更糟：把"同键正在处理"说成"该手机号已被占用"，会让调用方去做一件完全不
+相关的事（走合并流程）。所以**没有 code 就只报"无法判定原因"**，把原始报文带在
+details 里让人看。
+
+代价是：对端如果实在不肯实现信封，`by-claim` 的多账号检测会退化成"409 但不知为何"，
+`ErrMultipleAccounts` 不再被触发。契约 §3.3 已把这条写成硬要求，体检脚本会检查。
+
+### 27.4 假对端同步升级（否则测不出应用维度）
+
+`internal/testsupport/mockusercenter` 不是"顺手改一下"，它是**契约的可执行版本**：
+
+- 账号按 `app_key` 分区（`claimOwner` 的 key 带应用前缀，`Get` 校验 `appOf` 一致）
+- 跨应用 `Get` 返回 404、跨应用 `merge` 返回 404（R3）
+- 合并按"类型目标优先"丢弃同类型凭证，并把 `discarded_claims` 回传
+- 换绑端点：正常 / 幂等 no-op / 被占用 409
+- `RequireRegisteredApp` 开关模拟 `APP.UNKNOWN`
+- 调用记录带 `AppKey`，让测试能断言"租户前缀真的送到了"
+
+### 27.5 测试
+
+新增/改写的关键用例：
+
+| 用例 | 守住什么 |
+| --- | --- |
+| `TestPathsCarryAppKey`（5 个子用例） | 每个端点的路径都带应用前缀 |
+| `TestRequireAppKeyLocally` | 空 appKey 本地拦截——否则拼出 `/v1/apps//accounts`，对端 404 被译成"账号不存在" |
+| `TestAppIsolation` | 同一手机号在两个应用建出两个账号；跨应用按 id 查 404 |
+| `TestMergeCrossAppRejected` | R3：跨应用合并被拒 |
+| `TestMergeDiscardsSameTypeClaim` | 合并丢弃同类型凭证，且**释放该号码**（否则用户拿它重新注册会一直撞"被占用"） |
+| `TestIdempotencyInProgressIsRetryable` | 409 + IDEM_IN_PROGRESS 不被译成"凭证被占用" |
+| `TestRaw409IsNotGuessed` | 无码 409 不猜原因 |
+| `Test5xxBeatsEnvelopeCode` | 5xx 优先于信封（它决定"要不要重试"） |
+| `TestCreate404WithCodeIsNotSupported` | 404 的双重含义靠"有没有 code"区分 |
+| `TestErrorCodesMatchContract` | mock 与生产的错误码字面量逐条相等（两份独立定义，防漂移） |
+| `TestReplaceClaim` | 换绑三条语义 + 失败时原凭证不动 |
+| `TestUnregisteredApp` | APP.UNKNOWN 不可重试、文案指向注册 |
+| `TestPathWithoutAppIs404` | 漏带前缀必须 404，不能落到默认租户 |
+| e2e `TestHTTPAccountProviderAutoCreate` | 真实登录链路里 `Create` 带的是 `app_code`（不是空串、不是 id） |
+| e2e `TestHTTPAccountProviderAppNotRegistered` | 应用未同步时用户看到什么 |
+
+### 27.6 实机验证（2026-11-02）
+
+```
+go build ./...                     通过
+go vet ./...                       干净
+go test ./internal/...             38 个包全绿
+test/acceptance（含 5 个用户中心 e2e）  全绿
+scripts/acceptance-admin.sh        17 步全过（回归）
+```
+
+契约体检脚本对假对端跑满 16 项：
+
+```
+$ scripts/check-usercenter-contract.sh http://127.0.0.1:19093 "" \
+    --app app_one --app2 app_two --write
+  ok   连通性正常，未知账号返回 404
+  ok   404 带错误信封（ACCOUNT.NOT_FOUND）
+  ok   by-claim 对不存在的凭证返回 404
+  ok   缺少 Idempotency-Key 时被拒绝（400）
+  ok   400 带错误信封
+  ok   创建成功，user_id=uc-0001
+  ok   幂等键重放返回同一账号（uc-0001）
+  ok   写后立刻按凭证反查命中同一账号（强一致读成立）
+  ok   target==source 被拒绝（409）
+  ok   拒绝合并带 ACCOUNT.MERGE_REJECTED 信封
+  ok   source 不存在返回 404
+  ok   同一凭证在 app_two 建出独立账号（uc-0002），应用隔离成立
+  ok   APP2 反查只命中本应用账号
+  ok   跨应用合并被拒绝（404）
+  ok   换绑成功，账号已切换到 19900000009
+  ok   换绑后旧凭证已释放（撤销即释放）
+==> 结果：通过 16 项，不符 0 项，警告 0 项
+```
+
+未注册应用的分支也验过：`--app app_typo` 直接以 `APP.UNKNOWN` 中止并提示先做注册同步。
+
+### 27.7 仍未做
+
+1. **`ClaimReplacer` 没有调用方**。适配层和假对端都实现了，但登录链路还不会
+   "发现平台侧手机号变了就换绑"——那是 P1，要改核心链路，风险大于收益。
+2. ~~**应用注册同步没接**~~：已于 §28 交付（即时同步 + 5 分钟全量对账 + 状态落库）。
+3. **真实对端联调**：仍是外部依赖。现在能验的到"协议映射 + 降级"为止，
+   §26.5 列的五项（强一致读、真幂等、跨服务一致性、容量、鉴权）只有对端能给答案。
+
+---
+
+## 28. 应用注册同步（契约 v1.1 §2.6 落地）
+
+§27 把契约升到 v1.1 时，"应用注册"只是纸面上的一行：对端要求 `POST /internal/v1/apps`，
+本服务却没在任何地方调用它。按这份契约实现，对端上线当天所有应用的登录都会
+400 `APP.UNKNOWN`——**这不是配置瑕疵，是登录直接不可用**。这一节把它补齐。
+
+### 28.1 为什么它算"可用性组件"而不是配置项
+
+契约把账号空间按 `app_key` 隔离，未注册的 `app_key` 一律 400。于是：
+
+| 状态 | 用户侧表现 |
+| --- | --- |
+| 应用已注册 | 正常登录 |
+| 应用未注册 | 该应用**所有**登录失败，错误 `ACCOUNT.UNAVAILABLE`（文案指向"未注册"） |
+| 同步任务没跑 | 等价于"全部应用未注册" |
+
+所以它必须满足两条相互矛盾的约束：**建应用不能依赖它**（用户中心挂了也要能改配置），
+但**登录依赖它**（慢一分钟就有一分钟不可用）。下面两条路径就是这对矛盾的解法。
+
+### 28.2 两条路径
+
+| 路径 | 触发 | 延迟 | 作用 |
+| --- | --- | --- | --- |
+| 即时同步 | 建应用 / 启停应用后入队 | 毫秒级 | 运维刚建完就能登录 |
+| 全量对账 | 启动即一次 + 每 5 分钟 | ≤ 5 分钟 | 自愈三类漂移 |
+
+对账要自愈的三类问题，缺一条都不行：
+
+1. 建应用时用户中心正好不可用（即时同步失败，只 warn）；
+2. 用户中心上线前就存在的存量应用（从来没同步过）；
+3. 对端数据被回滚 / 被手工清理（本地以为"已同步"，远端其实没了）。
+
+### 28.3 五个实现决定
+
+**① 入队是【非阻塞】的。** 队列满（256）时丢弃并打 warn，不阻塞调用方。
+丢弃只意味着等下一轮对账（≤5 分钟）；阻塞会让"用户中心故障"升级成"建不了应用"，
+而建应用恰恰是恢复期最需要的操作。这条很容易被"优化"掉——改成阻塞发送看起来
+更严谨（不丢任务），实际是把两个独立链路焊死了。
+
+**② 队列只带 `app_code`，不带应用快照。** 两个原因：
+
+- 建完可能立刻被改（改名/停用），队列里那份就是过期的；
+- 请求 ctx 在响应返回时取消，把结构体（或 ctx）带进后台会得到一个"永远失败
+  但不报错"的任务。
+
+回查只有一次主键查询的成本，换来的是"总是最新状态"。
+
+**③ 接口定义在消费方（`adminapp.AppSyncNotifier`）。** A 组用例不该知道"用户中心"
+这个概念的存在——它只说"我改了一个应用"。这样换同步实现、临时关掉同步，都不动
+adminapp；A 组的单测也不必拉起一套 HTTP 客户端。
+
+**④ 状态落库，成功后【清空】上次错误。** 只打日志等于没做：日志会滚掉，而
+"这个应用到底注册上没有"是运维每天要回答的问题。失败保留 `uc_synced_at`
+（"上次成功是 3 天前、此后一直失败"与"从未成功"是两种完全不同的判断），
+成功则清空 `uc_sync_error`（否则管理端永久显示一个已经修好的旧错误）。
+
+**⑤ 同步不动 `updated_at`。** 它是业务字段（配置最后修改时间），同步每 5 分钟一次；
+一并刷新会让管理端列表里所有应用的"更新时间"自己往前跑。
+
+> 这一条踩了两次坑：GORM 对带 `UpdatedAt` 字段的模型会自动补这一列，
+> 不写进 map 拦不住；换 `UpdateColumns` 后**仍然**写了（靠"更新时间恰好等于
+> 同步时间"才发现）。最后改成两条原生 `UPDATE`，只碰目标列，语义一眼可见。
+> 教训：这类"我只改这两列"的期待，不要赌 ORM 的隐式行为。
+
+### 28.4 数据与可见性
+
+`00007_app_uc_sync.sql` 给 `applications` 加两列（含 COMMENT 说明归属）：
+
+| 列 | 含义 |
+| --- | --- |
+| `uc_synced_at` | 最近一次成功注册的时间；NULL = 从未成功 |
+| `uc_sync_error` | 最近一次失败原因（成功后清空），按 rune 截断 300 |
+
+**刻意不加索引**：对账是全量重放（每 5 分钟 upsert 全部应用），不是"只查未同步的"。
+只补未同步的话，"远端删了租户、本地状态仍是已同步"这一类永远修不回来；既然是全表
+扫描，索引只会增加写入成本。
+
+管理端三处可见：应用列表新增「用户中心」列（已同步 / 未同步 + 悬浮原因 / —）、
+`GET /admin/v1/apps` 返回 `AccountSync{SyncedAt, LastError}`、启动日志按结果分级
+（全成功 Info、部分失败 Warn、全失败 Error）。
+
+### 28.5 失败语义与文案
+
+注册调用复用 §27 的错误分类：5xx / 超时 → 可重试（下一轮对账会重试）；
+400 → 不可重试（报文问题，重试一百次一样）。
+
+顺手修了一处**会误导排障**的文案：`translateTransportError` 原先用
+`errs.Wrap(..., err)`，把 httpx 的 "PROVIDER.UNAVAILABLE: 无法连接三方平台"
+一起带了出来。登录链路里它只进日志还好；但同步失败原因会落进
+`applications.uc_sync_error` 并显示在管理端——让运维在"用户中心同步失败"下面
+读到"三方平台"，等于把方向带偏。现在改成新建干净错误
+（`用户中心不可用（连接失败）`），原始原因只进 details。
+
+### 28.6 测试
+
+| 位置 | 例数 | 守住什么 |
+| --- | --- | --- |
+| `application/accountsync` | 11 | 停用应用也同步、单应用失败隔离、单次超时、**入队不阻塞**、回查最新状态、已删除应用跳过、无对端时 no-op、读列表失败报错、ctx 停止、状态映射（脏值按停用）、写状态失败不改变同步结论 |
+| `application/adminapp` | 5 | 建应用通知一次、停用/改名也通知、无 notifier 时照常成功、写库失败不通知、视图带同步状态 |
+| `infrastructure/account` | 7 | 报文形状（路径 / app_key / status / updated_at）、204 也算成功、空 app_key 与缺状态本地拦截、5xx 可重试、400 不可重试、**每次都真调用**（不本地记"已同步"） |
+| `testsupport/mockusercenter` | 6 | 注册解锁登录、幂等 upsert（不新增租户）、非法报文拒绝、GET 405、停用状态只记录不拦截、故障注入可重试 |
+| `test/acceptance` | 1 | 未注册 → 登录失败 → 对账 → 登录成功；`uc_synced_at` 写入；`updated_at` 不变 |
+
+`TestRegisterAppReplaysEveryTime` 值得单独说：它断言"连调三次就是三次请求"。
+如果哪天为了省流量加了"同步过就跳过"的本地缓存，这条会红——而那个优化的代价是
+**远端漂移永远修不回来**，现象是"管理端显示已同步，登录却 APP.UNKNOWN"。
+
+### 28.7 实机验证（2026-11-02）
+
+容器内镜像重建，`00007` 迁移执行；`applications` 新增两列（`\d` 核对）。
+
+真正验的是"两个进程 + 一个真实进程"的组合：本地起服务
+（`SOCIAL_LOGIN_ACCOUNT_PROVIDER=http`、`base_url` 指向假对端、`sync.interval=10s`），
+假对端以 `-require-apps` 启动（初始零应用）。
+
+| 场景 | 结果 |
+| --- | --- |
+| 启动即对账 | **241 / 241** 个应用写入 `uc_synced_at` |
+| 时间戳语义 | `updated_at ≠ uc_synced_at`（同步没动业务时间） |
+| 断开对端一轮 | 241 个应用记 `ACCOUNT.UNAVAILABLE: 用户中心不可用（连接失败）`，**`uc_synced_at` 保留** |
+| 恢复对端一轮 | **0 个失败**（成功后清空错误，无需人工干预） |
+| 管理端接口 | `GET /admin/v1/apps` 返回 `AccountSync{SyncedAt, LastError}` |
+| 契约脚本 | 对假对端 **18 项全过**（新增第 0 步：自动注册被测应用） |
+
+`scripts/acceptance-admin.sh`（17 步）与 `scripts/acceptance-claims.sh`（15 步）
+回归全过。
+
+### 28.8 仍未做
+
+1. **停用应用是否由对端拒绝**（§12.3）：现在只把 `status=disabled` 同步过去，
+   对端记录但不用它拦截；拦截仍在本服务侧（`applications.status` 检查）。
+2. **指标**：`/metrics` 还没有 `uc_sync_failed` 这类 gauge。数据在库里
+   （`count(*) where uc_sync_error is not null`），接一个 GaugeFunc 即可。
+3. **同步失败的告警**：目前只有日志级别（全失败 Error）与管理端展示，
+   没有接监控告警通道——与 §24.6 的告警缺口是同一件事。
+4. **批量补注册脚本**：不需要单独写——全量对账本身就是补注册机制，
+   启动一次即覆盖存量应用。
+
+---
+
+## 29. 用户中心 MVP 实现（2026-11-02）
+
+前 28 节里，用户中心始终是"契约 + 假对端"：`account.provider=http` 这条路径
+只被 `internal/testsupport/mockusercenter` 验过，账号实际落在哪里从未有过第二种答案。
+本节记录真正的对端交付——它让 §23/§26/§27/§28 的四条"等对端"结论全部落地。
+
+方案依据：`docs/user-center-mvp-design.md`（§3 五张表、§4 五个端点、§5 并发语义）。
+
+### 29.1 交付范围（P0）
+
+| 项 | 位置 |
+| --- | --- |
+| 独立二进制 | `cmd/usercenter`（另一个服务，不是 social-login 的子命令） |
+| 分层代码 | `internal/usercenter/{config,domain,cryptox,store/postgres,service,httpapi,observe,app}` |
+| 迁移 | `migrations/usercenter/00001_init.sql`（独立 embed FS 与独立库 `user_center`） |
+| 配置 | `configs/usercenter.yaml`（环境变量前缀 `UC_`） |
+| 本地启动 | `scripts/dev-usercenter.sh`、`make uc-run`、compose 的 `usercenter` 服务 |
+| 联调验收 | `test/acceptance/account_http_real_test.go`（`TEST_USER_CENTER_URL` 触发） |
+| 集成测试 | `internal/usercenter/service/integration_test.go`（`TEST_USER_CENTER_DSN` 触发） |
+
+五个对外端点 + 应用注册，全部按契约 v1.1：
+`GET /accounts/{id}`、`GET /accounts/by-claim`、`POST /accounts`、
+`POST /accounts/merge`、`PUT /accounts/{id}/claims/{type}`、`POST /internal/v1/apps`。
+
+### 29.2 三处与设计文档的偏离
+
+写在代码注释里也写在设计文档 §14.2，这里只列结论：
+
+1. **Merge 的幂等键只落在 `merges` 表**，不再往 `idempotency_keys` 写一份。
+   两处都记会出现"一处成功、一处失败"，而流水表本来就是幂等键的天然宿主。
+2. **幂等快照只存 `{"user_id":"..."}`**，重放时按 id 重读当前状态。
+   存完整账号报文会让幂等表变成第二份凭证明文/密文，而它恰恰是排障时被直接 query 的地方。
+3. **`merges` 只记成功的合并**（取消 `status` 列）。被拒绝的合并没有副作用，
+   重放时重新判定；写进去会让重放返回 `already_merged=true`，而那次调用什么都没合并。
+
+### 29.3 验收数据
+
+| 检查 | 结果 |
+| --- | --- |
+| `scripts/check-usercenter-contract.sh http://127.0.0.1:8099 <token> --app a --app2 b --write` | **18 项全过，0 警告** |
+| `go test ./test/acceptance/`（含 `TEST_USER_CENTER_URL`） | 全过；其中真实 UC 两项：登录 302 且绑定写入 UC 的 ULID、未注册应用登录被拒 |
+| `go test ./internal/usercenter/...`（含 `TEST_USER_CENTER_DSN`） | 13 个集成用例通过（连真 PG） |
+| 并发：10 同键 Create | 1 个账号，其余返回同一 `user_id` |
+| 并发：10 同凭证不同键 Create | 1 个 201，9 个 `CLAIM_TAKEN` |
+| 并发：A→B 与 B→A 同时 Merge | 无死锁，恰好 1 个 `merged=true`，另一个 `already_merged` |
+| 手工边界 | 无 token 401、未知应用 400 `APP.UNKNOWN`、停用应用 403 `APP.DISABLED`、非法类型 400 |
+
+两个在测试里被真实抓到的缺陷（值得记下来，因为它们都不会在"顺利路径"里暴露）：
+
+1. **哈希拼接歧义**：`("a","\x00b")` 与 `("a\x00","b")` 在 NUL 分隔方案下产生同一哈希。
+   改成长度前缀布局后由 `TestHashRejectsSeparatorCollision` 守住。
+2. **测试自身用 `ULID()[:6]` 做租户后缀**：ULID 前 48 位是时间戳，同进程内连续调用
+   前缀几乎相同，导致多个用例共用一个应用、数据互相污染（表现为"刚建的号查不到凭证"）。
+   改用完整 ULID。
+
+### 29.4 由此解锁 / 仍需跟进
+
+解锁：
+
+- §23 遗留的"对端强一致读、幂等实现、跨应用隔离"三项，现在有真实实现可验。
+- §28 的注册同步不再只是打到假对端：`appsync` 指向 `usercenter` 即可真跑（compose 里
+  `ACCOUNT_PROVIDER=http` 就是这条链路）。
+
+仍待跟进（与设计文档 §10 的分期一致）：
+
+1. **P0.5**：审计日志、慢查询与连接池调优、`uc_sync_failed` gauge。
+2. **P1**：`ClaimReplacer` 接登录链路（识别平台侧手机号变更）、UC 停用状态与
+   social-login 的注销流程对齐顺序、换绑 24h 回滚窗口。
+3. **运维**：`usercenter` 尚未接入告警；当前只有 `/metrics` 与 `/readyz`。
+4. **数据清理**：契约脚本与联调会在 UC 侧留下测试租户（`app_contract_*`）
+   与测试账号，契约本身没有 DELETE 接口，需要时直接按 app_key 清理。
+
+---
+
+## 30. 服务边界护栏（2026-11-02）
+
+同仓库、同 module 的代价是"顺手 import 一下"几乎没有摩擦。规则一旦只写在
+文档里，就会在某次赶进度时被破掉，而且破掉的那一刻没人知道——CI 只会说
+"某处类型不匹配"。所以把它变成了可执行的检查。
+
+**规则**：同一仓库、同一 `go.mod`、共用 `internal/pkg` 通用工具；两个服务的
+业务代码零相互依赖。完整规则（含 `pkg` 下哪些不算通用）见
+`docs/user-center-mvp-design.md` §15。
+
+**落地**：`scripts/check-service-boundary.sh`（`make boundary`，已挂进 `make lint`）。
+三层检查：传递依赖（`go list -deps`，抓间接引用）、直接 import（grep，含 `_test.go`）、
+交叉点白名单。
+
+**本次清理的一处违规**：`internal/usercenter/domain/errs_test.go` 曾 import
+`internal/infrastructure/account` 与 `internal/testsupport/mockusercenter`
+来断言三方错误码一致。已搬到 `test/contract/usercenter_codes_test.go`——
+`test/` 不参与任何服务的构建，是唯一豁免区。原文件只保留本服务的
+「错误码字面量锁定」与「状态码/可重试性不变量」。
+
+**负向验证**（不做这一步的检查等于假护栏）：
+
+| 注入的违规 | 退出码 | 是否抓到 |
+| --- | --- | --- |
+| 用户中心 import `infrastructure/account` | 1 | ✅ 传递依赖 + 直接 import 各报一处 |
+| 登录中心 import `usercenter/domain` | 1 | ✅ 同上 |
+| 用户中心 import `pkg/errs`（伪通用包） | 1 | ✅ |
+
+清理后 `exit 0`，`go test ./test/contract/` 通过。

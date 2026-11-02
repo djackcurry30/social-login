@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/djackcurry30/social-login/internal/application/accountsync"
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
 	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
@@ -29,6 +31,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
+	"github.com/djackcurry30/social-login/internal/pkg/metrics"
 
 	// blank import 触发各渠道适配器的编译期注册（决策 D7）。
 	// 新增渠道时改这一行即可，装配代码与核心编排都不需要动。
@@ -71,6 +74,8 @@ type App struct {
 	exporter *auditexport.Service
 	// compensator 是账号合并的补偿循环（§7.3）。
 	compensator *appmerge.Compensator
+	// appSync 是应用注册同步循环（契约 v1.1 §2.6）；nil 表示没有用户中心或已关闭。
+	appSync *accountsync.Service
 	// accounts 是账号体系端口。暴露给集成测试用（构造 source/target 账号），
 	// 与 DB()/Redis() 同属测试可达的装配产物。
 	accounts domainaccount.Provider
@@ -180,6 +185,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	configRepo := postgres.NewProviderConfigRepository(db)
 	identityRepo := postgres.NewIdentityRepository(db)
 	claimRepo := postgres.NewClaimRepository(db)
+	// J 组：凭证漂移记录。写端在登录链路（authflow），读与闭环端在管理端，
+	// 因此在这里构造一次、两处共用——同一个事实不该有两个仓储实例。
+	claimMismatchRepo := postgres.NewClaimMismatchRepository(db)
 	bindingRepo := postgres.NewBindingRepository(db)
 	sessionRepo := postgres.NewSessionRepository(db)
 	auditRepo := postgres.NewAuditRepository(db)
@@ -272,6 +280,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Audit:      auditRepo,
 		Logger:     logger,
 		Merge:      mergeSvc,
+		// J 组：回源核对失败时落一条漂移记录（§8.5）。
+		// 这是 best-effort 写入，失败不影响登录。
+		Mismatches: claimMismatchRepo,
 	})
 
 	tokenSvc := token.New(token.Config{
@@ -311,6 +322,39 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:     logger,
 	})
 
+	// --- 应用注册同步（契约 v1.1 §2.6）---
+	//
+	// 只在"真的有用户中心"时装配。StubProvider 没有注册能力，硬塞一个空实现
+	// 会让管理端显示"已同步"，而实际上并不存在用户中心——一个会撒谎的状态
+	// 比没有状态更糟，因为它会让人跳过排查。
+	var appSyncSvc *accountsync.Service
+	if registrar, ok := accounts.(domainaccount.AppRegistrar); ok && cfg.Account.Sync.Enabled {
+		appSyncSvc = accountsync.New(accountsync.Deps{
+			Apps:      appRepo,
+			Registrar: registrar,
+			Recorder:  appRepo,
+			Logger:    logger,
+			Interval:  cfg.Account.Sync.Interval,
+			Timeout:   cfg.Account.Sync.Timeout,
+			Workers:   cfg.Account.Sync.Workers,
+		})
+		app.appSync = appSyncSvc
+	} else if !cfg.Account.Sync.Enabled {
+		// 关掉同步是一个有后果的决定，必须喊出来：新建的应用不会注册，
+		// 这些应用的登录会以 ACCOUNT.UNAVAILABLE 失败。
+		logger.Warn("应用注册同步已被配置关闭（account.sync.enabled=false）：" +
+			"新建应用不会注册到用户中心，这些应用的登录会被拒绝")
+	} else {
+		logger.Info("账号体系为内存桩，应用注册同步不启用（没有可注册的对端）")
+	}
+
+	// 把 nil 指针赋给接口变量后，接口本身不为 nil（typed nil），调用方法会
+	// 进到 nil 接收者里 panic。所以这里显式判空后再赋值。
+	var appSyncHook adminapp.AppSyncNotifier
+	if appSyncSvc != nil {
+		appSyncHook = appSyncSvc
+	}
+
 	// --- 管理端 services（A 组 + B 组 + I 组 + LoginService）---
 	//
 	// ⚠️ HashSecret 必须注入 crypto.AppSecretHasher。
@@ -328,6 +372,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		TenantApps: appRepo,
 		AdminAudit: adminAuditRepo,
 		Logger:     logger,
+		AppSync:    appSyncHook,
 		ListAppIDs: adminListAppIDs,
 		HashSecret: func(plain string) (string, error) {
 			// AppSecretHasher.Hash 是纯函数（HMAC-SHA256 + 固定盐），不会失败；
@@ -366,6 +411,19 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		CircuitStates: guard.States,
 		ResetCircuit:  guard.Reset,
 		AdminAudit:    adminAuditRepo,
+		// 账号体系现状：stub 还是真实用户中心（见 §26 的进度标记）。
+		AccountCenter: describeAccountCenter(cfg),
+		// 应用总数：看板上的 apps_count。
+		//
+		// 这个口子此前没有接线，于是看板恒显示 0——库里有 160 个应用也一样。
+		// 数字恒为 0 比没有这个数字更糟：它看起来像"还没人接入"。
+		OverviewGetter: func(ctx context.Context) (adminobs.OverviewStats, error) {
+			n, err := appRepo.Count(ctx)
+			if err != nil {
+				return adminobs.OverviewStats{}, err
+			}
+			return adminobs.OverviewStats{AppsCount: int(n)}, nil
+		},
 		// 健康探测优先走适配器的 HealthChecker：它知道该平台真正的
 		// 健康端点（微信的稳定 token、Apple 的 JWKS），比通用 HTTP 猜测准确。
 		PingSource: func(ctx context.Context, platform, scene string) error {
@@ -379,7 +437,10 @@ func New(ctx context.Context, opts Options) (*App, error) {
 			}
 			return provider.NotSupported("health_check")
 		},
-		Logger: logger,
+		// J 组的漂移数进总览（§15.4 I 组要求的"claim 不一致数"）。
+		// 取不到只是这个字段为 0，不影响渠道健康的结果。
+		OpenMismatches: claimMismatchRepo.CountOpen,
+		Logger:         logger,
 	})
 
 	// G 组：事件与死信。
@@ -412,15 +473,21 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:     logger,
 	})
 
-	// C 组：身份与绑定。
+	// C 组 + J 组：身份、绑定与凭证一致性。
 	//
 	// Bindings 同时充当查询与干预入口：ListAdmin 走同一批过滤条件，
 	// ForceUnbind/Transfer 在仓储内用事务写事件，避免"改了本地没发通知"。
+	//
+	// J 组的两块依赖刻意分开：
+	//   ClaimAdmin  跨身份分页查询（含已撤销），核心 claimRepo 不做这类查询
+	//   Mismatches  漂移记录的读与闭环；写入端口在 authflow 侧（见后）
 	bindingAdminRepo := postgres.NewBindingAdminRepository(db)
 	adminIdentitySvc := adminidentity.New(adminidentity.Deps{
 		Identities:  postgres.NewIdentityAdminRepository(db),
 		IdentityGet: identityRepo,
 		Claims:      claimRepo,
+		ClaimAdmin:  postgres.NewClaimAdminRepository(db),
+		Mismatches:  claimMismatchRepo,
 		Bindings:    bindingAdminRepo,
 		Writer:      bindingAdminRepo,
 		AdminAudit:  adminAuditRepo,
@@ -541,6 +608,77 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AppIPPerMinute:  cfg.RateLimit.AppIPPerMinute,
 	})
 
+	// --- 指标注册（架构 §11）---
+	//
+	// 只注册"出事时必须能看见"的几项，不做无差别埋点：
+	//
+	//	HTTP 请求数与耗时（中间件自动采集，覆盖全部端点与状态码）
+	//	claim 漂移未闭环数          —— 数据一致性探针
+	//	outbox 死信 / 待投递         —— 外发链路是否卡住
+	//	merge 补偿滞后秒数           —— 跨服务合并是否卡住
+	//
+	// 登录成功率不单独建指标：/v1/oauth/callback 的 2xx 比例就是它，
+	// 从 HTTP 指标里算即可。为它再维护一套埋点只会多一个漂移的口径。
+	metricsReg := metrics.NewRegistry()
+
+	// 采集时查库：用带超时的独立 context，避免慢查询拖住 /metrics 端点。
+	gatherCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 2*time.Second)
+	}
+
+	metricsReg.GaugeFunc("social_login_claim_mismatch_open",
+		"未闭环的凭证漂移数（非 0 表示有用户本该被归并、但被拦住了）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			n, err := claimMismatchRepo.CountOpen(ctx)
+			if err != nil {
+				logger.Warn("采集凭证漂移数失败", zap.Error(err))
+				return 0
+			}
+			return float64(n)
+		})
+
+	// 死信与待投递分开看：pending 高说明投递慢（可自愈），
+	// dead 非 0 说明已经放弃重试（必须人工处理）。
+	metricsReg.GaugeFunc("social_login_outbox_dead",
+		"投递重试耗尽的死信数（非 0 需要人工重投或丢弃）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			backlog, err := eventRepo.OutboxBacklog(ctx)
+			if err != nil {
+				logger.Warn("采集事件积压失败", zap.Error(err))
+				return 0
+			}
+			return float64(backlog["dead"])
+		})
+	metricsReg.GaugeFunc("social_login_outbox_pending",
+		"待投递事件数（持续升高说明投递跟不上）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			backlog, err := eventRepo.OutboxBacklog(ctx)
+			if err != nil {
+				logger.Warn("采集事件积压失败", zap.Error(err))
+				return 0
+			}
+			return float64(backlog["pending"])
+		})
+
+	metricsReg.GaugeFunc("social_login_merge_compensation_lag_seconds",
+		"最久未推进的合并操作已等待秒数（架构 §11 的 merge_compensation_lag_seconds）",
+		func() float64 {
+			ctx, cancel := gatherCtx()
+			defer cancel()
+			sec, err := mergeRepo.OldestPendingSeconds(ctx)
+			if err != nil {
+				logger.Warn("采集合并补偿滞后失败", zap.Error(err))
+				return 0
+			}
+			return sec
+		})
+
 	app.router = httpapi.NewRouter(httpapi.RouterDeps{
 		Handler:      h,
 		Tenant:       tenantSvc,
@@ -550,6 +688,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:       logger,
 		Admin:        adminDeps,
 		WebFS:        embedweb.FS(),
+		Metrics:      metricsReg,
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 	app.dispatcher = outboxDispatcher
@@ -591,6 +730,13 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer a.bgWG.Done()
 			a.compensator.Run(bgCtx)
+		}()
+	}
+	if a.appSync != nil {
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			a.appSync.Run(bgCtx)
 		}()
 	}
 
@@ -658,6 +804,12 @@ func (a *App) DB() *gorm.DB { return a.db }
 
 // Accounts 返回账号体系端口（集成测试用：构造 source/target 账号）。
 func (a *App) Accounts() domainaccount.Provider { return a.accounts }
+
+// AppSync 返回应用注册同步服务；nil 表示没有用户中心或同步已关闭。
+//
+// 暴露给集成测试：验收"对账之后这个应用才能在用户中心登录"时，需要一个
+// 能主动触发一轮对账的入口，而不是等 5 分钟的定时器。
+func (a *App) AppSync() *accountsync.Service { return a.appSync }
 
 // Redis 返回 Redis 客户端。
 func (a *App) Redis() *redis.Client { return a.rdb }

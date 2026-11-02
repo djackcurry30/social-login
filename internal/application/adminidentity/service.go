@@ -1,6 +1,6 @@
-// Package adminidentity 是管理端"身份与绑定（C 组）"用例。
+// Package adminidentity 是管理端"身份与绑定（C 组）+ 凭证一致性（J 组）"用例。
 //
-// 交付范围（架构 §15.4 C 组）：
+// C 组交付范围（架构 §15.4）：
 //
 //	GET    /admin/v1/identities                          多维查询身份
 //	GET    /admin/v1/identities/{id}                     详情（claims + 绑定历史）
@@ -8,6 +8,11 @@
 //	GET    /admin/v1/accounts/{externalUserId}/bindings  某账号全部绑定
 //	DELETE /admin/v1/bindings/{id}                       强制解绑（需 reason）
 //	POST   /admin/v1/bindings/{id}/transfer              transfer 旁路（需 reason）
+//
+// J 组在 claims.go 中（凭证查询 / 漂移记录 / 人工撤销）。两组放同一包，
+// 是因为它们共用同一批依赖（Claims / Bindings），且 J 组的每个动作
+// 都以"某条 claim 属于某个 identity"为前提——拆成两个包只会让
+// claimRepo 被注入两次。
 //
 // 为什么与合并同批交付（§13 第三期）：合并过后最常见的问题是"到底谁绑了谁"。
 // 没有查询入口，客服接到用户申诉只能靠连库；没有强制解绑，一个错误的
@@ -36,11 +41,18 @@ type Deps struct {
 	Identities  identity.AdminLister
 	IdentityGet identity.Repository
 	Claims      identity.ClaimRepository
-	Bindings    binding.AdminLister
-	Writer      binding.AdminWriter
-	AdminAudit  admin.AuditWriter
-	Logger      *zap.Logger
-	Now         func() time.Time
+	// ClaimAdmin 是 J 组的凭证多维查询（跨身份分页、含已撤销记录）。
+	// 与 Claims 分开：核心仓储只承担授权链路的精确操作。
+	ClaimAdmin identity.ClaimAdminLister
+	// Mismatches 是 J 组的凭证漂移记录（读 + 闭环）。为 nil 时
+	// ListMismatches 会明确报错而不是返回空列表——空列表会让运维
+	// 误以为"没有漂移"，这比报错危险。
+	Mismatches identity.MismatchRepository
+	Bindings   binding.AdminLister
+	Writer     binding.AdminWriter
+	AdminAudit admin.AuditWriter
+	Logger     *zap.Logger
+	Now        func() time.Time
 }
 
 // Service 是 C 组用例入口。
@@ -123,12 +135,22 @@ func (s *Service) ListIdentities(ctx context.Context, in IdentityListInput) (*Id
 //
 // value_hash 只返回前缀：完整哈希可用于离线比对（例如拿一批疑似手机号
 // 反查是否与库中某条匹配），没有必要完整暴露。
+//
+// AppID / IdentityID / Status 是 J 组列表需要的定位字段：
+// C 组的详情页里这些由上下文隐含（已经在某个身份下），但 J 组的列表是
+// 跨身份的，没有这几个字段就不知道点什么、也不知道该看哪是撤销状态。
 type ClaimItem struct {
-	ID   int64  `json:"id"`
-	Type string `json:"claim_type"`
+	ID         int64  `json:"id"`
+	AppID      int64  `json:"app_id"`
+	IdentityID int64  `json:"identity_id"`
+	Type       string `json:"claim_type"`
 	// 不回显凭证明文：库里只存哈希与信封加密后的密文（§8.5），
 	// 展示明文等于给"管理端账号被盗"额外送一批手机号。
-	ValueHash  string     `json:"value_hash_prefix,omitempty"`
+	ValueHash string `json:"value_hash_prefix,omitempty"`
+	// Status 是 verified / unverified / revoked 三态。
+	// 不由前端从 verified + revoked_at 自己推：撤销但 verified 仍为 true
+	// 的记录会让前端推错（撤销是置 revoked_at，不改 verified 位）。
+	Status     string     `json:"status"`
 	Verified   bool       `json:"verified"`
 	Source     string     `json:"source"`
 	VerifiedAt *time.Time `json:"verified_at,omitempty"`
@@ -183,22 +205,7 @@ func (s *Service) GetIdentity(ctx context.Context, appID, id int64) (*IdentityDe
 		return nil, err
 	}
 	for i := range claims {
-		c := &claims[i]
-		item := ClaimItem{
-			ID:         c.ID,
-			Type:       c.Type,
-			Verified:   c.Verified,
-			Source:     c.Source,
-			VerifiedAt: c.VerifiedAt,
-			RevokedAt:  c.RevokedAt,
-			CreatedAt:  c.CreatedAt,
-		}
-		if len(c.ValueHash) > 8 {
-			item.ValueHash = c.ValueHash[:8]
-		} else {
-			item.ValueHash = c.ValueHash
-		}
-		detail.Claims = append(detail.Claims, item)
+		detail.Claims = append(detail.Claims, toClaimItem(&claims[i]))
 	}
 
 	bindings, _, err := s.deps.Bindings.ListAdmin(ctx, binding.AdminFilter{
@@ -400,24 +407,35 @@ func toBindingItem(b *binding.Binding) BindingItem {
 func (s *Service) writeAudit(ctx context.Context, p *admin.Principal, action string, bindingID int64,
 	reason string, detail map[string]any, result string, cause error,
 ) {
+	s.writeAuditFor(ctx, p, "binding", action, fmt.Sprintf("%d", bindingID),
+		reason, nil, detail, result, cause)
+}
+
+// writeAuditFor 是 writeAudit 的泛化版本（J 组的 target_type 是 claim）。
+//
+// before / after 两个快照对应 §15.5 的"高危操作自动记录前后状态"：
+// 撤销凭证之后原记录只剩 revoked_at，事后想知道"当时它是不是已验证、
+// 来源是什么"就只能靠审计里的 before_state。
+func (s *Service) writeAuditFor(ctx context.Context, p *admin.Principal,
+	targetType, action, targetID, reason string,
+	before, after map[string]any, result string, cause error,
+) {
 	if s.deps.AdminAudit == nil {
 		return
 	}
 	m := reqmeta.From(ctx)
 	e := &admin.AuditEvent{
-		Action:     action,
-		TargetType: "binding",
-		TargetID:   fmt.Sprintf("%d", bindingID),
-		Reason:     reason,
-		AfterState: detail,
-		Result:     result,
-		TraceID:    m.TraceID,
-		ClientIP:   m.ClientIP,
+		Action:      action,
+		TargetType:  targetType,
+		TargetID:    targetID,
+		Reason:      reason,
+		BeforeState: before,
+		AfterState:  after,
+		Result:      result,
+		TraceID:     m.TraceID,
+		ClientIP:    m.ClientIP,
 	}
-	e.SubjectID = "admin:anonymous"
-	if p != nil && p.User != nil {
-		e.SubjectID = fmt.Sprintf("admin:%d", p.User.ID)
-	}
+	e.SubjectID = principalSubject(p)
 	if cause != nil {
 		if ee, ok := errs.As(cause); ok {
 			e.ErrorCode = string(ee.Code)

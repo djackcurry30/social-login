@@ -137,6 +137,8 @@ func (s *Service) resolveClaim(
 		// claim 指向的身份已不存在（数据清理 / 手工删除）。
 		// 不归并也不报错：这条 claim 已经没用，交给 J 组的漂移排查。
 		s.noteSkip(app, idn, c, "claim 指向的身份不存在")
+		s.noteMismatch(ctx, app, idn, claim, "", identity.MismatchIdentityMissing,
+			"", "", "claim 指向的 identity 已不存在（可能是数据清理或人工删除）")
 		return resolvedClaim{}, false, nil
 	}
 	if err != nil {
@@ -167,13 +169,22 @@ func (s *Service) resolveClaim(
 	}
 
 	// P0-6 回源核对：claim 表是"某次证明过"，不是"现在仍然如此"。
-	acc, err := s.deps.Accounts.GetByClaim(ctx, c)
+	//
+	// 带上 app.AppCode 是必须的：同一个手机号在别的应用里可能属于另一个人的
+	// 账号，全局反查会把"同号"直接译成"同一人"，跨应用串号。
+	acc, err := s.deps.Accounts.GetByClaim(ctx, app.AppCode, c)
 	switch {
 	case errors.Is(err, account.ErrNotFound):
 		s.noteSkip(app, idn, c, "用户中心未找到持有该凭证的账号")
+		// 最常见的一种漂移：用户在该业务系统里换了手机号。
+		// expected 取本地绑定所在账号——它回答"我们以为这个号属于谁"。
+		s.noteMismatch(ctx, app, idn, claim, other.Platform, identity.MismatchAccountNotFound,
+			b.ExternalUserID, "", "用户中心没有任何账号持有该凭证（可能已换号/解绑）")
 		return resolvedClaim{}, false, nil
 	case errors.Is(err, account.ErrMultipleAccounts):
 		// 命中多个账号：不能择一（§7.4 护栏），也不该静默放行。
+		s.noteMismatch(ctx, app, idn, claim, other.Platform, identity.MismatchMultipleAccounts,
+			b.ExternalUserID, "", "该凭证在用户中心命中多个账号")
 		return resolvedClaim{}, false, errs.New(errs.CodeAccountMultiple,
 			"该凭证在用户中心命中多个账号，已拒绝自动归并").
 			WithDetail("claim_type", c.Type)
@@ -194,6 +205,10 @@ func (s *Service) resolveClaim(
 				zap.String("account_user_id", acc.UserID),
 				zap.String("bound_user_id", b.ExternalUserID))
 		}
+		// 这是最危险的一类漂移：两边对"这个身份属于谁"的判断已经分叉。
+		// expected / actual 两边都填，运维据此判断该以哪边为准。
+		s.noteMismatch(ctx, app, idn, claim, other.Platform, identity.MismatchAccountMismatch,
+			b.ExternalUserID, acc.UserID, "用户中心返回的账号与本地绑定不一致")
 		return resolvedClaim{}, false, nil
 	}
 	if acc.Status != account.StatusActive {
@@ -320,4 +335,56 @@ func (s *Service) noteSkip(app *tenant.Application, idn *identity.Identity, c ac
 		zap.String("claim_type", c.Type),
 		zap.String("claim_source", c.Source),
 		zap.String("reason", why))
+}
+
+// noteMismatch 记录一条凭证漂移（§8.5），供 J 组排查。
+//
+// 与 noteSkip 的分工：noteSkip 是"这次没归并"的日志线索（量大、留不了多久），
+// noteMismatch 是"数据侧确实不一致"的持久证据（去重后每条 claim 一行，
+// 带 open/resolved 状态）。前者给开发看，后者给运营处理。
+//
+// 三个刻意的实现选择：
+//
+//  1. best-effort：写失败只打 Error，绝不让登录失败。漂移记录是旁路证据，
+//     主流程是"拒绝归并"，两者不该互相牵连。
+//  2. context.WithoutCancel：证据不该随请求取消而丢失。用户断网、前端超时
+//     都会取消入站 ctx，但"这里发生过一次不一致"是运维必须知道的事实。
+//  3. 3 秒上限：WithoutCancel 之后没有任何取消了，必须自己兜住超时，
+//     否则一次数据库抖动会让登录请求挂住。
+func (s *Service) noteMismatch(ctx context.Context, app *tenant.Application,
+	idn *identity.Identity, claim *identity.Claim, platform, kind, expected, actual, detail string) {
+	if s.deps.Mismatches == nil {
+		if s.deps.Logger != nil {
+			s.deps.Logger.Warn("凭证漂移记录未装配：本次核对失败只有日志，J 组页面看不到",
+				zap.Int64("app_id", app.ID), zap.Int64("claim_id", claim.ID),
+				zap.String("kind", kind))
+		}
+		return
+	}
+
+	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+
+	err := s.deps.Mismatches.Record(mctx, identity.MismatchRecordInput{
+		AppID:          app.ID,
+		ClaimID:        claim.ID,
+		IdentityID:     claim.IdentityID,
+		ClaimType:      claim.Type,
+		ValueHash:      claim.ValueHash,
+		Platform:       platform,
+		ClaimSource:    claim.Source,
+		Kind:           kind,
+		ExpectedUserID: expected,
+		ActualUserID:   actual,
+		Detail:         detail,
+		At:             time.Now().UTC(),
+	})
+	if err != nil && s.deps.Logger != nil {
+		s.deps.Logger.Error("写入凭证漂移记录失败（本次登录不受影响）",
+			zap.Int64("app_id", app.ID),
+			zap.Int64("identity_id", idn.ID),
+			zap.Int64("claim_id", claim.ID),
+			zap.String("kind", kind),
+			zap.Error(err))
+	}
 }

@@ -27,6 +27,46 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
+/**
+ * SyncBadge 显示该应用是否已注册到用户中心。
+ *
+ * 用户中心按 app_key 隔离账号空间，未注册的应用在其侧一律 400 APP.UNKNOWN
+ * ——也就是说"未同步"不是配置瑕疵，而是这个应用的登录全部不可用。
+ * 三个状态刻意区分开：
+ *   已同步（有成功时间） / 未同步（有失败原因） / 未知（从未尝试，例如 stub 模式）
+ */
+function SyncBadge({ app }: { app: Application }) {
+  const sync = app.AccountSync
+  const syncedAt = sync?.SyncedAt
+  const lastError = sync?.LastError
+
+  if (syncedAt) {
+    return (
+      <Badge
+        variant="success"
+        title={`上次同步：${new Date(syncedAt).toLocaleString()}`}
+      >
+        已同步
+      </Badge>
+    )
+  }
+  if (lastError) {
+    return (
+      <Badge variant="destructive" title={lastError}>
+        未同步
+      </Badge>
+    )
+  }
+  return (
+    <Badge
+      variant="secondary"
+      title="尚未同步过。若当前账号体系为内存桩（未接用户中心），可忽略"
+    >
+      —
+    </Badge>
+  )
+}
+
 export default function AppsPage() {
   const [items, setItems] = useState<Application[]>([])
   const [err, setErr] = useState<string | null>(null)
@@ -96,6 +136,7 @@ export default function AppsPage() {
                   <TableHead>AppCode</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>账号模式</TableHead>
+                  <TableHead>用户中心</TableHead>
                   <TableHead>更新时间</TableHead>
                 </TableRow>
               </TableHeader>
@@ -121,6 +162,9 @@ export default function AppsPage() {
                     </TableCell>
                     <TableCell className="text-xs">
                       {a.AccountMode}
+                    </TableCell>
+                    <TableCell>
+                      <SyncBadge app={a} />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(a.UpdatedAt).toLocaleString()}

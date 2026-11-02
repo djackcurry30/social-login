@@ -37,7 +37,14 @@ func (f *fakeIdentityRepo) FindByID(context.Context, int64, int64) (*identity.Id
 	return f.item, nil
 }
 
-type fakeClaims struct{ rows []identity.Claim }
+type fakeClaims struct {
+	rows []identity.Claim
+	// byID 供 J 组"按 id 撤销"用；缺失时返回 ErrNotFound。
+	byID     map[int64]*identity.Claim
+	findErr  error
+	revoked  []int64
+	revokeAt time.Time
+}
 
 func (f *fakeClaims) Insert(context.Context, identity.ClaimUpsertInput) (*identity.Claim, error) {
 	return nil, nil
@@ -45,10 +52,21 @@ func (f *fakeClaims) Insert(context.Context, identity.ClaimUpsertInput) (*identi
 func (f *fakeClaims) FindVerified(context.Context, int64, string, string) (*identity.Claim, error) {
 	return nil, identity.ErrNotFound
 }
+func (f *fakeClaims) FindByID(_ context.Context, _ int64, id int64) (*identity.Claim, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	if c, ok := f.byID[id]; ok {
+		return c, nil
+	}
+	return nil, identity.ErrNotFound
+}
 func (f *fakeClaims) ListByIdentity(context.Context, int64, int64) ([]identity.Claim, error) {
 	return f.rows, nil
 }
-func (f *fakeClaims) Revoke(context.Context, int64, int64, string, string, time.Time) error {
+func (f *fakeClaims) Revoke(_ context.Context, _ int64, identityID int64, _, _ string, at time.Time) error {
+	f.revoked = append(f.revoked, identityID)
+	f.revokeAt = at
 	return nil
 }
 

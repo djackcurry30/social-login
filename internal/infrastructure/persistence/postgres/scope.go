@@ -18,6 +18,7 @@ var scopedTables = map[string]bool{
 	"app_provider_configs": true,
 	"oauth_identities":     true,
 	"identity_claims":      true,
+	"claim_mismatches":     true,
 	"oauth_bindings":       true,
 	"refresh_tokens":       true,
 	"merge_operations":     true,

@@ -86,6 +86,20 @@ func (r *AppRepository) ListIDs(ctx context.Context, limit int) ([]int64, error)
 	return ids, nil
 }
 
+// Count 返回应用总数（管理端看板用）。
+//
+// 为什么单独一个方法而不是复用 ListIDs：看板要的是"多少个"，而 ListIDs
+// 有 500 上限——超过之后数字会永远停在 500，而且没人会注意到。
+// 曾经这里没接线，看板一直显示 0：库里有 160 个应用，页面上写 0。
+func (r *AppRepository) Count(ctx context.Context) (int64, error) {
+	ctx = appctx.WithCrossAppScope(ctx)
+	var n int64
+	if err := r.db.WithContext(ctx).Model(&applicationModel{}).Count(&n).Error; err != nil {
+		return 0, errs.Wrap(errs.CodeInternal, "统计应用数失败", err)
+	}
+	return n, nil
+}
+
 // --- 内部 helper（admin_repo 复用）---
 
 // 抑制 "imported and not used"——errors 在某些构建配置下被引用。

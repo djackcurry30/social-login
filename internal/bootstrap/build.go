@@ -2,11 +2,13 @@ package bootstrap
 
 import (
 	"encoding/base64"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	domainaccount "github.com/djackcurry30/social-login/internal/domain/account"
 	"github.com/djackcurry30/social-login/internal/domain/merge"
 	infraaccount "github.com/djackcurry30/social-login/internal/infrastructure/account"
@@ -171,13 +173,63 @@ func buildAccountProvider(cfg *Config, logger *zap.Logger) (domainaccount.Provid
 			"重启即丢失，且无法与真实用户中心对齐。仅限开发与集成测试")
 		return infraaccount.NewStubProvider(), nil
 	case "http":
-		// HTTPAccountProvider 属第三期交付（替换第一期的 Stub）。
-		// 这里显式报错而不是回退到 stub——回退会让生产环境以为是真实用户中心。
-		return nil, errs.New(errs.CodeConfigInvalid,
-			"account.provider=http 尚未实现（第三期交付 HTTPAccountProvider）")
+		// 真实用户中心。契约见 infrastructure/account/http.go 的文件头。
+		//
+		// 配置不完整时 NewHTTPProvider 返回 CONFIG.INVALID，这里直接透出——
+		// 绝不回退到 stub：回退会让生产环境"看起来在跑"，实际账号存在进程内存里，
+		// 重启即全部丢失。
+		p, err := infraaccount.NewHTTPProvider(infraaccount.HTTPConfig{
+			BaseURL: cfg.Account.HTTP.BaseURL,
+			Token:   cfg.Account.HTTP.Token,
+			Timeout: cfg.Account.HTTP.Timeout,
+			Logger:  logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Account.HTTP.Token == "" {
+			// 不是错误：内网联调环境可能确实没有鉴权。
+			// 但必须喊出来——生产缺 token 会被用户中心直接拒绝，
+			// 而现象是"所有登录都 ACCOUNT.UNAVAILABLE"，很难联想到鉴权。
+			logger.Warn("用户中心客户端未配置 Bearer token（account.http.token 为空）：" +
+				"仅适用于无鉴权的内网联调环境")
+		}
+		logger.Info("使用用户中心 HTTP 客户端",
+			zap.String("base_url", cfg.Account.HTTP.BaseURL),
+			zap.Duration("timeout", cfg.Account.HTTP.Timeout))
+		return p, nil
 	default:
 		return nil, errs.Newf(errs.CodeConfigInvalid, "未知的 account.provider: %s", cfg.Account.Provider)
 	}
+}
+
+// describeAccountCenter 生成管理端看板用的"账号体系现状"标记。
+//
+// 存在的意义：用户中心未就绪时服务跑在 stub 上，而 stub 与 http 在外部表现上
+// 几乎一样——都能登录成功、都能返回令牌。差别只在数据落到哪里：
+// stub 存在进程内存，重启即丢，且和真实账号没有任何关系。
+// 这种"看起来正常"的状态必须在运维每天都会看的地方显式标出来。
+func describeAccountCenter(cfg *Config) adminobs.AccountCenterInfo {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Account.Provider))
+	if mode == "" {
+		mode = "stub"
+	}
+	info := adminobs.AccountCenterInfo{Provider: mode}
+	if mode == "http" {
+		info.BaseURL = cfg.Account.HTTP.BaseURL
+		info.ProductionReady = true
+		switch {
+		case cfg.Account.HTTP.Token == "":
+			// 不是错误（内网联调确实可能没鉴权），但要说出来：
+			// 生产缺 token 的现象是"所有登录都 ACCOUNT.UNAVAILABLE"，极难联想。
+			info.Note = "已接用户中心，但未配置服务间鉴权 token"
+		default:
+			info.Note = "已接用户中心"
+		}
+		return info
+	}
+	info.Note = "账号为进程内存桩：重启即丢失，且无法与真实用户中心对齐；仅限开发与演示"
+	return info
 }
 
 // applyMigrations 执行数据库迁移。

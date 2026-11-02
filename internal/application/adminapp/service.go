@@ -28,6 +28,10 @@ type Deps struct {
 	TenantApps tenant.ApplicationRepository
 	AdminAudit admin.AuditWriter
 	Logger     *zap.Logger
+	// AppSync 在应用创建 / 启停后通知用户中心（旁路）。
+	//
+	// 为 nil 表示没有用户中心（stub 模式）或同步被显式关闭，此时不同步。
+	AppSync AppSyncNotifier
 	// Now 用于审计时间；测试时可注入。
 	Now func() time.Time
 	// ListAppIDs 注入仓储层"列出最近 N 个应用 id"的能力。
@@ -52,6 +56,23 @@ type Deps struct {
 // Service 是 A 组用例入口。
 type Service struct {
 	deps Deps
+}
+
+// AppSyncNotifier 是"应用变了，去用户中心同步一下"的旁路通知。
+//
+// 为什么在【消费方】定义这个接口，而不是直接依赖 accountsync 包：
+// A 组用例（应用与策略）不该知道"用户中心"这个概念的存在。它只说"我改了
+// 一个应用"，谁听、听了做什么由装配决定。这样换同步实现、或临时关掉同步，
+// 都不需要动 adminapp——也不会让 A 组的单测被迫拉起一套 HTTP 客户端。
+type AppSyncNotifier interface {
+	// NotifyAppChanged 只接受 app_code：应用的最新状态由同步任务自己回查。
+	//
+	// 传 app_code 而不是整个应用对象，是因为建完可能立刻被改（改名/停用），
+	// 队列里的快照就是过期的；回查只有一次主键查询的成本。
+	//
+	// 实现【必须是非阻塞的】：建应用不能因为用户中心故障而失败——建应用与
+	// 登录是两条独立链路，用户中心挂了恰恰是最需要能改配置的时刻。
+	NotifyAppChanged(appCode string)
 }
 
 // New 构造服务。
@@ -94,8 +115,13 @@ type AppView struct {
 	Status      int16         `json:"Status"`
 	AccountMode string        `json:"AccountMode"`
 	Policy      tenant.Policy `json:"Policy"`
-	CreatedAt   time.Time     `json:"CreatedAt"`
-	UpdatedAt   time.Time     `json:"UpdatedAt"`
+	// AccountSync 是该应用在用户中心的注册状态（运维字段，不是业务字段）。
+	//
+	// 为什么展示在列表里：同步是旁路的（失败不阻塞建应用），不展示出来的话，
+	// 运维要等"这个应用的登录全部失败"才知道它根本没注册上。
+	AccountSync tenant.AccountSyncState `json:"AccountSync"`
+	CreatedAt   time.Time               `json:"CreatedAt"`
+	UpdatedAt   time.Time               `json:"UpdatedAt"`
 }
 
 // toAppView 把领域模型投影成对外视图（白名单，天然屏蔽 AppSecretHash）。
@@ -110,6 +136,7 @@ func toAppView(a *tenant.Application) *AppView {
 		Status:      a.Status,
 		AccountMode: a.AccountMode,
 		Policy:      a.Policy,
+		AccountSync: a.AccountSync,
 		CreatedAt:   a.CreatedAt,
 		UpdatedAt:   a.UpdatedAt,
 	}
@@ -178,6 +205,10 @@ func (s *Service) CreateApp(ctx context.Context, in CreateAppInput) (*CreateAppO
 	s.writeAudit(ctx, in.Principal, "app.create", "application", fmt.Sprintf("%d", created.ID),
 		in.Reason, nil, appToState(created), "success", nil)
 
+	// 旁路同步。放在审计之后、返回之前：审计失败不该发生（它会 panic 级报错），
+	// 而同步必须发生在"应用已经可登录"之前——它决定了这个应用能不能登录。
+	s.notifyAppChanged(created.AppCode)
+
 	return &CreateAppOutput{App: toAppView(created), AppSecret: secret}, nil
 }
 
@@ -222,6 +253,11 @@ func (s *Service) UpdateApp(ctx context.Context, appID int64, in UpdateAppInput)
 	}
 	s.writeAudit(ctx, in.Principal, "app.update", "application", fmt.Sprintf("%d", appID),
 		in.Reason, before, appToState(updated), "success", nil)
+
+	// 停用 / 启用同样要同步：用户中心需要知道应用状态变了。
+	// 停用只改本地而不告知对端时，对端会继续认为该应用可用——两侧状态不一致，
+	// 排查时"本地明明停了"与"对端还能用"会同时成立。
+	s.notifyAppChanged(updated.AppCode)
 	return toAppView(updated), nil
 }
 
@@ -450,6 +486,22 @@ func containsFold(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// notifyAppChanged 是"应用变了"的旁路通知。
+//
+// 三个刻意的选择：
+//
+//  1. AppSync 为 nil 时静默返回。nil 是合法状态（stub 模式没有用户中心，
+//     或运维显式关闭了同步），不是配置错误——为它报错会让演示环境无法启动。
+//  2. 不返回错误、不记录到主流程。同步失败有自己的状态字段与日志，
+//     绝不能让"用户中心不可用"变成"建不了应用"。
+//  3. 只传 app_code。最新状态由同步任务自己回查（见 AppSyncNotifier 的注释）。
+func (s *Service) notifyAppChanged(appCode string) {
+	if s.deps.AppSync == nil || appCode == "" {
+		return
+	}
+	s.deps.AppSync.NotifyAppChanged(appCode)
 }
 
 // writeAudit 是内部审计写 helper。

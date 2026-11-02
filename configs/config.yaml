@@ -62,11 +62,41 @@ jwt:
   #     private_key_file: "/etc/social-login/keys/k-2026-10.pem"
 
 account:
-  # stub = 内存桩（仅开发/测试）；http = 真实用户中心（第三期交付）。
+  # stub = 内存桩（仅开发/演示/测试；账号存进程内存，重启即丢失）
+  # http = 真实用户中心（生产必须用这个；生产模式下 stub 会被启动自检拒绝）
+  #
+  # ⚠️ 从 stub 切到 http 时，务必同时确认：
+  #   1. 用户中心的 /accounts 系列接口符合 infrastructure/account/http.go 文件头的契约
+  #   2. GetByClaim 指向主库（强一致读），不能是延迟从库
+  #   3. Merge 真正按 Idempotency-Key 去重
+  # 这三条不是"建议"，是归并与补偿正确性的前提。
   provider: "stub"
   http:
+    # 用户中心根地址，例如 https://uc.internal 或 http://uc:8080
     base_url: ""
+    # 服务间鉴权 Bearer token。生产由密钥管理系统注入环境变量：
+    #   SOCIAL_LOGIN_ACCOUNT_HTTP_TOKEN
+    # 留空只适用于无鉴权的内网联调环境（启动时会打 Warn）。
+    token: ""
+    # 单次调用总超时。用户中心是登录链路的同步依赖，
+    # 比渠道调用更紧（整条链路预算 8s，Exchange+UserInfo 已占 5s）。
     timeout: "3s"
+  # 应用注册同步（契约 v1.1 §2.6）。
+  #
+  # 用户中心按 app_key 隔离账号空间，未注册的应用一律 400 APP.UNKNOWN。
+  # 所以"应用已注册"是登录的前置条件，不是一个可选的便利功能。
+  # provider=stub 时本段自动不生效（桩没有"注册"这回事）。
+  sync:
+    # 关掉它属于应急手段：新建应用不会注册，这些应用的登录会被拒绝。
+    # 关闭时启动日志会打 Warn，请不要长期关着。
+    enabled: true
+    # 全量对账周期。它会逐个 upsert 全部应用，过密会把对端写压力放大；
+    # 同时这也是"对端数据漂移"的最长无感时间，不宜过长。下限 10s。
+    interval: "5m"
+    # 单次注册调用超时（与登录链路一致，3s）。
+    timeout: "3s"
+    # 单轮对账并发数。串行在应用多时跑不完一个周期，全并发又会形成尖峰。
+    workers: 4
 
 auth:
   # 用于筛选 app_provider_configs.env。

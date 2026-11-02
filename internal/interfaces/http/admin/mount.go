@@ -135,6 +135,21 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			api.GET("/accounts/:externalUserId/bindings", adminmw.Require("binding:read"), idH.ListAccountBindings)
 			api.DELETE("/bindings/:id", adminmw.Require("binding:write"), idH.ForceUnbind)
 			api.POST("/bindings/:id/transfer", adminmw.Require("binding:transfer"), idH.Transfer)
+
+			// J 组：凭证一致性（§15.4）
+			//
+			// /claims/mismatches 必须注册在 /claims/:id 之前——虽然当前没有
+			// /claims/:id（只有 /:id/revoke，段数不同不会撞），但保持"静态段
+			// 优先"的顺序，避免将来加 GET /claims/:id 时把 "mismatches"
+			// 当成 claim id 吃掉。与 H 组 /audit-logs/admin 同一约定。
+			//
+			// 撤销的权限是 identity:write 而不是 binding:write：
+			// 改的是"归并依据"，影响的是未来登录会归并到哪个账号，
+			// 与解绑（改当前绑定关系）不是同一类风险，但同属运营可执行的写操作。
+			cH := handler.NewClaimsHandler(deps.AdminIdentity, deps.Logger)
+			api.GET("/claims", adminmw.Require("identity:read"), cH.ListClaims)
+			api.GET("/claims/mismatches", adminmw.Require("identity:read"), cH.ListMismatches)
+			api.POST("/claims/:id/revoke", adminmw.Require("identity:write"), cH.RevokeClaim)
 		}
 
 		// K 组：管理员授权（§15.4）

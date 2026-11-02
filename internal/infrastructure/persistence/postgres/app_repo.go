@@ -104,6 +104,15 @@ func (r *AppRepository) Upsert(ctx context.Context, app *tenant.Application) (*t
 	if err != nil {
 		return nil, errs.Wrap(errs.CodeInternal, "保存应用失败", err)
 	}
+	// 回读一次再返回。
+	//
+	// 原因：uc_synced_at / uc_sync_error 是 00007 加的运维字段，刻意【不在
+	// 上面的 DoUpdates 写集合里】（同步任务自己维护它们，改名不该把同步状态
+	// 冲掉）。GORM 的 Create 只会把写入的列回填到 m，这两列在 m 里是零值。
+	// 如果不回读，管理端改完应用名就会看到"用户中心：未同步"——一个假的告警。
+	if stored, err := r.FindByID(ctx, m.ID); err == nil {
+		return stored, nil
+	}
 	return appToDomain(&m), nil
 }
 
@@ -116,8 +125,12 @@ func appToDomain(m *applicationModel) *tenant.Application {
 		Status:        m.Status,
 		AccountMode:   m.AccountMode,
 		Policy:        policyFromModel(m.Policy),
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
+		AccountSync: tenant.AccountSyncState{
+			SyncedAt:  m.UCSyncedAt,
+			LastError: derefStr(m.UCSyncError),
+		},
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
 	}
 }
 

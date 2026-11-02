@@ -11,9 +11,17 @@
 #  默认管理员：admin / admin12345（可用下方 ADMIN_PASSWORD 覆盖）
 #
 #  启动顺序由 depends_on 强制编排：
-#    pg(healthy) ─┐
+#    pg(healthy) ─► uc-db(一次性，建 user_center 库) ─► usercenter
 #                 ├─► migrate(一次性) ─► adminseed(一次性) ─► app
 #    redis(healthy)┘
+#
+#  用户中心（usercenter）与登录服务是两个进程、两个数据库：
+#    social-login  →  http://localhost:8080   （登录/授权/令牌/绑定）
+#    usercenter    →  http://localhost:8099   （账号主数据，/healthz /readyz /metrics）
+#
+#  默认 ACCOUNT_PROVIDER=stub（账号在登录服务进程内存里）。要跑完整链路：
+#    ACCOUNT_PROVIDER=http docker compose up -d
+#  此时登录服务会通过注册同步把应用推到 usercenter（首次对账可能需要几秒）。
 #
 #  ⚠️ 本文件只用于本地开发：
 #     - 数据库口令、开发主密钥都是明文默认值，生产必须换掉；
@@ -95,6 +103,29 @@ services:
       pg:
         condition: service_healthy
 
+  # 用户中心用独立数据库。pg 的 POSTGRES_DB 只会建一个库，
+  # 而 compose 的初始化脚本只在数据卷为空时执行——对已经存在的 pg-data
+  # 无效。所以用一次性容器显式建库（幂等：存在则跳过）。
+  uc-db:
+    image: ${REGISTRY:-docker.m.daocloud.io/library}/postgres:16-alpine
+    environment:
+      PGPASSWORD: postgres
+    # 用数组形式 + 字面块（|），不要折叠（>）：
+    # 折叠会把多行拼成一行，而里面嵌套的双引号在 plain scalar 里会被当成
+    # 字面字符（`\"` 不会变成引号），sh 直接报 `unexpected "||"`。
+    command:
+      - sh
+      - -c
+      - |
+        if psql -h pg -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'user_center'" | grep -q 1; then
+          echo "user_center 已存在，跳过"
+        else
+          psql -h pg -U postgres -d postgres -c "CREATE DATABASE user_center"
+        fi
+    depends_on:
+      pg:
+        condition: service_healthy
+
   adminseed:
     <<: *app
     command:
@@ -118,6 +149,12 @@ services:
     command: ["/app/bin/social-login", "-config", "/app/configs/config.yaml"]
     environment:
       <<: *app-env
+      # 账号体系：stub = 进程内存（默认，重启即丢）；http = 真实用户中心。
+      # 切成 http 前确认 usercenter 已健康，否则该应用所有登录都会
+      # ACCOUNT.UNAVAILABLE（应用未注册时是 APP.UNKNOWN，不可重试）。
+      SOCIAL_LOGIN_ACCOUNT_PROVIDER: ${ACCOUNT_PROVIDER:-stub}
+      SOCIAL_LOGIN_ACCOUNT_HTTP_BASE_URL: ${ACCOUNT_BASE_URL:-http://usercenter:8099}
+      SOCIAL_LOGIN_ACCOUNT_HTTP_TOKEN: ${UC_TOKEN:-dev-usercenter-token}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
@@ -133,6 +170,36 @@ services:
       redis:
         condition: service_healthy
       adminseed:
+        condition: service_completed_successfully
+
+  # ---------- 用户中心（账号主数据） ----------
+
+  usercenter:
+    <<: *app
+    command: ["/app/bin/usercenter", "-config", "/app/configs/usercenter.yaml"]
+    environment:
+      # 独立库：与 social-login 不共享表，跨服务只走 HTTP 契约。
+      UC_DATABASE_DSN: postgres://postgres:postgres@pg:5432/user_center?sslmode=disable
+      UC_SECURITY_SERVICE_TOKEN: ${UC_TOKEN:-dev-usercenter-token}
+      # 本地固定主密钥，避免重启后已入库的凭据解不开。
+      # ⚠️ 仅本地：生产必须由密钥管理系统注入 UC_SECURITY_MASTER_KEY。
+      UC_SECURITY_MASTER_KEY: ${UC_MASTER_KEY:-dSmcH26cwhbLBQSMCD2/E3NV9Hs4c8Bmz+E75YP4Uo4=}
+      UC_MIGRATE_ENABLED: "true"
+    ports:
+      - "${UC_PORT:-8099}:8099"
+    # 镜像里的 HEALTHCHECK 打的是 8080（social-login 的端口）。
+    # 不覆盖的话本容器会一直是 unhealthy，编排层据此拒绝放流量——
+    # 而服务其实完全正常，这类"健康检查打错端口"的故障最难联想到。
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8099/readyz"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
+    depends_on:
+      pg:
+        condition: service_healthy
+      uc-db:
         condition: service_completed_successfully
 
 volumes:

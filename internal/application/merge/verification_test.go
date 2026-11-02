@@ -108,6 +108,7 @@ func newVerifySvc(t *testing.T) (*Service, *fakeAccountWithPhone, *fakeTicketSto
 	tk := &fakeTicketStore{ticket: &ticket.MergeTicket{
 		Ticket:       "mtk_1",
 		AppID:        3,
+		AppCode:      "app_test",
 		TargetUserID: "user-C",
 		SourceUserID: "user-B",
 		IdentityID:   9,
@@ -137,9 +138,13 @@ func newVerifySvc(t *testing.T) (*Service, *fakeAccountWithPhone, *fakeTicketSto
 type fakeAccountWithPhone struct {
 	phone string
 	err   error
+	// lastAppKey 记录收到的应用标识：发码前查手机号必须限定在 ticket 所属应用内，
+	// 否则会拿到别的应用里同 id 账号的手机号。
+	lastAppKey string
 }
 
-func (f *fakeAccountWithPhone) Get(context.Context, string) (*account.Account, error) {
+func (f *fakeAccountWithPhone) Get(_ context.Context, appKey, _ string) (*account.Account, error) {
+	f.lastAppKey = appKey
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -149,7 +154,7 @@ func (f *fakeAccountWithPhone) Get(context.Context, string) (*account.Account, e
 	}
 	return &account.Account{UserID: "user-B", Status: account.StatusActive, Claims: claims}, nil
 }
-func (f *fakeAccountWithPhone) GetByClaim(context.Context, account.Claim) (*account.Account, error) {
+func (f *fakeAccountWithPhone) GetByClaim(context.Context, string, account.Claim) (*account.Account, error) {
 	return nil, account.ErrNotFound
 }
 func (f *fakeAccountWithPhone) Create(context.Context, account.CreateRequest) (*account.Account, error) {
@@ -181,7 +186,7 @@ func TestStartSMSRequiresVerifiedPhone(t *testing.T) {
 }
 
 func TestStartSMSSendsMaskedCode(t *testing.T) {
-	svc, _, _, ch, sd := newVerifySvc(t)
+	svc, acc, _, ch, sd := newVerifySvc(t)
 
 	out, err := svc.StartSMSVerification(context.Background(), StartVerificationInput{
 		TicketID: "mtk_1", CallerUserID: "user-C",
@@ -201,6 +206,11 @@ func TestStartSMSSendsMaskedCode(t *testing.T) {
 	// 挑战里只能有哈希，不能有明文码。
 	if ch.saved.CodeHash == "" || ch.saved.CodeHash == sd.sent[0].Code {
 		t.Fatal("挑战必须只保存哈希")
+	}
+	// 查手机号必须限定在 ticket 所属应用内：user_id 只在应用内唯一，
+	// 不带应用前缀会拿到别的应用里同 id 账号的手机号并发码。
+	if acc.lastAppKey != "app_test" {
+		t.Fatalf("应按票据所属应用查询，实际 appKey=%q", acc.lastAppKey)
 	}
 }
 

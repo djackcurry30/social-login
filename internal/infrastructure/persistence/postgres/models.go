@@ -93,6 +93,10 @@ type applicationModel struct {
 	Policy        JSONMap   `gorm:"column:policy;type:jsonb"`
 	CreatedAt     time.Time `gorm:"column:created_at"`
 	UpdatedAt     time.Time `gorm:"column:updated_at"`
+
+	// 用户中心注册同步状态（00007）。两个都是运维字段，业务逻辑不读。
+	UCSyncedAt  *time.Time `gorm:"column:uc_synced_at"`
+	UCSyncError *string    `gorm:"column:uc_sync_error"`
 }
 
 func (applicationModel) TableName() string { return "applications" }
@@ -324,3 +328,32 @@ type mergeOperationModel struct {
 }
 
 func (mergeOperationModel) TableName() string { return "merge_operations" }
+
+// claimMismatchModel 是凭证漂移记录（00006_claim_mismatch.sql）。
+//
+// occurrences / first_seen_at / last_seen_at 三个字段是这张表的重点：
+// 漂移是【持续状态】，同一条 claim 每次登录命中都只累加计数，
+// 因此"还有几条未闭环"才能成为可信的指标。
+type claimMismatchModel struct {
+	ID             int64      `gorm:"column:id;primaryKey"`
+	AppID          int64      `gorm:"column:app_id"`
+	ClaimID        int64      `gorm:"column:claim_id"`
+	IdentityID     int64      `gorm:"column:identity_id"`
+	ClaimType      string     `gorm:"column:claim_type"`
+	ClaimValueHash string     `gorm:"column:claim_value_hash"`
+	Platform       string     `gorm:"column:platform"`
+	ClaimSource    string     `gorm:"column:claim_source"`
+	Kind           string     `gorm:"column:kind"`
+	ExpectedUserID *string    `gorm:"column:expected_user_id"`
+	ActualUserID   *string    `gorm:"column:actual_user_id"`
+	Detail         *string    `gorm:"column:detail"`
+	Status         string     `gorm:"column:status"`
+	Occurrences    int        `gorm:"column:occurrences"`
+	FirstSeenAt    time.Time  `gorm:"column:first_seen_at"`
+	LastSeenAt     time.Time  `gorm:"column:last_seen_at"`
+	ResolvedAt     *time.Time `gorm:"column:resolved_at"`
+	ResolvedBy     *string    `gorm:"column:resolved_by"`
+	Resolution     *string    `gorm:"column:resolution"`
+}
+
+func (claimMismatchModel) TableName() string { return "claim_mismatches" }

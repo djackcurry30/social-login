@@ -108,11 +108,54 @@ type ClaimRepository interface {
 	// FindVerified 按已验证凭证反查归属身份。未找到返回 ErrNotFound。
 	FindVerified(ctx context.Context, appID int64, claimType, valueHash string) (*Claim, error)
 
+	// FindByID 按主键查找（app_id 是必需的隔离条件）。
+	// J 组的"人工撤销某条 claim"从管理端拿到的只有 id。
+	FindByID(ctx context.Context, appID, id int64) (*Claim, error)
+
 	// ListByIdentity 列出某身份的全部有效凭证。
 	ListByIdentity(ctx context.Context, appID, identityID int64) ([]Claim, error)
 
 	// Revoke 撤销某身份下的指定凭证（换号/解绑）。
 	Revoke(ctx context.Context, appID, identityID int64, claimType, valueHash string, at time.Time) error
+}
+
+// ClaimAdminQuery 是管理端 J 组的凭证查询条件（与关系）。
+//
+// 为什么不复用 ListByIdentity：那个方法只服务"某身份的详情页"，恒为
+// revoked_at IS NULL 且不支持跨身份分页；运维排查需要看【已撤销】的记录
+// （"这个号为什么被释放了"），也要能按类型 / 应用跨身份翻页。
+type ClaimAdminQuery struct {
+	AppID      int64
+	ClaimType  string
+	IdentityID int64
+	// Status 是 verified / unverified / revoked / ""（全部）。
+	Status   string
+	Page     int
+	PageSize int
+}
+
+// 管理端凭证状态筛选取值。
+const (
+	ClaimStatusVerified   = "verified"
+	ClaimStatusUnverified = "unverified"
+	ClaimStatusRevoked    = "revoked"
+)
+
+// IsValidClaimStatusFilter 判断状态筛选值是否合法。
+func IsValidClaimStatusFilter(s string) bool {
+	switch s {
+	case "", ClaimStatusVerified, ClaimStatusUnverified, ClaimStatusRevoked:
+		return true
+	}
+	return false
+}
+
+// ClaimAdminLister 是管理端凭证查询端口。
+//
+// 与 AdminLister 同构：核心 Repository 只承担授权链路需要的精确操作，
+// 运维的多维分页查询单独成接口。
+type ClaimAdminLister interface {
+	ListAdmin(ctx context.Context, q ClaimAdminQuery) ([]Claim, int64, error)
 }
 
 // ErrClaimTaken 表示该凭证已被另一个身份验证过（唯一索引冲突）。

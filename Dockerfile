@@ -5,7 +5,9 @@
 #    /app/bin/social-login   HTTP 服务（含 /admin 前端）
 #    /app/bin/migrate        数据库迁移（init 容器用）
 #    /app/bin/adminseed      写入本地管理员（init 容器用）
+#    /app/bin/usercenter     用户中心（账号主数据服务，独立数据库）
 #    /app/configs/config.yaml 默认配置（compose 用环境变量覆盖）
+#    /app/configs/usercenter.yaml 用户中心默认配置
 #
 #  构建：docker build -t social-login:local .
 #  或：  docker compose up --build
@@ -76,6 +78,8 @@ RUN set -eux; \
     go build -trimpath -ldflags "${LDFLAGS}" -o /out/social-login ./cmd/server; \
     go build -trimpath -ldflags "-s -w"    -o /out/migrate      ./cmd/migrate; \
     go build -trimpath -ldflags "-s -w"    -o /out/adminseed    ./cmd/adminseed; \
+    go build -trimpath -ldflags "-s -w -X github.com/djackcurry30/social-login/internal/usercenter/app.Version=${VERSION}" \
+             -o /out/usercenter ./cmd/usercenter; \
     ls -lh /out
 
 
@@ -99,7 +103,9 @@ WORKDIR /app
 COPY --from=go-builder /out/social-login /app/bin/social-login
 COPY --from=go-builder /out/migrate      /app/bin/migrate
 COPY --from=go-builder /out/adminseed    /app/bin/adminseed
+COPY --from=go-builder /out/usercenter   /app/bin/usercenter
 COPY configs/config.yaml /app/configs/config.yaml
+COPY configs/usercenter.yaml /app/configs/usercenter.yaml
 
 # 运行用户不写文件，目录只读即可——除了审计导出目录。
 #

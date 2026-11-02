@@ -74,11 +74,11 @@ type fakeAccounts struct {
 	last   account.MergeRequest
 }
 
-func (f *fakeAccounts) Get(context.Context, string) (*account.Account, error) {
+func (f *fakeAccounts) Get(context.Context, string, string) (*account.Account, error) {
 	return nil, account.ErrNotFound
 }
 
-func (f *fakeAccounts) GetByClaim(context.Context, account.Claim) (*account.Account, error) {
+func (f *fakeAccounts) GetByClaim(context.Context, string, account.Claim) (*account.Account, error) {
 	return nil, account.ErrNotFound
 }
 

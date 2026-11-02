@@ -1,0 +1,54 @@
+# 用户中心（账号主数据服务）· 本地开发配置
+#
+# ⚠️ 本文件【不得包含真实密钥】。生产用环境变量覆盖（前缀 UC_）：
+#     UC_DATABASE_DSN / UC_SECURITY_SERVICE_TOKEN / UC_SECURITY_MASTER_KEY
+#
+# 与 social-login 的配置完全独立：本服务没有 Redis、没有 JWT、没有渠道配置。
+# 共用一份配置文件会让"这里有但代码不读"的字段混进来，那是最容易骗过运维的东西。
+
+server:
+  # 与 social-login 的 8080 分开，便于同时在本机起两个服务联调。
+  addr: "0.0.0.0:8099"
+  # debug 会放宽若干"生产必须项"（允许临时密钥），并关闭 gin 的调试输出。
+  mode: "debug"
+  shutdown_timeout: "15s"
+  # 本服务的请求体只有几十字节，64KB 已经非常宽松。
+  max_body_bytes: 65536
+
+database:
+  # 独立数据库：本服务与 social-login 不共享表、不跨库 join。
+  # 本地 compose 里 PG 映射到 15432，库名 user_center 需先创建
+  # （见 scripts/dev-usercenter.sh）。
+  dsn: "postgres://postgres:postgres@127.0.0.1:15432/user_center?sslmode=disable"
+  max_conns: 20
+  min_conns: 2
+  max_conn_lifetime: "1h"
+  max_conn_idle_time: "10m"
+  connect_timeout: "5s"
+  # 服务端语句超时，必须明显小于消费方的 3s 调用超时：
+  # 让"我们卡住了"在我们的日志里可见，而不是只在对方那里表现为超时。
+  statement_timeout: "2s"
+
+security:
+  # 服务间鉴权 Bearer token（服务级，不区分应用）。
+  # 生产必须配置且由密钥管理系统注入；本地固定一个便于脚本联调。
+  service_token: "dev-usercenter-token"
+  # 凭证哈希的静态盐。⚠️ 必须稳定：换盐等于让所有历史凭证的 hash 失效。
+  claim_salt: "dev-usercenter-claim-salt-do-not-use-in-prod"
+  # 信封加密的密钥版本，写入 account_claims.dek_id。
+  kek_id: "uc-kek-v1"
+  # AES-256 主密钥（Base64）。留空时 debug 模式临时生成并打印警告——
+  # 重启后旧密文无法解密，仅限本地。下面这把是本地开发专用的固定密钥，
+  # 只为"重启后仍能解开本地数据"，**不得用于任何共享环境**。
+  master_key: "dSmcH26cwhbLBQSMCD2/E3NV9Hs4c8Bmz+E75YP4Uo4="
+
+log:
+  level: "info"
+  format: "console"
+  # 留空输出到 stdout（容器里应由编排层收集）。配了才写文件，且不做切割。
+  file: ""
+
+migrate:
+  # 本地开启，启动时自动建表。
+  # ⚠️ 生产必须为 false：多副本滚动发布时并发迁移会互相抢锁。
+  enabled: true

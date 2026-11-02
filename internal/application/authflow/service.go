@@ -67,6 +67,12 @@ type Deps struct {
 	//
 	// 为 nil 时冲突一律按"拒绝"处理——不允许因为少装一个依赖就静默放行。
 	Merge MergeExecutor
+	// Mismatches 是 J 组的凭证漂移记录写入端口（§8.5）。
+	//
+	// 只写不读：登录链路关心的是"把这次核对失败记录下来"，查询与闭环
+	// 属于管理端（adminidentity）。为 nil 时跳过记录并打 Warn——
+	// 漂移记录是旁路证据，不能因为它缺装就让登录失败。
+	Mismatches identity.MismatchRecorder
 }
 
 // MergeExecutor 是账号合并的端口（实现见 application/merge）。

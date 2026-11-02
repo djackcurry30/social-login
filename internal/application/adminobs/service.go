@@ -63,9 +63,43 @@ type Deps struct {
 	CircuitStates func() []breaker.State
 	// ResetCircuit 手工复位某个平台的熔断器。
 	ResetCircuit func(platform string) bool
+	// OpenMismatches 返回未闭环的凭证漂移数（J 组）。
+	//
+	// 独立成函数而不是复用 OverviewGetter：漂移数是全局的单个数字，
+	// 而 OverviewGetter 返回的是一整个结构（它被调用方用来补 apps_count）。
+	// 打两个洞不如各给一个明确的口子。
+	//
+	// 为 nil 或返回错误时看板该字段显示 0 并打 warn——指标取不到
+	// 不该让整个 overview 500，那样运维连渠道健康都看不到了。
+	OpenMismatches func(ctx context.Context) (int64, error)
+	// AccountCenter 描述账号体系当前接的是什么（桩 / 真实用户中心）。
+	//
+	// 为什么放进 I 组看板：用户中心未就绪期间服务跑在 stub 上——账号存在
+	// 进程内存里、重启即丢、无法与真实账号对齐。这种状态若只写在配置文件里，
+	// 上线检查时没人会翻；摆在每天都要扫一眼的看板上，才会被处理。
+	AccountCenter AccountCenterInfo
 	// AdminAudit 写管理审计（circuit-reset 是写操作，必须留痕）。
 	AdminAudit admin.AuditWriter
 	Logger     *zap.Logger
+}
+
+// AccountCenterInfo 是账号体系的"当前实现"标记。
+//
+// 这不是健康检查：它不发起任何网络调用，只反映【装配时用了哪种实现】。
+// 之所以要有它，是因为 stub 与 http 在外部表现上几乎一样（都能登录成功），
+// 唯一的区别在数据落在哪里——而那恰恰是要命的地方。
+type AccountCenterInfo struct {
+	// Provider 取 config 里的 account.provider：stub | http。
+	Provider string `json:"provider"`
+	// BaseURL 仅 http 时有值，用来回答"到底连的是哪套用户中心"。
+	BaseURL string `json:"base_url,omitempty"`
+	// ProductionReady 表示"接的是真实用户中心"。
+	//
+	// ⚠️ 它【不代表连通性】。用户中心挂了但进程还在跑时，这里仍是 true；
+	// 连通性要看登录链路的实际错误码（ACCOUNT.UNAVAILABLE）。
+	ProductionReady bool `json:"production_ready"`
+	// Note 是一句人话解释，直接给看板展示，避免每个读的人自己推断。
+	Note string `json:"note,omitempty"`
 }
 
 // Service 是 I 组用例入口。
@@ -197,12 +231,21 @@ type OverviewStats struct {
 	HealthyProviders   int            `json:"healthy_providers"`
 	UnhealthyProviders int            `json:"unhealthy_providers"`
 	ByPlatform         map[string]int `json:"by_platform"`
+	// ClaimMismatchOpen 是未闭环的凭证漂移数（§8.5 的 claim_mismatch_total）。
+	//
+	// 非 0 不代表系统故障，代表有一批用户本该被自动归并、却因为本地记录与
+	// 用户中心对不上被拦住了。这个数字放在总览里，是为了让它有人看见——
+	// 只在 J 组页面里躺着，运维不会主动点进去。
+	ClaimMismatchOpen int64 `json:"claim_mismatch_open"`
+	// AccountCenter 标记账号体系当前接的是桩还是真实用户中心。
+	AccountCenter AccountCenterInfo `json:"account_center"`
 }
 
 // Overview 关键指标摘要。
 func (s *Service) Overview(ctx context.Context) (OverviewStats, error) {
 	stats := OverviewStats{
-		ByPlatform: make(map[string]int),
+		ByPlatform:    make(map[string]int),
+		AccountCenter: s.deps.AccountCenter,
 	}
 	ps := s.ListProviders()
 	stats.ProviderCount = len(ps)
@@ -225,6 +268,19 @@ func (s *Service) Overview(ctx context.Context) (OverviewStats, error) {
 		extra, err := s.deps.OverviewGetter(ctx)
 		if err == nil {
 			stats.AppsCount = extra.AppsCount
+		}
+	}
+	if s.deps.OpenMismatches != nil {
+		n, err := s.deps.OpenMismatches(ctx)
+		switch {
+		case err != nil:
+			// 单个指标取不到不能让整个看板挂掉：运维这时更需要的是
+			// 渠道健康状态，而不是一个精确的漂移数。
+			if s.deps.Logger != nil {
+				s.deps.Logger.Warn("读取未闭环凭证漂移数失败", zap.Error(err))
+			}
+		default:
+			stats.ClaimMismatchOpen = n
 		}
 	}
 	return stats, nil

@@ -127,6 +127,9 @@ import type {
   AdminGrant,
   EventListOutput,
   EventOutboxItem,
+  ClaimListOutput,
+  MismatchListOutput,
+  ClaimItem,
 } from '@/lib/types'
 
 export const AuthApi = {
@@ -484,4 +487,43 @@ export const EventsApi = {
       method: 'POST',
       body: JSON.stringify({ reason }),
     }),
+}
+
+// --- J 组：凭证一致性 ---
+
+export const ClaimsApi = {
+  list: (q: {
+    app_id?: number
+    claim_type?: string
+    identity_id?: number
+    status?: string
+    page?: number
+    page_size?: number
+  }) => api<ClaimListOutput>(`/claims${qs(q)}`),
+  /**
+   * 漂移记录（回源核对失败）。
+   *
+   * open_total 是未闭环全量，不受 status/kind 筛选影响——
+   * 它是"还有多少条要人处理"的唯一可信数字。
+   */
+  mismatches: (q: {
+    app_id?: number
+    status?: string
+    kind?: string
+    claim_type?: string
+    identity_id?: number
+    page?: number
+    page_size?: number
+  }) => api<MismatchListOutput>(`/claims/mismatches${qs(q)}`),
+  /**
+   * 人工撤销凭证。
+   *
+   * 后端会同时闭环该 claim 名下的漂移记录，返回 resolved_mismatches 条数。
+   * app_id 必填：id 属于哪个应用必须显式声明（凭证按应用隔离）。
+   */
+  revoke: (id: number, appId: number, reason: string) =>
+    api<{ claim: ClaimItem; already_revoked: boolean; resolved_mismatches: number }>(
+      `/claims/${id}/revoke`,
+      { method: 'POST', body: JSON.stringify({ app_id: appId, reason }) },
+    ),
 }

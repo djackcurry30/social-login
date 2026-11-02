@@ -26,6 +26,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/metrics"
 )
 
 // 各路由分组的超时预算（架构 §5.7 的第二段超时）。
@@ -55,6 +56,9 @@ type RouterDeps struct {
 	// WebFS 是 admin SPA 静态资源（前端 dist）。
 	// nil 时不挂，由前端 vite dev 自服务。
 	WebFS fs.FS
+	// Metrics 是指标注册表。为 nil 时不采集中、也不挂 /metrics
+	// （单元测试与不需要观测的嵌入式部署）。
+	Metrics *metrics.Registry
 }
 
 // NewRouter 构造 gin 引擎。
@@ -62,11 +66,19 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// 用 gin.New() 而不是 gin.Default()：默认实例自带 Logger 与 Recovery，
 	// 前者会绕过我们统一的 zap 日志与 trace_id 注入，后者会把堆栈打到 stdout。
 	r := gin.New()
-	r.Use(
-		middleware.RequestID(),
+
+	// 中间件顺序有讲究：Metrics 必须在 Recovery【之外层】。
+	// 洋葱模型下，handler panic 会被 Recovery（内层）先捕获并写成 500，
+	// Metrics 的 defer 随后执行时才能读到 500；反过来会把它记成 200。
+	chain := []gin.HandlerFunc{middleware.RequestID()}
+	if deps.Metrics != nil {
+		chain = append(chain, middleware.Metrics(deps.Metrics))
+	}
+	chain = append(chain,
 		middleware.Recovery(deps.Logger),
 		middleware.AccessLog(deps.Logger),
 	)
+	r.Use(chain...)
 	// 限制请求体大小，避免超大 body 打爆内存（§5.7 的入站保护同族问题）。
 	r.MaxMultipartMemory = 1 << 20
 
@@ -75,6 +87,15 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// --- 运维端点 ---
 	r.GET("/healthz", h.Live)
 	r.GET("/readyz", h.Ready)
+	// /metrics 是 Prometheus 抓取端点。
+	//
+	// ⚠️ 不做鉴权：Prometheus 的抓取端通常只支持简单的 bearer/basic，
+	// 而指标内容本身不含凭据。安全边界靠【网络】——部署时必须确保
+	// 该路径只对监控网段开放（网关或安全组层面限制），不要暴露到公网。
+	// 这一点写进 docs/implementation-status.md 的部署说明。
+	if deps.Metrics != nil {
+		r.GET("/metrics", gin.WrapH(deps.Metrics.Handler()))
+	}
 
 	// --- 公开端点 ---
 	//

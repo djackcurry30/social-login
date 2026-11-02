@@ -73,6 +73,10 @@ var Permissions = map[Role]map[string]struct{}{
 		"identity:read": {}, "binding:read": {}, "event:read": {},
 		"audit:read": {}, "key:read": {}, "merge:read": {},
 		"binding:write": {}, "binding:transfer": {}, "token:revoke": {}, "merge:retry": {},
+		// identity:write 对应 J 组的"人工撤销凭证"（§15.4）。
+		// 只给 operator：撤销一条 claim 会改变"下一次登录会被归并到哪个账号"，
+		// 属于账号运营动作；config_admin 管的是接入配置，不该有这项。
+		"identity:write": {},
 	},
 	// config_admin = viewer + 应用/渠道/密钥/事件写权限。
 	RoleConfigAdmin: {

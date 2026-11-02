@@ -1,6 +1,7 @@
-.PHONY: help tools tidy fmt vet lint build run test test-unit test-acceptance test-all \
+.PHONY: help tools tidy fmt vet lint boundary build run test test-unit test-acceptance test-all \
         mock seed keygen migrate-up migrate-down migrate-status clean docker-up docker-down \
-        compose-up compose-down compose-reset compose-logs image
+        compose-up compose-down compose-reset compose-logs image \
+        uc-build uc-run uc-migrate uc-test uc-contract
 
 # Go 参数。构建信息通过 -ldflags 注入，便于线上用 /healthz 确认部署版本。
 GO              ?= go
@@ -32,6 +33,13 @@ help:
 	@echo "  make seed            写入本地联调数据（应用 + 渠道配置）"
 	@echo "  make migrate-up      执行数据库迁移"
 	@echo ""
+	@echo "用户中心（账号主数据服务，独立二进制与数据库）："
+	@echo "  make uc-build        构建 bin/usercenter"
+	@echo "  make uc-run          本地启动用户中心（读取 configs/usercenter.yaml）"
+	@echo "  make uc-migrate      执行用户中心迁移"
+	@echo "  make uc-test         跑用户中心测试（需要 TEST_USER_CENTER_DSN）"
+	@echo "  make uc-contract     对运行中的用户中心跑契约检查脚本"
+	@echo ""
 	@echo "验收测试的环境变量："
 	@echo "  TEST_DATABASE_URL  默认 postgres://postgres:postgres@127.0.0.1:5432/social_login?sslmode=disable"
 	@echo "  TEST_REDIS_ADDR    默认 127.0.0.1:6379"
@@ -47,7 +55,17 @@ fmt:
 vet:
 	$(GO) vet ./...
 
-lint: fmt vet
+# 边界检查挂在 lint 里：service-boundary 是"跑不过就不许合并"的规则，
+# 而不是一个可选脚本——可选的东西没人跑。
+lint: fmt vet boundary
+
+## 服务边界
+#
+# 同一仓库、同 module、共用 internal/pkg 通用工具，但两个服务的业务代码
+# 不得互相 import（2026-11-02 确认）。规则与理由见
+# docs/user-center-mvp-design.md §15。
+boundary:
+	bash scripts/check-service-boundary.sh
 
 ## 构建与运行
 #
@@ -156,6 +174,36 @@ migrate-down:
 
 migrate-status:
 	$(GO) run ./cmd/migrate -config $(CONFIG) -dir status
+
+## 用户中心
+#
+# 与 social-login 完全独立：另一个二进制、另一个数据库、另一套配置。
+# 两边的耦合只有 HTTP 契约（docs/user-center-integration.md）。
+UC_BINARY   ?= bin/usercenter
+UC_CONFIG   ?= configs/usercenter.yaml
+# 本地 compose 把 PG 映射到 15432；库名必须与 configs/usercenter.yaml 一致。
+UC_DSN      ?= postgres://postgres:postgres@127.0.0.1:15432/user_center?sslmode=disable
+
+uc-build:
+	@mkdir -p $(dir $(UC_BINARY))
+	$(GO) build -trimpath -ldflags "-s -w -X github.com/djackcurry30/social-login/internal/usercenter/app.Version=$(VERSION)" \
+		-o $(UC_BINARY) ./cmd/usercenter
+
+uc-run:
+	$(GO) run ./cmd/usercenter -config $(UC_CONFIG)
+
+uc-migrate:
+	$(GO) run ./cmd/usercenter -config $(UC_CONFIG) -migrate up
+
+# 集成测试连真库：本服务的正确性建立在部分唯一索引与行锁重检上，
+# 内存假仓储测不出这些语义。
+uc-test:
+	TEST_USER_CENTER_DSN="$(UC_DSN)" $(GO) test ./internal/usercenter/... -count=1
+
+# 契约检查：对端（本服务自己）交付后、接进登录链路前跑一遍。
+uc-contract:
+	bash scripts/check-usercenter-contract.sh http://127.0.0.1:8099 $(UC_TOKEN) \
+		--app app_contract_a --app2 app_contract_b --write
 
 clean:
 	rm -rf bin keys

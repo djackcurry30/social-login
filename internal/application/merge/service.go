@@ -195,6 +195,7 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 
 	// 第 2 步：无事务的跨服务调用。
 	remote, mergeErr := s.deps.Accounts.Merge(ctx, account.MergeRequest{
+		AppKey:         req.App.AppCode,
 		TargetUserID:   req.TargetUserID,
 		SourceUserID:   req.SourceUserID,
 		IdempotencyKey: op.IdempotencyKey,
@@ -362,6 +363,7 @@ func (s *Service) Resume(ctx context.Context, op *mergex.Operation) error {
 	}
 
 	remote, mergeErr := s.deps.Accounts.Merge(ctx, account.MergeRequest{
+		AppKey:         app.AppCode,
 		TargetUserID:   op.TargetUserID,
 		SourceUserID:   op.SourceUserID,
 		IdempotencyKey: op.IdempotencyKey,

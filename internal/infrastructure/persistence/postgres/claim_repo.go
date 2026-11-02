@@ -129,6 +129,27 @@ func (r *ClaimRepository) FindVerified(ctx context.Context, appID int64, claimTy
 	return claimToDomain(&m), nil
 }
 
+// FindByID 按主键查找。app_id 是必需的隔离条件（约束 C1）：
+// 同一个 id 在别的应用下不存在，显式带上而不是靠调用方自觉。
+func (r *ClaimRepository) FindByID(ctx context.Context, appID, id int64) (*identity.Claim, error) {
+	if appID <= 0 || id <= 0 {
+		return nil, errs.New(errs.CodeInternal, "凭证查询缺少 app_id 或 id")
+	}
+	ctx = appctx.WithAppScope(ctx, appID)
+
+	var m claimModel
+	err := r.db.WithContext(ctx).
+		Where("app_id = ? AND id = ?", appID, id).
+		Take(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, identity.ErrNotFound
+	}
+	if err != nil {
+		return nil, errs.Wrap(errs.CodeInternal, "查询归并凭证失败", err)
+	}
+	return claimToDomain(&m), nil
+}
+
 // ListByIdentity 列出某身份的全部有效凭证。
 func (r *ClaimRepository) ListByIdentity(ctx context.Context, appID, identityID int64) ([]identity.Claim, error) {
 	if appID <= 0 || identityID <= 0 {

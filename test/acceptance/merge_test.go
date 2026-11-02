@@ -46,13 +46,13 @@ func TestAccountMergeConvergesLocally(t *testing.T) {
 	// 1) 用户中心侧两个账号。
 	stub := h.stubProvider()
 	accB, err := stub.Create(ctx, domainaccount.CreateRequest{
-		IdempotencyKey: "merge-acc-b", Nickname: "账号B",
+		AppKey: h.appCode, IdempotencyKey: "merge-acc-b", Nickname: "账号B",
 	})
 	if err != nil {
 		t.Fatalf("创建 source 账号失败: %v", err)
 	}
 	accC, err := stub.Create(ctx, domainaccount.CreateRequest{
-		IdempotencyKey: "merge-acc-c", Nickname: "账号C",
+		AppKey: h.appCode, IdempotencyKey: "merge-acc-c", Nickname: "账号C",
 	})
 	if err != nil {
 		t.Fatalf("创建 target 账号失败: %v", err)
@@ -202,7 +202,7 @@ func TestMergeImpactReportsCounts(t *testing.T) {
 	ctx := context.Background()
 
 	stub := h.stubProvider()
-	accB, err := stub.Create(ctx, domainaccount.CreateRequest{IdempotencyKey: "impact-b"})
+	accB, err := stub.Create(ctx, domainaccount.CreateRequest{AppKey: h.appCode, IdempotencyKey: "impact-b"})
 	if err != nil {
 		t.Fatalf("创建账号失败: %v", err)
 	}

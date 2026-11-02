@@ -81,7 +81,7 @@ func (s *Service) StartSMSVerification(ctx context.Context, in StartVerification
 		}
 	}
 
-	phone, err := s.verifiedPhone(ctx, t.SourceUserID)
+	phone, err := s.verifiedPhone(ctx, t.AppCode, t.SourceUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +207,8 @@ func (s *Service) CompleteSMSVerification(ctx context.Context, in CompleteVerifi
 //
 // 只认 Verified 的 phone claim：合并是账号归属变更，凭据必须是用户中心
 // 认可的（§8.5 的既定语义），而不是某次授权里平台顺手给的昵称之类。
-func (s *Service) verifiedPhone(ctx context.Context, userID string) (string, error) {
-	acc, err := s.deps.Accounts.Get(ctx, userID)
+func (s *Service) verifiedPhone(ctx context.Context, appKey, userID string) (string, error) {
+	acc, err := s.deps.Accounts.Get(ctx, appKey, userID)
 	if err != nil {
 		if errors.Is(err, account.ErrNotFound) {
 			return "", errs.New(errs.CodeAccountNotFound, "被合并账号在用户中心不存在")

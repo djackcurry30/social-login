@@ -11,6 +11,7 @@ import AppDetailPage from '@/pages/AppDetailPage'
 import ChannelsPage from '@/pages/ChannelsPage'
 import ObservabilityPage from '@/pages/ObservabilityPage'
 import IdentitiesPage from '@/pages/IdentitiesPage'
+import ClaimsPage from '@/pages/ClaimsPage'
 import MergesPage from '@/pages/MergesPage'
 import SessionsPage from '@/pages/SessionsPage'
 import SigningKeysPage from '@/pages/SigningKeysPage'
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="/observability" element={<ObservabilityPage />} />
         <Route path="/events" element={<EventsPage />} />
         <Route path="/identities" element={<IdentitiesPage />} />
+        <Route path="/claims" element={<ClaimsPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/merges" element={<MergesPage />} />
         <Route path="/audit" element={<AuditPage />} />

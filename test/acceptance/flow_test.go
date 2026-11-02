@@ -65,6 +65,8 @@ type harness struct {
 	// mockBaseURL 是自建 OAuth2 测试服务的地址，写入渠道配置的端点里。
 	mockBaseURL string
 
+	opts harnessOptions
+
 	appCode  string
 	appID    int64
 	db       *postgres.AppRepository
@@ -72,8 +74,27 @@ type harness struct {
 	identity string // mock 平台返回的用户标识
 }
 
-// newHarness 装配一次完整运行实例。
+// harnessOptions 允许单个用例改写装配参数。
+//
+// 为什么需要它：默认装配用的是 account.provider=stub（内存桩）与
+// need_register 策略，这两项恰好是"用户中心未就绪"时的临时选择。
+// 要验收真实 HTTP 用户中心那条路径，就必须能在不改动其他用例的前提下
+// 换成 http provider 与 auto_create 策略。
+type harnessOptions struct {
+	// Config 在默认配置写完之后调用。
+	Config func(*bootstrap.Config)
+	// Policy 在默认应用策略写完之后调用。
+	Policy func(*tenant.Policy)
+}
+
+// newHarness 装配一次完整运行实例（默认配置）。
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessOpts(t, harnessOptions{})
+}
+
+// newHarnessOpts 装配一次可定制的运行实例。
+func newHarnessOpts(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 
 	// 1) 自建 OAuth2 测试服务。
@@ -119,6 +140,9 @@ func newHarness(t *testing.T) *harness {
 	cfg.Log.Level = "error"
 	cfg.Log.Format = "console"
 	cfg.Migrate.Enabled = true
+	if opts.Config != nil {
+		opts.Config(cfg)
+	}
 
 	// 主密钥：测试内固定，保证多次运行之间写入的凭据可解密。
 	masterKey, err := crypto.DecodeMasterKey("dGVzdC1tYXN0ZXIta2V5LTMyLWJ5dGVzLWxvbmchISE=")
@@ -157,6 +181,7 @@ func newHarness(t *testing.T) *harness {
 
 	h := &harness{
 		t:           t,
+		opts:        opts,
 		app:         app,
 		server:      srv,
 		serverURL:   baseURL,
@@ -200,6 +225,9 @@ func (h *harness) seed() {
 	policy.Merge.Mode = tenant.MergeModeConfirm
 	policy.Merge.Verification = tenant.VerificationSMS
 	policy.AllowedRedirectURIs = []string{testRedirectURI}
+	if h.opts.Policy != nil {
+		h.opts.Policy(&policy)
+	}
 
 	app, err := appRepo.Upsert(ctx, &tenant.Application{
 		AppCode:       h.appCode,
