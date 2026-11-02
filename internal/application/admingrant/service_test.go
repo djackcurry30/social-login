@@ -221,3 +221,11 @@ func TestInsertErrorPropagates(t *testing.T) {
 		t.Fatal("仓储错误必须透出")
 	}
 }
+
+// List / UpdateProfile / CountEnabledSuperAdmins 是 UserRepository 的扩展方法
+// （管理员账号管理需要）。授权用例不涉及它们。
+func (f *fakeUsers) List(context.Context, int) ([]*admin.User, error) { return nil, nil }
+
+func (f *fakeUsers) UpdateProfile(context.Context, int64, admin.ProfileUpdate) error { return nil }
+
+func (f *fakeUsers) CountEnabledSuperAdmins(context.Context) (int64, error) { return 1, nil }

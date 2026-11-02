@@ -82,6 +82,19 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		api.POST("/apps/:appId/provider-configs/:id/disable", adminmw.Require("config:write"), chanH.Disable)
 		api.DELETE("/apps/:appId/provider-configs/:id", adminmw.Require("config:write"), chanH.Delete)
 
+		// M 组：管理员账号管理（§25 B 组）。
+		//
+		// 只给 super_admin：权限串 admin:read / admin:write 没有写进任何
+		// 角色的权限表，只有 super_admin 的通配 "*" 覆盖它们。
+		// 这是刻意的——能给自己加账号的人，等于能给自己加权限。
+		if deps.AdminUser != nil {
+			adminsH := handler.NewAdminsHandler(deps.AdminUser, deps.Logger)
+			api.GET("/admins", adminmw.Require("admin:read"), adminsH.List)
+			api.POST("/admins", adminmw.Require("admin:write"), adminsH.Create)
+			api.PATCH("/admins/:id", adminmw.Require("admin:write"), adminsH.Update)
+			api.POST("/admins/:id/password", adminmw.Require("admin:write"), adminsH.ResetPassword)
+		}
+
 		// I 组：观测
 		obsH := handler.NewObservabilityHandler(deps.AdminObs, deps.Logger)
 		api.GET("/providers", adminmw.Require("config:read"), obsH.ListProviders)

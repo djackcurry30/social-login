@@ -32,6 +32,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/application/adminsession"
+	"github.com/djackcurry30/social-login/internal/application/adminuser"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/adminmw"
 )
@@ -60,6 +61,9 @@ type Deps struct {
 	AdminKey *adminkey.Service
 	// AdminGrant 是 K 组（管理员授权）用例。
 	AdminGrant *admingrant.Service
+	// AdminUser 是管理员账号管理用例。为 nil 时不注册该组路由——
+	// 与其它组一致，便于只关心某一组的测试。
+	AdminUser *adminuser.Service
 }
 
 // NewRouter 构造独立的 admin 子引擎。

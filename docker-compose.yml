@@ -162,6 +162,10 @@ services:
       # 入站限流：默认关闭。本地想验证时用 RATE_LIMIT_ENABLED=true 起来。
       SOCIAL_LOGIN_RATELIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
       SOCIAL_LOGIN_RATELIMIT_IDENTITY_PER_MINUTE: ${RATE_LIMIT_IDENTITY:-30}
+      # 渠道日配额：未单独列出的渠道取这个默认值（0 = 不限）。
+      # 平台级明细（wechat/alipay…）在 configs/config.yaml 的 platform_daily 里配，
+      # 用环境变量传 map 不可靠，本地验证用这个默认值即可。
+      SOCIAL_LOGIN_RATELIMIT_PLATFORM_DAILY_DEFAULT: ${RATE_LIMIT_PLATFORM_DAILY:-0}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:

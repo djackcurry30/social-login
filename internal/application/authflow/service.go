@@ -100,6 +100,18 @@ type Deps struct {
 	// 放在应用层而不是接入层中间件，是因为"身份"只有平台返回 open_id
 	// 之后才存在——中间件那时候看到的还只是 app + IP。
 	IdentityLimiter IdentityLimiter
+	// PlatformQuota 是渠道日配额（架构 §6.3 的 rl:platform:{platform}:day）。
+	//
+	// 为 nil 时不做配额拦截。它保护的是渠道侧的调用上限——用光之后受害者
+	// 是全部用户，而不是某个调用方，所以它比 app 维度的限流更"全局"。
+	PlatformQuota PlatformQuota
+}
+
+// PlatformQuota 是渠道日配额端口（实现见 infrastructure/ratelimit）。
+//
+// 返回 (是否放行, 建议重试秒数)。
+type PlatformQuota interface {
+	Allow(ctx context.Context, platform string) (bool, int)
 }
 
 // IdentityLimiter 是身份维度限流端口（实现见 infrastructure/ratelimit）。
@@ -442,6 +454,27 @@ func (s *Service) handleCallback(ctx context.Context, tc *ticket.Context, in Cal
 			Header:   in.Header,
 		}); err != nil {
 			return nil, err
+		}
+	}
+
+	// 渠道日配额（rl:platform:{platform}:day）。
+	//
+	// 位置在 Exchange 之前：配额已经用尽时再打平台没有任何收益——平台照样
+	// 拒绝，我们白白消耗重试预算，还可能让平台侧的风控计数更难看。
+	//
+	// 用 PROVIDER.QUOTA_EXCEEDED 而不是 RATE.LIMITED：前者告诉调用方
+	// "今天没了"，后者会被理解成"你太快了，等一会儿"。两者的处置完全不同
+	// （前者要去扩配额或换渠道，后者重试即可）。
+	if s.deps.PlatformQuota != nil {
+		if ok, retry := s.deps.PlatformQuota.Allow(ctx, tc.Platform); !ok {
+			quotaErr := errs.New(errs.CodeProviderQuotaExceeded,
+				"该渠道今日调用配额已用尽，请明日再试或联系运维").
+				WithDetail("platform", tc.Platform).
+				WithDetail("retry_after_seconds", retry).
+				WithRetryAfter(retry * 1000)
+			s.auditLogin(ctx, app.ID, 0, "", tc,
+				audit.ResultFailure, errs.CodeProviderQuotaExceeded, meta, started)
+			return nil, quotaErr
 		}
 	}
 

@@ -111,3 +111,43 @@ func TestWindowNilCounterAlwaysAllows(t *testing.T) {
 		t.Fatal("没有计数实现时应放行")
 	}
 }
+
+func TestAllowDailyLimitsWithinSameDay(t *testing.T) {
+	c := newKeyedCounter()
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local)
+	w := NewWindowWithClock(c, func() time.Time { return now })
+
+	for i := 1; i <= 3; i++ {
+		if res := w.AllowDaily(context.Background(), "rl:platform:wechat", 3); !res.Allowed {
+			t.Fatalf("当日第 %d 次不应被拦截", i)
+		}
+	}
+	res := w.AllowDaily(context.Background(), "rl:platform:wechat", 3)
+	if res.Allowed {
+		t.Fatal("超过日配额必须拦截")
+	}
+	// 同一天内建议等待时间应该指向次日零点，而不是 60 秒。
+	if res.RetryAfter < 60 {
+		t.Fatalf("日配额的重试等待应指向次日零点，实际 %d 秒", res.RetryAfter)
+	}
+}
+
+func TestAllowDailyResetsAtMidnight(t *testing.T) {
+	c := newKeyedCounter()
+	now := time.Date(2026, 11, 2, 23, 59, 0, 0, time.Local)
+	w := NewWindowWithClock(c, func() time.Time { return now })
+
+	if res := w.AllowDaily(context.Background(), "rl:platform:alipay", 1); !res.Allowed {
+		t.Fatal("当日第 1 次应放行")
+	}
+	if res := w.AllowDaily(context.Background(), "rl:platform:alipay", 1); res.Allowed {
+		t.Fatal("当日第 2 次应拦截")
+	}
+
+	// 跨过零点：配额必须重置。这条用例盯的就是"跨天"——它一年只在零点
+	// 暴露两次，写错了很难靠人工发现。
+	now = now.Add(2 * time.Minute)
+	if res := w.AllowDaily(context.Background(), "rl:platform:alipay", 1); !res.Allowed {
+		t.Fatal("次日应重新放行")
+	}
+}

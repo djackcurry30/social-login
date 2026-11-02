@@ -181,3 +181,12 @@ ratelimit:
   # 本服务 Upsert 出 identity 之后才有主语。阈值 30 的依据是"正常用户一分钟内
   # 不可能完成 30 次完整授权往返"；被误伤时用户等 1 分钟重试即可恢复。
   identity_per_minute: 30
+  # 渠道日配额（rl:platform:{platform}:day）。超限返回 PROVIDER.QUOTA_EXCEEDED，
+  # 快速失败不排队。
+  #
+  # 取值必须【小于】渠道后台的日上限，留 10%~20% 余量给健康探测、补偿等
+  # 配额之外的调用。0 或省略 = 该渠道不限。
+  # 例：wechat: 80000  alipay: 40000
+  platform_daily: {}
+  # 未单独列出的渠道用这个默认值，0 = 不限。
+  platform_daily_default: 0

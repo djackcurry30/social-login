@@ -56,6 +56,16 @@ type RateLimitConfig struct {
 	// 阈值取 30：正常用户一分钟内不可能完成 30 次完整授权往返。
 	// 留空或 <=0 时取 infrastructure/ratelimit 的默认值（30）。
 	IdentityPerMinute int `mapstructure:"identity_per_minute"`
+	// PlatformDaily 是渠道日配额（rl:platform:{platform}:day），键为平台标识。
+	//
+	// 取值必须【小于】渠道后台的日上限：留 10%~20% 余量，用于健康探测、
+	// 补偿任务等配额之外的调用。填 0 或省略表示该平台不限。
+	//
+	// 超限的行为是"快速失败"（PROVIDER.QUOTA_EXCEEDED，不排队）：
+	// 排队只会把请求堆在内存里，然后在配额恢复的瞬间形成尖峰。
+	PlatformDaily map[string]int `mapstructure:"platform_daily"`
+	// PlatformDailyDefault 是未在 PlatformDaily 里列出的渠道的默认上限，0 = 不限。
+	PlatformDailyDefault int `mapstructure:"platform_daily_default"`
 }
 
 // SMSConfig 是短信通道配置。

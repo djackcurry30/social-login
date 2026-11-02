@@ -211,3 +211,21 @@ func assertNilErr(t *testing.T, err error) {
 		t.Fatalf("期望 nil err，实际 %v", err)
 	}
 }
+
+// RevokeAllByUser 是 SessionRepository 的扩展方法（管理员账号管理需要）。
+// 登录相关用例不涉及它，空实现即可。
+func (s *stubSessionRepo) RevokeAllByUser(_ context.Context, _ int64) error { return nil }
+
+// List / UpdateProfile / CountEnabledSuperAdmins 是 UserRepository 的扩展方法
+// （管理员账号管理需要）。登录用例不涉及它们。
+func (s *stubUserRepo) List(_ context.Context, _ int) ([]*admin.User, error) {
+	return nil, nil
+}
+
+func (s *stubUserRepo) UpdateProfile(_ context.Context, _ int64, _ admin.ProfileUpdate) error {
+	return nil
+}
+
+func (s *stubUserRepo) CountEnabledSuperAdmins(_ context.Context) (int64, error) {
+	return 1, nil
+}

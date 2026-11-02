@@ -50,6 +50,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/adminmerge"
 	"github.com/djackcurry30/social-login/internal/application/adminobs"
 	"github.com/djackcurry30/social-login/internal/application/adminsession"
+	"github.com/djackcurry30/social-login/internal/application/adminuser"
 	"github.com/djackcurry30/social-login/internal/application/auditexport"
 	"github.com/djackcurry30/social-login/internal/application/outbox"
 	"github.com/djackcurry30/social-login/internal/embedweb"
@@ -296,6 +297,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		// 与接入层的两档一起生效或一起关闭——分两个开关只会让人忘记打开。
 		IdentityLimiter: infraratelimit.NewIdentityLimiter(
 			rdb, cfg.RateLimit.Enabled, cfg.RateLimit.IdentityPerMinute),
+		// 渠道日配额（rl:platform:{platform}:day）。
+		PlatformQuota: infraratelimit.NewPlatformQuota(
+			rdb, cfg.RateLimit.Enabled, cfg.RateLimit.PlatformDaily, cfg.RateLimit.PlatformDailyDefault),
 	})
 
 	tokenSvc := token.New(token.Config{
@@ -518,6 +522,17 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Logger:     logger,
 	})
 
+	// M 组：管理员账号管理（§25 B 组）。
+	//
+	// 在这之前加人只能靠 cmd/adminseed 或直接改库：没有校验、没有审计、
+	// 也没有"别把自己锁在门外"的护栏。
+	adminUserSvc := adminuser.New(adminuser.Deps{
+		Users:    adminUserRepo,
+		Sessions: adminSessionRepo,
+		Audit:    adminAuditRepo,
+		Logger:   logger,
+	})
+
 	// F 组：签名密钥轮换。
 	//
 	// keyStore 可能为 nil（未配置 security.key_dir）：此时 rotate/retire
@@ -585,6 +600,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		AdminSession:  adminSessionSvc,
 		AdminKey:      adminKeySvc,
 		AdminGrant:    adminGrantSvc,
+		AdminUser:     adminUserSvc,
 	}
 	_ = adminDeps
 

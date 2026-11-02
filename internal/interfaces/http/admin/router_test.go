@@ -227,3 +227,46 @@ func TestRouter_Apps_POST_NoReason(t *testing.T) {
 		t.Fatalf("期望 REQUEST.INVALID 或 ADMIN.REASON_REQUIRED，实际 %v", bodyResp["code"])
 	}
 }
+
+// RevokeAllByUser 是 SessionRepository 的扩展方法（管理员账号管理需要）。
+func (s *stubSessionRepo) RevokeAllByUser(_ context.Context, _ int64) error { return nil }
+
+// List 是 UserRepository 的扩展方法。
+func (s *stubUserRepo) List(_ context.Context, _ int) ([]*admin.User, error) {
+	out := make([]*admin.User, 0, len(s.users))
+	for _, u := range s.users {
+		out = append(out, u)
+	}
+	return out, nil
+}
+
+// UpdateProfile 是 UserRepository 的扩展方法。
+func (s *stubUserRepo) UpdateProfile(_ context.Context, id int64, in admin.ProfileUpdate) error {
+	for _, u := range s.users {
+		if u.ID != id {
+			continue
+		}
+		if in.Role != nil {
+			u.Role = *in.Role
+		}
+		if in.Status != nil {
+			u.Status = *in.Status
+		}
+		if in.DisplayName != nil {
+			u.DisplayName = *in.DisplayName
+		}
+		return nil
+	}
+	return admin.ErrNotFound
+}
+
+// CountEnabledSuperAdmins 是 UserRepository 的扩展方法。
+func (s *stubUserRepo) CountEnabledSuperAdmins(_ context.Context) (int64, error) {
+	var n int64
+	for _, u := range s.users {
+		if u.Role == admin.RoleSuperAdmin && u.Status == 1 {
+			n++
+		}
+	}
+	return n, nil
+}
