@@ -2615,3 +2615,79 @@ adminapp；A 组的单测也不必拉起一套 HTTP 客户端。
 | 用户中心 import `pkg/errs`（伪通用包） | 1 | ✅ |
 
 清理后 `exit 0`，`go test ./test/contract/` 通过。
+
+---
+
+## 31. 本地容器化双服务部署验证（2026-11-02）
+
+前面 §29 的验收都在"本机进程 + 容器里的 PG/Redis"下完成；§30 之后补做了一次
+**两个服务都跑在容器里**的验证，因为部署形态本身也会出问题（网络、健康检查、
+启动顺序），这些在单进程测试里永远不会暴露。
+
+### 31.1 形态
+
+```
+pg(healthy) ─► uc-db(一次性) ─► usercenter(healthy) ─┐
+             ├─► migrate ─► adminseed ──────────────┴─► app(healthy)
+redis(healthy) ───────────────────────────────────────┘
+```
+
+```bash
+ACCOUNT_PROVIDER=http docker compose up -d
+```
+
+| 服务 | 地址 | 账号数据 |
+| --- | --- | --- |
+| social-login | http://localhost:8080/admin | 无 `accounts` 表（remote 模式） |
+| usercenter | http://localhost:8099 | `user_center` 库 |
+
+### 31.2 验证结果
+
+| 检查 | 结果 |
+| --- | --- |
+| 冷启动顺序 | `usercenter` 先 healthy，`app` 才启动 |
+| 启动即对账 | `应用注册对账完成 {"total":292,"succeeded":292}` |
+| 概览接口 | `apps_count=292`、`account_center{provider:"http",production_ready:true}` |
+| 真实登录（容器内跨服务） | 授权 302 → 平台回调 → 302 带 `code=ac_…`；UC 建号、登录中心写绑定 |
+| 绑定与账号一致 | `oauth_bindings.external_user_id` == `accounts.public_id`（ULID 逐位相同） |
+| 重复登录 | 两次登录后 UC 账号数仍为 1、绑定数仍为 1 |
+| 对端停机（新用户） | `ACCOUNT.UNAVAILABLE` + `retryable=true`（不是 500，也不静默建号） |
+| 对端停机（老用户） | 仍可登录——绑定在登录中心，不依赖对端；**也意味着 UC 侧的停用不会拦住老用户**（§12.3 的已知空档） |
+| 对端恢复 | 新用户登录立即成功，UC 建号 |
+| 契约脚本（对容器内 UC） | 18 项全过，0 警告 |
+| `go test ./test/...`（指向容器 UC） | 全过 |
+
+### 31.3 本次修掉的一个部署陷阱
+
+`app` 原先不依赖 `usercenter`。冷启动时若 `app` 先就绪，启动对账会失败，
+要等 5 分钟一次的全量重放才自愈；这 5 分钟里所有登录都返回 `APP.UNKNOWN`，
+而错误文案指向"应用不存在"——几乎没人会联想到"对端还没起来"。
+现在 `app` 声明 `usercenter: condition: service_healthy`。
+
+### 31.4 复现步骤（含 mock 平台）
+
+```bash
+# 1) 两个服务
+ACCOUNT_PROVIDER=http docker compose up -d
+
+# 2) 假的 OAuth2 平台（容器通过 host.docker.internal 访问它）
+go run ./cmd/mockoauth2 -addr 0.0.0.0:9090
+
+# 3) 写联调应用与渠道配置（注意连的是 compose 的 PG 与容器同一把主密钥）
+SOCIAL_LOGIN_DATABASE_DSN='postgres://postgres:postgres@127.0.0.1:15432/social_login?sslmode=disable' \
+SOCIAL_LOGIN_SECURITY_MASTER_KEY='+CCIh0DbO4eCpxQ0BB8wmuk0/bjR0XU8oOR/VvLNInc=' \
+go run ./cmd/seed -config configs/config.yaml -app-code app_e2e_uc \
+  -redirect-uri http://127.0.0.1:3000/callback \
+  -oauth2-base-url http://127.0.0.1:9090 -on-unbound-login auto_create -merge-mode manual
+
+# 4) token/userinfo 改成容器可达地址（authorize 留给浏览器/curl 用 127.0.0.1）
+#    UPDATE app_provider_configs SET extra = jsonb_set(... 'host.docker.internal:9090' ...)
+
+# 5) 让登录服务重新对账（把新应用推给 UC），然后走 /v1/authorize → 平台 → /v1/oauth/callback
+```
+
+两个注意点，都是踩过的：
+
+- `cmd/seed` 用的主密钥必须与容器一致，否则渠道凭据解不开，回调报"解密失败"。
+- 渠道配置里 `authorize_url` 走 127.0.0.1（浏览器侧），`token_url`/`userinfo_url`
+  走 `host.docker.internal`（容器侧）。同一个 base_url 在两种视角下是不通的。

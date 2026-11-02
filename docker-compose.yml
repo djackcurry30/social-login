@@ -19,9 +19,10 @@
 #    social-login  →  http://localhost:8080   （登录/授权/令牌/绑定）
 #    usercenter    →  http://localhost:8099   （账号主数据，/healthz /readyz /metrics）
 #
-#  默认 ACCOUNT_PROVIDER=stub（账号在登录服务进程内存里）。要跑完整链路：
+#  账号体系默认 ACCOUNT_PROVIDER=stub（账号在登录服务进程内存里）。要跑完整链路：
 #    ACCOUNT_PROVIDER=http docker compose up -d
-#  此时登录服务会通过注册同步把应用推到 usercenter（首次对账可能需要几秒）。
+#  此时登录服务会通过注册同步把应用推到 usercenter（启动即全量对账，之后每 5 分钟一次）。
+#  注意 app 依赖 usercenter 健康：冷启动时先起对端，避免首批登录拿到 APP.UNKNOWN。
 #
 #  ⚠️ 本文件只用于本地开发：
 #     - 数据库口令、开发主密钥都是明文默认值，生产必须换掉；
@@ -171,6 +172,12 @@ services:
         condition: service_healthy
       adminseed:
         condition: service_completed_successfully
+      # 账号体系虽然是可切换的（stub / http），但冷启动时若 login 先于
+      # usercenter 就绪，应用注册对账会失败，直到下一次全量重放（5 分钟）
+      # 才自愈——这 5 分钟里所有登录都是 APP.UNKNOWN，且报错指向"应用不存在"，
+      # 很难联想到"对端还没起来"。用一个依赖换掉这个排查陷阱。
+      usercenter:
+        condition: service_healthy
 
   # ---------- 用户中心（账号主数据） ----------
 
