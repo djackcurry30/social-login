@@ -38,6 +38,26 @@ security:
   # 生成方式：go run ./cmd/keygen
   master_key: ""
   kek_id: "local-kek-v1"
+  # 托管密钥（推荐生产形态）。启用后 master_key 不再需要，也不需要出现在
+  # 任何配置文件或环境变量里——本服务只持有 key_id 与 KMS 地址。
+  #
+  # 契约只有两个动作（wrap / unwrap DEK），由 KMS 前的薄网关映射到具体厂商：
+  #   POST {base_url}/v1/wrap   {"key_id","plaintext"} → {"wrapped"}
+  #   POST {base_url}/v1/unwrap {"key_id","wrapped"}   → {"plaintext"}
+  # 详见 internal/infrastructure/crypto/kek_remote.go 的文件头。
+  #
+  # 切换步骤：先在旧 KEK 下把现有密文迁成 v2（cmd/keyrewrap），
+  # 再打开 enabled 换密钥——顺序反了会有旧格式密文解不开。
+  kms:
+    enabled: false
+    base_url: ""
+    key_id: ""
+    token: ""
+    timeout: "5s"
+    # DEK 缓存：渠道凭据每次登录都要解密，而 KMS 一次往返 5–20ms。
+    # 0 表示不缓存（每次登录都打 KMS）。
+    dek_cache_ttl: "5m"
+    dek_cache_size: 512
   # 身份凭证哈希的静态盐。⚠️ 必须保持稳定：
   # 变更它会导致已入库的 claim 哈希全部无法匹配，即"按手机号归并"能力整体失效。
   claim_salt: "dev-claim-salt-do-not-use-in-prod"

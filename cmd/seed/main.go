@@ -73,20 +73,27 @@ func main() {
 
 	// 构造加密器。注意：若配置里没有固定 master_key，这里生成的密钥与
 	// 服务进程启动时生成的不会是同一把，写入的凭据将无法被服务解密。
-	if cfg.Security.MasterKey == "" {
+	//
+	// 启用 KMS 时这条检查不适用：密钥由 KMS 持有，本进程没有也不该有主密钥。
+	if !cfg.Security.KMS.Enabled && cfg.Security.MasterKey == "" {
 		fmt.Fprintln(os.Stderr,
 			"⚠️ 配置中未设置 security.master_key：本次将使用临时主密钥加密渠道凭据。")
 		fmt.Fprintln(os.Stderr,
 			"   服务进程启动时会生成【另一把】临时密钥，导致凭据无法解密。")
 		fmt.Fprintln(os.Stderr,
-			"   请先执行 go run ./cmd/keygen 并把 security.master_key 写入配置。")
+			"   请先执行 go run ./cmd/keygen 并把 security.master_key 写入配置")
+		fmt.Fprintln(os.Stderr,
+			"   （或启用 security.kms，让密钥由 KMS 托管）。")
 		os.Exit(1)
 	}
-	masterKey, err := crypto.DecodeMasterKey(cfg.Security.MasterKey)
+
+	// KEK 与主服务走同一套装配：启用了 KMS 就必须用 KMS 写，
+	// 否则 seed 写进去的密文服务读不出来（本地密钥 vs KMS 密钥）。
+	kek, opts, err := bootstrap.BuildKEK(cfg, logger)
 	if err != nil {
-		fail("解析主密钥失败", err)
+		fail("初始化 KEK 失败", err)
 	}
-	keyManager, err := crypto.NewKeyManager(cfg.Security.KEKID, masterKey)
+	keyManager, err := crypto.NewKeyManager(kek, opts)
 	if err != nil {
 		fail("初始化加密器失败", err)
 	}

@@ -25,7 +25,7 @@ var _ webhook.TargetReader = (*appWebhookTargets)(nil)
 
 // WebhookTarget 读取并解密投递目标。
 func (t *appWebhookTargets) WebhookTarget(ctx context.Context, appID int64) (*webhook.Target, error) {
-	appCode, url, secretEnc, _, err := t.apps.WebhookConfig(ctx, appID)
+	appCode, url, secretEnc, kid, err := t.apps.WebhookConfig(ctx, appID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,9 @@ func (t *appWebhookTargets) WebhookTarget(ctx context.Context, appID int64) (*we
 
 	secret := ""
 	if len(secretEnc) > 0 && t.keys != nil {
-		plain, derr := t.keys.Decrypt(secretEnc)
+		// 带上 kid：它是这行写入时用的 KEK 版本。v1 密文的 AAD 绑定了它，
+		// 不传就无法把"主密钥换过了"与"密文损坏"区分开。
+		plain, derr := t.keys.DecryptWithKEKID(secretEnc, kid)
 		if derr != nil {
 			// 密钥解不开（KEK 轮换后未重加密）时不能静默用空密钥签名——
 			// 那样业务方验签必然失败，但我们会以为投递成功。

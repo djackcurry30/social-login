@@ -21,7 +21,11 @@ func newTestKeyManager(t *testing.T, seed byte) *crypto.KeyManager {
 	for i := range master {
 		master[i] = seed + byte(i)
 	}
-	km, err := crypto.NewKeyManager("test-kek", master)
+	kek, err := crypto.NewLocalKEK("test-kek", master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	km, err := crypto.NewKeyManager(kek, crypto.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -212,7 +212,11 @@ func (h *harness) seed() {
 	if err != nil {
 		h.t.Fatalf("解析主密钥失败: %v", err)
 	}
-	keyManager, err := crypto.NewKeyManager(cfg.Security.KEKID, masterKey)
+	kek, err := crypto.NewLocalKEK(cfg.Security.KEKID, masterKey)
+	if err != nil {
+		h.t.Fatalf("初始化 KEK 失败: %v", err)
+	}
+	keyManager, err := crypto.NewKeyManager(kek, crypto.Options{})
 	if err != nil {
 		h.t.Fatalf("初始化加密器失败: %v", err)
 	}
@@ -807,7 +811,11 @@ func (h *harness) createSecondApp(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("解析主密钥失败: %v", err)
 	}
-	keyManager, err := crypto.NewKeyManager(cfg.Security.KEKID, masterKey)
+	kek, err := crypto.NewLocalKEK(cfg.Security.KEKID, masterKey)
+	if err != nil {
+		t.Fatalf("初始化 KEK 失败: %v", err)
+	}
+	keyManager, err := crypto.NewKeyManager(kek, crypto.Options{})
 	if err != nil {
 		t.Fatalf("初始化加密器失败: %v", err)
 	}

@@ -166,6 +166,15 @@ services:
       # 平台级明细（wechat/alipay…）在 configs/config.yaml 的 platform_daily 里配，
       # 用环境变量传 map 不可靠，本地验证用这个默认值即可。
       SOCIAL_LOGIN_RATELIMIT_PLATFORM_DAILY_DEFAULT: ${RATE_LIMIT_PLATFORM_DAILY:-0}
+      # 托管密钥（KEK）。启用后渠道凭据的 DEK 由 KMS 包装，主密钥不再出现在
+      # 本服务的环境变量里。本地演练：先起 cmd/mockkms，再用
+      #   KMS_ENABLED=true KMS_BASE_URL=http://host.docker.internal:9091
+      #   KMS_KEY_ID=kek-kms-v1 docker compose up -d app
+      SOCIAL_LOGIN_SECURITY_KMS_ENABLED: ${KMS_ENABLED:-false}
+      SOCIAL_LOGIN_SECURITY_KMS_BASE_URL: ${KMS_BASE_URL:-}
+      SOCIAL_LOGIN_SECURITY_KMS_KEY_ID: ${KMS_KEY_ID:-}
+      SOCIAL_LOGIN_SECURITY_KMS_TOKEN: ${KMS_TOKEN:-}
+      SOCIAL_LOGIN_SECURITY_KMS_DEK_CACHE_TTL: ${KMS_DEK_CACHE_TTL:-5m}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:

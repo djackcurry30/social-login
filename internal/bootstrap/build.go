@@ -29,26 +29,80 @@ const devKeyWarning = "开发模式自动生成临时密钥：进程重启后会
 	"用旧密钥加密的渠道凭据将无法解密（会明确报错，不会静默返回错误值）。" +
 	"如需持久化，请配置 security.master_key / jwt.signing_keys。"
 
-// buildKeyManager 构造渠道凭据的信封加密器。
-func buildKeyManager(cfg *Config, logger *zap.Logger) (*crypto.KeyManager, error) {
+// BuildKEK 按配置挑一把 KEK。
+//
+// 导出给 cmd/seed 与 cmd/keyrewrap 用：写入密文的三个位置（服务、种子脚本、
+// 迁移工具）必须用同一套判断，否则会出现"seed 用本地密钥写、服务用 KMS 读"
+// 这种当场就能把人卡住的错配。
+//
+// 两条路径，选哪条由 security.kms.enabled 决定：
+//   - 启用 KMS：主密钥不出现在本服务的配置里，只有 key_id 与地址；
+//   - 未启用：本地主密钥（开发/过渡形态，生产用它等于把 KEK 和数据放在同一套凭证体系里）。
+func BuildKEK(cfg *Config, logger *zap.Logger) (crypto.KEK, crypto.Options, error) {
+	if cfg.Security.KMS.Enabled {
+		kek, err := crypto.NewRemoteKEK(crypto.RemoteKEKConfig{
+			BaseURL: cfg.Security.KMS.BaseURL,
+			KeyID:   firstNonEmpty(cfg.Security.KMS.KeyID, cfg.Security.KEKID),
+			Token:   cfg.Security.KMS.Token,
+			Timeout: cfg.Security.KMS.Timeout,
+		})
+		if err != nil {
+			return nil, crypto.Options{}, err
+		}
+		logger.Info("渠道凭据使用 KMS 托管密钥",
+			zap.String("kms", kek.String()),
+			zap.Duration("dek_cache_ttl", cfg.Security.KMS.DEKCacheTTL))
+		return kek, crypto.Options{
+			Timeout: cfg.Security.KMS.Timeout,
+			// DEK 缓存：渠道凭据在每次登录时都要解密，而 KMS 一次往返 5–20ms。
+			// 不缓存等于把 KMS 变成登录链路上的同步依赖。
+			DEKCacheTTL:  cfg.Security.KMS.DEKCacheTTL,
+			DEKCacheSize: cfg.Security.KMS.DEKCacheSize,
+		}, nil
+	}
+
 	if cfg.Security.MasterKey == "" {
 		if cfg.Server.IsProduction() {
-			return nil, errs.New(errs.CodeConfigInvalid, "生产模式必须配置 security.master_key")
+			return nil, crypto.Options{}, errs.New(errs.CodeConfigInvalid,
+				"生产模式必须配置 security.master_key，或启用 security.kms（推荐后者：主密钥不该和数据同处一套凭证体系）")
 		}
 		key, err := crypto.GenerateMasterKey()
 		if err != nil {
-			return nil, errs.Wrap(errs.CodeInternal, "生成临时主密钥失败", err)
+			return nil, crypto.Options{}, errs.Wrap(errs.CodeInternal, "生成临时主密钥失败", err)
 		}
 		logger.Warn(devKeyWarning,
 			zap.String("generated_master_key", crypto.EncodeMasterKey(key)),
 			zap.String("hint", "把上面这行写入配置的 security.master_key 即可固定"))
-		return crypto.NewKeyManager(cfg.Security.KEKID, key)
+		kek, err := crypto.NewLocalKEK(cfg.Security.KEKID, key)
+		return kek, crypto.Options{}, err
 	}
 	key, err := crypto.DecodeMasterKey(cfg.Security.MasterKey)
 	if err != nil {
+		return nil, crypto.Options{}, err
+	}
+	kek, err := crypto.NewLocalKEK(cfg.Security.KEKID, key)
+	return kek, crypto.Options{}, err
+}
+
+// buildKeyManager 构造渠道凭据的信封加密器。
+//
+// 密文格式在两条路径下完全相同（v2 信封），所以可以随时切换——旧数据用
+// `cmd/keyrewrap` 把 DEK 换成新 KEK 的包装即可，不需要重新加密业务数据。
+func buildKeyManager(cfg *Config, logger *zap.Logger) (*crypto.KeyManager, error) {
+	kek, opts, err := BuildKEK(cfg, logger)
+	if err != nil {
 		return nil, err
 	}
-	return crypto.NewKeyManager(cfg.Security.KEKID, key)
+	return crypto.NewKeyManager(kek, opts)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // buildClaimHasher 构造身份凭证哈希器。

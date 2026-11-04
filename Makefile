@@ -1,7 +1,8 @@
 .PHONY: help tools tidy fmt vet lint boundary build run test test-unit test-acceptance test-all \
         mock seed keygen migrate-up migrate-down migrate-status clean docker-up docker-down \
         compose-up compose-down compose-reset compose-logs image \
-        uc-build uc-run uc-migrate uc-test uc-contract
+        uc-build uc-run uc-migrate uc-test uc-contract \
+        kms-mock keyrewrap
 
 # Go 参数。构建信息通过 -ldflags 注入，便于线上用 /healthz 确认部署版本。
 GO              ?= go
@@ -39,6 +40,10 @@ help:
 	@echo "  make uc-migrate      执行用户中心迁移"
 	@echo "  make uc-test         跑用户中心测试（需要 TEST_USER_CENTER_DSN）"
 	@echo "  make uc-contract     对运行中的用户中心跑契约检查脚本"
+	@echo ""
+	@echo "密钥："
+	@echo "  make kms-mock        本地起假 KMS（9091），用于演练切换到 KMS"
+	@echo "  make keyrewrap       把已有密文迁到当前配置的 KEK（先跑 -dry-run 看一眼）"
 	@echo ""
 	@echo "验收测试的环境变量："
 	@echo "  TEST_DATABASE_URL  默认 postgres://postgres:postgres@127.0.0.1:5432/social_login?sslmode=disable"
@@ -204,6 +209,21 @@ uc-test:
 uc-contract:
 	bash scripts/check-usercenter-contract.sh http://127.0.0.1:8099 $(UC_TOKEN) \
 		--app app_contract_a --app2 app_contract_b --write
+
+## 密钥
+#
+# 切换 KEK 的完整流程见 docs/implementation-status.md §35：
+#   1) make keyrewrap DRY=1   —— 先看清有多少行还是旧格式
+#   2) make keyrewrap         —— 执行迁移（幂等，可重复）
+#   3) 把 security.kms.enabled 打开后重启服务
+#
+# 顺序反了会有旧格式密文解不开：v1 是主密钥直接加密数据，KMS 里没有那把密钥。
+keyrewrap:
+	$(GO) run ./cmd/keyrewrap -config configs/config.yaml $(if $(DRY),-dry-run,)
+
+# 假 KMS：仅本地。KEY 固定密钥，避免重启后已迁移的密文解不开。
+kms-mock:
+	$(GO) run ./cmd/mockkms -addr 127.0.0.1:9091 $(if $(KEY),-master-key $(KEY),)
 
 clean:
 	rm -rf bin keys

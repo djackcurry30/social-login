@@ -155,6 +155,27 @@ type CacheConfig struct {
 	PoolSize int    `mapstructure:"pool_size"`
 }
 
+// KMSConfig 是托管密钥（KEK）配置。
+//
+// 契约只有两个动作（wrap / unwrap DEK），由 KMS 前面的薄网关映射到具体厂商
+// （AWS KMS / 阿里云 KMS / Vault Transit 均可）。详见
+// internal/infrastructure/crypto/kek_remote.go 的文件头。
+type KMSConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	BaseURL string `mapstructure:"base_url"`
+	// KeyID 是 KMS 侧的密钥标识；留空则回落到 security.kek_id。
+	KeyID string `mapstructure:"key_id"`
+	// Token 是调用 KMS 网关的 Bearer 凭据（内网部署可留空）。
+	Token   string        `mapstructure:"token"`
+	Timeout time.Duration `mapstructure:"timeout"`
+	// DEKCacheTTL 是解包后 DEK 的内存缓存时长。
+	//
+	// 默认 5 分钟：渠道凭据在每次登录时都要解密，而 KMS 一次往返 5–20ms。
+	// 设为 0 表示不缓存（每次登录都打一次 KMS，只在排障时值得这么做）。
+	DEKCacheTTL  time.Duration `mapstructure:"dek_cache_ttl"`
+	DEKCacheSize int           `mapstructure:"dek_cache_size"`
+}
+
 // SecurityConfig 是密钥与哈希盐配置。
 type SecurityConfig struct {
 	// MasterKey 是信封加密的主密钥（Base64，32 字节）。
@@ -163,6 +184,9 @@ type SecurityConfig struct {
 	// KEKID 是主密钥版本标识，写入 app_provider_configs.secret_dek_id，
 	// 用于密钥轮换时区分"哪一版密钥加密的凭据"。
 	KEKID string `mapstructure:"kek_id"`
+	// KMS 是托管密钥配置。启用后 master_key 不再需要，也不需要出现在
+	// 本服务的任何配置文件或环境变量里。
+	KMS KMSConfig `mapstructure:"kms"`
 	// ClaimSalt 是身份凭证哈希的静态盐。
 	//
 	// ⚠️ 绝不能用每行随机盐：claim 的核心用途就是"按手机号反查身份"，
