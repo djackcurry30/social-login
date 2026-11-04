@@ -17,10 +17,23 @@ import (
 // lumberjack 切割、zapcore 自定义 encoder、与 gin 访问日志的对接方案都更成熟，
 // 团队也更熟悉（tech-stack §3.4）。
 func NewLogger(cfg LogConfig) (*zap.Logger, error) {
-	level, err := parseLevel(cfg.Level)
+	l, _, err := NewLoggerWithControl(cfg)
+	return l, err
+}
+
+// NewLoggerWithControl 与 NewLogger 相同，但额外返回级别的原子句柄。
+//
+// 需要它的是"配置热更新"：日志级别是最该支持运行时调整的一项
+// （线上把级别调到 debug 查一次问题，再调回来），而 zap 的 AtomicLevel
+// 是唯一不需要重建 core 就能改级别的机制。
+func NewLoggerWithControl(cfg LogConfig) (*zap.Logger, *zap.AtomicLevel, error) {
+	lvl, err := parseLevel(cfg.Level)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	// 用 AtomicLevel 而不是直接传 lvl：SetLevel 之后所有已生成的 logger
+	// 立刻生效（core 持有的是同一个原子变量）。
+	level := zap.NewAtomicLevelAt(lvl)
 
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.TimeKey = "ts"
@@ -58,7 +71,7 @@ func NewLogger(cfg LogConfig) (*zap.Logger, error) {
 		zap.AddCaller(),
 		zap.AddStacktrace(zapcore.ErrorLevel),
 	)
-	return logger, nil
+	return logger, &level, nil
 }
 
 func parseLevel(s string) (zapcore.Level, error) {

@@ -186,6 +186,11 @@ func (s *Service) Revoke(ctx context.Context, in RevokeInput) (*RevokeOutput, er
 	if len([]rune(in.Reason)) < 4 {
 		return nil, errs.New(errs.CodeAdminReasonRequired, "强制下线必须填写 reason（≥4 字符）")
 	}
+	// 应用范围：受限管理员只能对自己范围内的应用执行强制下线。
+	// app_id 来自请求体，中间件看不到，只能在这里校验。
+	if in.Principal != nil && !admin.AllowsApp(in.Principal.User, "token:revoke", in.AppID) {
+		return nil, errs.New(errs.CodeNotFound, "应用不存在")
+	}
 	if s.deps.Revocation == nil {
 		// 没有撤销名单就无法兑现"立即失效"的承诺。宁可失败也不做半套：
 		// 半套会让运营以为下线成功。

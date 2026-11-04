@@ -226,6 +226,34 @@ func (p Policy) Validate() (*ValidationResult, error) {
 		}
 	}
 
+	// source_disposal 必须显式合法。
+	//
+	// 写错一个字母（如 request_deleted）会让"合并后删除"静默变成"只标记"——
+	// 配置看起来开了，数据却一直留着。这类"能配不生效"是本轮专门要消掉的。
+	switch p.Merge.SourceDisposal {
+	case DisposalMarkMerged, DisposalRequestDelete:
+	default:
+		return nil, errs.Newf(errs.CodeConfigInvalid, "未知的 source_disposal: %s", p.Merge.SourceDisposal).
+			WithDetail("field", "merge.source_disposal").
+			WithDetail("valid", []string{DisposalMarkMerged, DisposalRequestDelete})
+	}
+
+	// verification 的取值集合。
+	//
+	// existing_binding 与 strict 是 2026-11-04 补的：前者用"持有 source 账号的
+	// 有效会话"证明控制权（source 没有手机号时唯一的非人工路径），后者要求
+	// 两者都满足。取值集合必须在这里显式列出——否则拼错的 verification
+	// 会被当成"未知"，而真正的风险是它被静默忽略。
+	switch p.Merge.Verification {
+	case VerificationNone, VerificationExistingBinding, VerificationSMS, VerificationStrict:
+	default:
+		return nil, errs.Newf(errs.CodeConfigInvalid, "未知的 merge.verification: %s", p.Merge.Verification).
+			WithDetail("field", "merge.verification").
+			WithDetail("valid", []string{
+				VerificationNone, VerificationExistingBinding, VerificationSMS, VerificationStrict,
+			})
+	}
+
 	// auto + 未开启跨平台 + 该配置确实涉及跨平台场景时，降级为 confirm 并告警。
 	// 这里无法在配置校验阶段判断"是否涉及跨平台"，因此只在显式开启跨平台
 	// 但模式为 confirm 时给出提示；真正的跨平台判定在归并链路中执行（§7.5.3 红线 3）。

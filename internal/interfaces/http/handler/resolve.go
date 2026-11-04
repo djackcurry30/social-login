@@ -18,7 +18,10 @@ import (
 // 交给客户端，验证码会变成一个万能通行证。
 type resolveRequest struct {
 	MergeTicket string `json:"merge_ticket" binding:"required"`
-	// Action 是 send_code | verify。
+	// Action 是 send_code | verify | verify_existing。
+	//
+	//	verify_existing 需要带 source 账号的 Authorization: Bearer——
+	//	它用"已有的绑定/会话"代替短信证明控制权（verification=existing_binding）。
 	Action string `json:"action" binding:"required"`
 	Code   string `json:"code"`
 	// ExternalUserID 仅服务端到服务端调用时提供（与 /v1/bind 同口径）。
@@ -96,8 +99,34 @@ func (h *Handler) Resolve(c *gin.Context) {
 			"already":      res.AlreadyMerged,
 		})
 
+	case "verify_existing":
+		// 必须有 Bearer：请求体里的 external_user_id 只能证明"调用方持有
+		// app_secret"，不能证明"用户本人控制着 source 账号"。用服务端断言
+		// 替换会话证据，等于把 confirm 模式降级成"谁有 app_secret 谁说了算"。
+		if bearerToken(c) == "" {
+			httputil.Fail(c, h.logger(), errs.New(errs.CodeUnauthorized,
+				"该验证方式需要携带被合并账号的访问令牌（Authorization: Bearer）").
+				WithDetail("action", req.Action))
+			return
+		}
+		res, err := h.deps.Merge.CompleteExistingBinding(c.Request.Context(), appmerge.CompleteVerificationInput{
+			TicketID:     req.MergeTicket,
+			CallerUserID: callerUserID,
+		})
+		if err != nil {
+			httputil.Fail(c, h.logger(), err)
+			return
+		}
+		httputil.OK(c, http.StatusOK, gin.H{
+			"merged_into":  callerUserID,
+			"operation_id": res.OperationID,
+			"already":      res.AlreadyMerged,
+			"verified_by":  "existing_binding",
+		})
+
 	default:
 		httputil.Fail(c, h.logger(),
-			errs.Newf(errs.CodeInvalidRequest, "未知的 action: %s（应为 send_code 或 verify）", req.Action))
+			errs.Newf(errs.CodeInvalidRequest,
+				"未知的 action: %s（应为 send_code、verify 或 verify_existing）", req.Action))
 	}
 }

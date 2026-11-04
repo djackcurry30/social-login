@@ -197,14 +197,124 @@ func (u *User) Permissions() []string {
 	return out
 }
 
+// ScopeFor 返回某权限可作用于哪些应用。
+//
+// 返回值语义：
+//
+//	restricted=false        不受限（全局），appIDs 无意义
+//	restricted=true, ids=[] 有该权限但只限若干应用；空列表表示"一个都不许"
+//
+// 判定看【权限的来源】而不是看"有没有 grant"：
+//
+//	基础角色 admin_users.role 是全局的      → 只要它有该权限，就不受限
+//	附加授权 grant.scope_app_id = NULL      → 全局
+//	附加授权 grant.scope_app_id = 7         → 只限 7
+//
+// 这样同一个人的不同权限可以有不同的范围（例如 base role=viewer 看全部，
+// 临时授予的 operator 只限应用 7），不需要在表上再加一个"人级别"的范围字段。
+// 只有一条全局来源就放开——收紧的方向必须是"少给权限"，而不是把已有的
+// 全局角色突然降成单应用，否则上线当天会有一批人看不见数据。
+func (u *User) ScopeFor(perm string) (appIDs []int64, restricted bool) {
+	if u == nil {
+		return nil, false
+	}
+	if u.Role == RoleSuperAdmin || u.Role.Has(perm) {
+		// 基础角色是全局的：不能因为"他还被授了一个单应用角色"就把基础
+		// 角色的可见范围缩小。
+		return nil, false
+	}
+	now := time.Now().UTC()
+	scoped := make([]int64, 0, len(u.Grants))
+	for i := range u.Grants {
+		g := &u.Grants[i]
+		if !g.Effective(now) || !g.Role.Has(perm) {
+			continue
+		}
+		if g.Role == RoleSuperAdmin || g.ScopeAppID == nil {
+			return nil, false
+		}
+		scoped = append(scoped, *g.ScopeAppID)
+	}
+	return scoped, true
+}
+
+// CanInApp 判断管理员能否在指定应用上使用某权限。
+func (u *User) CanInApp(perm string, appID int64) bool {
+	if !u.Can(perm) {
+		return false
+	}
+	ids, restricted := u.ScopeFor(perm)
+	if !restricted {
+		return true
+	}
+	for _, id := range ids {
+		if id == appID {
+			return true
+		}
+	}
+	return false
+}
+
+// UserOf 从 Principal 取 User，nil 安全。
+func UserOf(p *Principal) *User {
+	if p == nil {
+		return nil
+	}
+	return p.User
+}
+
+// AllowsApp 报告 user 能否在 appID 上使用 perm。
+//
+// u 为 nil 表示"没有主体上下文"（内部调用、补偿任务、单测），此时放行——
+// 这类调用不经过 HTTP 鉴权层，本来就不该受管理员的可见范围约束。
+// HTTP 路径上主体一定非 nil（Authenticate 中间件保证）。
+func AllowsApp(u *User, perm string, appID int64) bool {
+	if u == nil {
+		return true
+	}
+	return u.CanInApp(perm, appID)
+}
+
+// RestrictApp 把请求里的 appID 收敛到管理员的权限范围内。
+//
+// 三个返回值组合的含义：
+//
+//	(appID, true)   可以用，appID 是最终生效的应用（可能由范围补全）
+//	(0,     false)  越界或无法确定，调用方应返回 404
+//
+// 为什么"没传 app_id 但有唯一范围"时自动补全：受限管理员只有一个应用，
+// 让他每次都手动带 app_id 只是制造 403。反过来，范围里有多于一个应用
+// 却没指明时拒绝——猜错应用会改错数据，而且事后很难发现。
+func RestrictApp(u *User, perm string, requested int64) (int64, bool) {
+	if u == nil {
+		return requested, true
+	}
+	ids, restricted := u.ScopeFor(perm)
+	if !restricted {
+		return requested, true
+	}
+	if requested != 0 {
+		for _, id := range ids {
+			if id == requested {
+				return requested, true
+			}
+		}
+		return 0, false
+	}
+	if len(ids) == 1 {
+		return ids[0], true
+	}
+	return 0, false
+}
+
 // Can 判断管理员是否拥有某项权限。
 //
 // 判定是【基础角色 ∪ 附加授权】：这样 K 组上线不需要一次性迁移所有
 // 现有管理员，也不会因为漏迁而让人突然失去权限。
 //
-// ⚠️ 当前忽略 Grant.ScopeAppID：现有接口没有"按应用"的权限边界，
-// 按全局处理。真正的按应用隔离需要中间件拿到目标 app_id，
-// 那是一次跨所有端点的改动。
+// ⚠️ 它只回答"有没有这个权限"，不回答"能用在哪个应用上"——
+// 后者看 ScopeFor / CanInApp。中间件 adminmw.Require 已经把两者串起来，
+// handler 里不要只调 Can 就认为安全。
 func (u *User) Can(perm string) bool {
 	if u == nil {
 		return false

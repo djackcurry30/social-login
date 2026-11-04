@@ -13,6 +13,8 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+
+	"github.com/djackcurry30/social-login/internal/domain/approval"
 	"time"
 )
 
@@ -357,3 +359,41 @@ type claimMismatchModel struct {
 }
 
 func (claimMismatchModel) TableName() string { return "claim_mismatches" }
+
+// adminApprovalModel 是 admin_approvals 的映射（双人复核审批单）。
+//
+// 与其它管理端模型一样单独列一个结构体，而不是复用 domain 类型：
+// 领域模型不该带 gorm 标签，否则"存储细节"会渗进领域层。
+type adminApprovalModel struct {
+	ID          int64      `gorm:"column:id;primaryKey"`
+	Action      string     `gorm:"column:action"`
+	AppID       *int64     `gorm:"column:app_id"`
+	PayloadHash string     `gorm:"column:payload_hash"`
+	RequestedBy int64      `gorm:"column:requested_by"`
+	RequestedAt time.Time  `gorm:"column:requested_at"`
+	Reason      string     `gorm:"column:reason"`
+	Status      string     `gorm:"column:status"`
+	ApprovedBy  *int64     `gorm:"column:approved_by"`
+	ApprovedAt  *time.Time `gorm:"column:approved_at"`
+	ConsumedAt  *time.Time `gorm:"column:consumed_at"`
+	ExpiresAt   time.Time  `gorm:"column:expires_at"`
+}
+
+func (adminApprovalModel) TableName() string { return "admin_approvals" }
+
+func (m *adminApprovalModel) toDomain() *approval.Approval {
+	return &approval.Approval{
+		ID:          m.ID,
+		Action:      m.Action,
+		AppID:       m.AppID,
+		PayloadHash: m.PayloadHash,
+		RequestedBy: m.RequestedBy,
+		RequestedAt: m.RequestedAt,
+		Reason:      m.Reason,
+		Status:      approval.Status(m.Status),
+		ApprovedBy:  m.ApprovedBy,
+		ApprovedAt:  m.ApprovedAt,
+		ConsumedAt:  m.ConsumedAt,
+		ExpiresAt:   m.ExpiresAt,
+	}
+}

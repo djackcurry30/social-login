@@ -412,6 +412,13 @@ type ListAppsInput struct {
 	// Status 过滤：-1 = 全部，0 = 停用，1 = 启用。
 	Status int
 	Name   string
+	// AllowedAppIDs 是调用者可见的应用集合。nil 表示不受限。
+	//
+	// 由 handler 从管理员的应用范围（admin.User.ScopeFor）传下来。
+	// 放在这里而不是在 handler 里二次过滤：分页语义必须一致——
+	// 若先取 20 条再过滤掉 19 条，受限管理员会看到"只有 1 条，下一页空白"，
+	// 而实际上他名下可能有多个应用。
+	AllowedAppIDs []int64
 }
 
 // ListAppsOutput 是列表出参。
@@ -441,6 +448,23 @@ func (s *Service) ListApps(ctx context.Context, in ListAppsInput) (*ListAppsOutp
 	ids, err := s.deps.ListAppIDs(ctx, in.PageSize*in.Page)
 	if err != nil {
 		return nil, err
+	}
+	// 受限管理员：只保留范围内的应用 id。
+	//
+	// 注意是在拉取【之前】收窄 id 集合，而不是拉完再 filter——
+	// 后者会让分页数量不准（上面 AllowedAppIDs 的注释有说明）。
+	if in.AllowedAppIDs != nil {
+		allowed := make(map[int64]struct{}, len(in.AllowedAppIDs))
+		for _, id := range in.AllowedAppIDs {
+			allowed[id] = struct{}{}
+		}
+		kept := ids[:0]
+		for _, id := range ids {
+			if _, ok := allowed[id]; ok {
+				kept = append(kept, id)
+			}
+		}
+		ids = kept
 	}
 	out := make([]AppView, 0, len(ids))
 	for _, id := range ids {

@@ -145,6 +145,11 @@ func (s *Service) Retry(ctx context.Context, id int64, in RetryInput) error {
 	if err != nil {
 		return mapErr(err)
 	}
+	// 应用范围：受限管理员不能操作范围外应用的合并记录。
+	// 越界按"记录不存在"返回，避免泄露另一个应用里有没有这条记录。
+	if in.Principal != nil && !admin.AllowsApp(in.Principal.User, "merge:retry", op.AppID) {
+		return errs.New(errs.CodeNotFound, "合并记录不存在")
+	}
 	switch op.Status {
 	case mergex.StatusFailed, mergex.StatusPending, mergex.StatusRejected:
 		// 允许 rejected 重试：运维可能刚把应用策略从 manual 改成 auto，

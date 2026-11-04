@@ -15,10 +15,15 @@
 package admin
 
 import (
-	"github.com/gin-gonic/gin"
+	"net/http"
 
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"github.com/djackcurry30/social-login/internal/domain/approval"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/admin/handler"
 	"github.com/djackcurry30/social-login/internal/interfaces/http/adminmw"
+	"github.com/djackcurry30/social-login/internal/interfaces/http/httputil"
 )
 
 // MountAdmin 把 admin 路由（/admin/v1/*）注册到 parent。
@@ -41,6 +46,18 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 
 	authHandler := handler.NewAuthHandler(deps.AuthLogin, deps.Logger)
 
+	// guarded 组装"权限 + 可选的双人复核"中间件链。
+	//
+	// 把"哪些动作要审批"做成配置而不是写死在代码里：同一条代码路径在
+	// 开发环境（不审批）与生产环境（必须审批）都可用，不需要两套分支。
+	guarded := func(perm, action string) []gin.HandlerFunc {
+		chain := []gin.HandlerFunc{adminmw.Require(perm)}
+		if deps.Approvals != nil && deps.ApprovalActions[action] {
+			chain = append(chain, adminmw.RequireApproval(deps.Approvals, action))
+		}
+		return chain
+	}
+
 	// /admin/v1/auth/login 不需要鉴权，单独放
 	r.POST("/admin/v1/auth/login", authHandler.Login)
 
@@ -50,6 +67,41 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		// /auth/me 与 /auth/logout 走 viewer（即任何已认证用户）
 		api.GET("/auth/me", adminmw.Require("app:read"), authHandler.Me)
 		api.POST("/auth/logout", adminmw.Require("app:read"), authHandler.Logout)
+
+		// 双人复核（C5）。
+		if deps.Approvals != nil {
+			apH := handler.NewApprovalsHandler(deps.Approvals, deps.Logger)
+			// 提交申请：任何已认证管理员都能提（真正执行时仍校验原权限）。
+			api.POST("/approvals", adminmw.Require("app:read"), apH.Create)
+			api.GET("/approvals", adminmw.Require("app:read"), apH.List)
+			// 批准/驳回：只有超管。admin:approve 是虚拟权限——
+			// 它不在 Permissions 闭包表里，因此 Role.Has 只有 super_admin 返回 true。
+			api.POST("/approvals/:id/approve", adminmw.Require("admin:approve"), apH.Approve)
+			api.POST("/approvals/:id/reject", adminmw.Require("admin:approve"), apH.Reject)
+		}
+
+		// 系统配置热更新。
+		//
+		// 为什么放在管理端而不是让进程监听 SIGHUP 就够了：
+		// SIGHUP 在容器里经常收不到（PID 1 的信号处理、k8s 的 exec 语义），
+		// 而"改完配置要生效"是运维的日常动作，需要一条可脚本化、可审计、
+		// 能返回"哪些生效了、哪些要重启"的接口。
+		if deps.ConfigReload != nil {
+			api.POST("/config/reload", adminmw.Require("config:write"), func(c *gin.Context) {
+				res, err := deps.ConfigReload.Reload()
+				if err != nil {
+					httputil.Fail(c, deps.Logger, err)
+					return
+				}
+				if p := adminmw.Principal(c); p != nil && deps.Logger != nil {
+					deps.Logger.Info("管理端触发配置热更新",
+						zap.String("admin", p.User.Username),
+						zap.Strings("applied", res.Applied),
+						zap.Strings("requires_restart", res.RequiresRestart))
+				}
+				httputil.OK(c, http.StatusOK, res)
+			})
+		}
 
 		// A 组：应用与策略
 		//
@@ -61,7 +113,8 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		api.POST("/apps", adminmw.Require("app:write"), appH.Create)
 		api.GET("/apps/:appId", adminmw.Require("app:read"), appH.Get)
 		api.PATCH("/apps/:appId", adminmw.Require("app:write"), appH.Update)
-		api.POST("/apps/:appId/secret/rotate", adminmw.Require("app:write"), appH.RotateSecret)
+		api.POST("/apps/:appId/secret/rotate",
+			append(guarded("app:write", approval.ActionAppRotateSecret), appH.RotateSecret)...)
 		api.GET("/apps/:appId/policy", adminmw.Require("app:read"), appH.GetPolicy)
 		api.PUT("/apps/:appId/policy", adminmw.Require("app:write"), appH.SavePolicy)
 		api.POST("/apps/:appId/policy/validate", adminmw.Require("app:read"), appH.ValidatePolicy)
@@ -75,7 +128,8 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 		api.POST("/apps/:appId/provider-configs", adminmw.Require("config:write"), chanH.Create)
 		api.GET("/apps/:appId/provider-configs/:id", adminmw.Require("config:read"), chanH.Get)
 		api.PATCH("/apps/:appId/provider-configs/:id", adminmw.Require("config:write"), chanH.Update)
-		api.POST("/apps/:appId/provider-configs/:id/secret/rotate", adminmw.Require("config:write"), chanH.RotateSecret)
+		api.POST("/apps/:appId/provider-configs/:id/secret/rotate",
+			append(guarded("config:write", approval.ActionConfigRotateSecret), chanH.RotateSecret)...)
 		api.POST("/apps/:appId/provider-configs/:id/secret/finalize", adminmw.Require("config:write"), chanH.FinalizeSecret)
 		api.POST("/apps/:appId/provider-configs/:id/secret/verify", adminmw.Require("config:write"), chanH.Verify)
 		api.POST("/apps/:appId/provider-configs/:id/enable", adminmw.Require("config:write"), chanH.Enable)
@@ -184,7 +238,8 @@ func registerRoutes(r *gin.Engine, deps Deps) {
 			kH := handler.NewSigningKeysHandler(deps.AdminKey, deps.Logger)
 			api.GET("/signing-keys", adminmw.Require("key:read"), kH.List)
 			api.GET("/signing-keys/jwks-preview", adminmw.Require("key:read"), kH.JWKSPreview)
-			api.POST("/signing-keys/rotate", adminmw.Require("key:write"), kH.Rotate)
+			api.POST("/signing-keys/rotate",
+				append(guarded("key:write", approval.ActionKeyRotate), kH.Rotate)...)
 			api.POST("/signing-keys/:kid/retire", adminmw.Require("key:write"), kH.Retire)
 		}
 

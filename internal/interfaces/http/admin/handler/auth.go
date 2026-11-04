@@ -256,6 +256,21 @@ func (h *AuthHandler) Me(c *gin.Context) {
 			errs.New(errs.CodeUnauthorized, "未认证"))
 		return
 	}
+	// 应用范围：只列出"被限制"的权限及其可作用的应用。
+	// 前端据此隐藏全局视图入口（看板、渠道健康、管理员名单），
+	// 否则用户点进去才收到 403。
+	appScopes := map[string][]int64{}
+	for _, perm := range p.User.Permissions() {
+		if perm == "*" {
+			continue
+		}
+		if ids, restricted := p.User.ScopeFor(perm); restricted {
+			if ids == nil {
+				ids = []int64{}
+			}
+			appScopes[perm] = ids
+		}
+	}
 	httputil.OK(c, http.StatusOK, gin.H{
 		"user_id":      p.User.ID,
 		"username":     p.User.Username,
@@ -264,6 +279,7 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		// 有效权限集（基础角色 ∪ 生效 grants）。前端据此决定按钮是否可点，
 		// 避免"点了才 403"。super_admin 返回 ["*"]。
 		"permissions":        p.User.Permissions(),
+		"app_scopes":         appScopes,
 		"last_login_at":      p.User.LastLoginAt,
 		"session_expires_at": p.Session.ExpiresAt,
 	})

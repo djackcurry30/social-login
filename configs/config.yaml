@@ -240,3 +240,16 @@ tracing:
   max_queue_size: 2048
   # 导出请求附加头（collector 侧鉴权）。键值都不进日志。
   headers: {}
+
+admin:
+  # 双人复核：这些动作必须由【另一名超管】批准后才能执行。
+  #
+  # 规则：
+  #   release 且未配置 → 三个高危轮换动作全部要求审批（安全默认）
+  #   debug  且未配置 → 不要求（本地流程不必维护两个超管账号）
+  #
+  # 可选值（写错会被启动校验拒绝，不会静默失效）：
+  #   app.rotate_secret     应用 app_secret 轮换（会让旧 secret 立即失效）
+  #   config.rotate         渠道 client_secret 轮换
+  #   key.rotate            签名密钥轮换（JWKS 变更，影响所有业务方验签）
+  approval_required_actions: []

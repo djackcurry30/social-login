@@ -207,6 +207,9 @@ func (s *Service) RevokeClaim(ctx context.Context, claimID int64, in RevokeClaim
 	if len([]rune(in.Reason)) < 4 {
 		return nil, errs.New(errs.CodeAdminReasonRequired, "撤销凭证必须填写 reason（≥4 字符）")
 	}
+	if !admin.AllowsApp(admin.UserOf(in.Principal), "identity:write", in.AppID) {
+		return nil, errs.New(errs.CodeNotFound, "凭证不存在")
+	}
 	if s.deps.Claims == nil {
 		return nil, errs.New(errs.CodeInternal, "凭证仓储未装配")
 	}

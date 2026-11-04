@@ -72,6 +72,11 @@ const (
 	CodeAdminReasonRequired Code = "ADMIN.REASON_REQUIRED"
 	CodeAdminVerifyFailed   Code = "ADMIN.VERIFY_FAILED"
 	CodeAdminConflict       Code = "ADMIN.CONFLICT"
+	// CodeAdminApprovalRequired 表示该操作需要一张已批准的双人复核单。
+	//
+	// 单独一个码（而不是复用 FORBIDDEN）：调用方据此判断"该去走审批流程"，
+	// 而不是"我没有权限"——两者的后续动作完全不同。
+	CodeAdminApprovalRequired Code = "ADMIN.APPROVAL_REQUIRED"
 )
 
 // meta 是错误码的默认元信息。默认值可以被具体错误实例覆盖。
@@ -132,11 +137,12 @@ var defaults = map[Code]meta{
 	// httputil.Fail 会把它们统一折算成 500。表现是"管理员少填一个 reason
 	// 却收到 500 INTERNAL"，前端无法把它当成表单校验错误展示——
 	// 而 reason 缺失本就是 4xx 的输入问题。
-	CodeAdminSessionExpired: {http.StatusUnauthorized, false},
-	CodeAdminSessionRevoked: {http.StatusUnauthorized, false},
-	CodeAdminReasonRequired: {http.StatusBadRequest, false},
-	CodeAdminVerifyFailed:   {http.StatusBadRequest, false},
-	CodeAdminConflict:       {http.StatusConflict, false},
+	CodeAdminSessionExpired:   {http.StatusUnauthorized, false},
+	CodeAdminSessionRevoked:   {http.StatusUnauthorized, false},
+	CodeAdminReasonRequired:   {http.StatusBadRequest, false},
+	CodeAdminVerifyFailed:     {http.StatusBadRequest, false},
+	CodeAdminConflict:         {http.StatusConflict, false},
+	CodeAdminApprovalRequired: {http.StatusForbidden, false},
 }
 
 // Error 是本服务统一的错误类型。所有跨越层边界的错误都应归一化为它。

@@ -46,6 +46,13 @@ type Deps struct {
 	Challenges mergex.ChallengeStore
 	// Sender 发验证码短信。
 	Sender mergex.CodeSender
+	// Closer 是"把被合并账号真正删掉"的可选能力（用户中心注销接口）。
+	//
+	// 只有 merge.source_disposal=request_delete 时才会用到，因此它是可选的：
+	// 未装配时该配置会被前置校验拒绝（见 precheck），而不是"合并完了发现
+	// 什么都没删"——那正是本轮要修的"能配不生效"。
+	// 留空时 New 会尝试从 Accounts 上做能力探测（HTTP/Stub 实现都带 Close）。
+	Closer account.AccountCloser
 	// RemoteIdempotent 表示用户中心是否真正实现了按幂等键去重（§D3 硬性要求）。
 	//
 	// 为 false 时**不做自动重试**，只发告警：非幂等的 Merge 被重复执行会
@@ -73,11 +80,38 @@ type Request struct {
 	Identity *identity.Identity
 	Trigger  Trigger
 	Reason   string
-	// Verified 表示调用方【已经完成】用户验证（confirm 模式的短信验证）。
+	// Proof 是调用方已完成的验证凭据集合。
 	//
-	// 只有 merge.Service 自己的验证流程会把它置为 true；HTTP 层不暴露这个
-	// 字段——否则调用方可以绕过验证直接声称"我验证过了"，confirm 模式作废。
-	Verified bool
+	// 只有 merge.Service 自己的验证流程会填它；HTTP 层不暴露这个字段——
+	// 否则调用方可以绕过验证直接声称"我验证过了"，confirm 模式作废。
+	Proof Proof
+}
+
+// Proof 是"用户已经证明自己控制 source 账号"的证据。
+//
+// 为什么用两个布尔而不是一个枚举：strict 模式要求【同时】满足两种证明，
+// 枚举表达不了"两个都要"。而"用户先发了短信、又用自己的另一个会话确认过"
+// 这种组合在真实流程里是可能出现的（用户来回切换）。
+type Proof struct {
+	// SMS 表示已通过发送到 source 手机号的一次性验证码。
+	SMS bool
+	// ExistingBinding 表示调用方持有一个属于 source 账号的有效会话
+	// （access_token 的 sub 就是 source），即"已有的绑定"本身就是证据。
+	ExistingBinding bool
+}
+
+// has 判断该验证方式是否已被证明。
+func (p Proof) has(method string) bool {
+	switch method {
+	case tenant.VerificationSMS:
+		return p.SMS
+	case tenant.VerificationExistingBinding:
+		return p.ExistingBinding
+	case tenant.VerificationStrict:
+		return p.SMS && p.ExistingBinding
+	default:
+		return false
+	}
 }
 
 // Result 是合并结果。
@@ -119,6 +153,13 @@ type Service struct {
 func New(d Deps) *Service {
 	if d.Now == nil {
 		d.Now = func() time.Time { return time.Now().UTC() }
+	}
+	if d.Closer == nil {
+		// 能力探测而不是强制注入：注销是可选端口（domain/account.AccountCloser），
+		// 让每个装配点都写一遍类型断言只会多出漏写的机会。
+		if c, ok := d.Accounts.(account.AccountCloser); ok {
+			d.Closer = c
+		}
 	}
 	return &Service{deps: d}
 }
@@ -207,17 +248,8 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 			WithDetail("operation_id", op.ID)
 	}
 
-	// 第 3 步：独立事务 B —— 本地收敛 + 事件 + 审计。
-	if err := s.deps.Converger.Converge(ctx, mergex.ConvergeInput{
-		AppID:        req.App.ID,
-		OperationID:  op.ID,
-		TargetUserID: req.TargetUserID,
-		SourceUserID: req.SourceUserID,
-		IdentityID:   identityIDOf(req.Identity),
-		RemoteResult: remoteRef(remote),
-		Event:        s.mergedEvent(req, op, remote),
-		Audit:        s.mergedAudit(ctx, req, op, remote),
-	}); err != nil {
+	// 第 3 步：独立事务 B —— 本地收敛 + 事件 + 审计（含 source 处置）。
+	if err := s.converge(ctx, req, op, remote); err != nil {
 		// 远端已成功、本地收敛失败：这是最需要补偿的状态。
 		// 标 failed 而不是 dead——补偿任务会在下一轮重新走第 2、3 步，
 		// 而第 2 步因幂等键会命中"已合并"，不会重复迁移数据。
@@ -242,6 +274,18 @@ func (s *Service) Execute(ctx context.Context, req Request) (*Result, error) {
 func (s *Service) precheck(req Request) (string, error) {
 	p := req.App.Policy.Merge
 
+	// 配置了"合并后删除 source"但没有注销能力：必须在动手之前拒绝。
+	//
+	// 放到合并之后才发现，用户看到的是"合并成功"，而被合并的账号仍然活着——
+	// 隐私承诺（数据最小化）落空，且没有任何信号提示运维。
+	if p.SourceDisposal == tenant.DisposalRequestDelete && s.deps.Closer == nil {
+		return p.Mode, &RejectError{
+			Reason: "应用配置为合并后删除被合并账号（source_disposal=request_delete），" +
+				"但本服务未接入用户中心的注销能力，无法执行删除",
+			Code: errs.CodeConfigInvalid,
+		}
+	}
+
 	switch p.Mode {
 	case tenant.MergeModeManual:
 		// manual：只提示不处理。记录一条 rejected 便于管理端看到"用户试图合并过"。
@@ -252,10 +296,10 @@ func (s *Service) precheck(req Request) (string, error) {
 	case tenant.MergeModeConfirm:
 		// confirm：需要用户证明对 source 账号的控制权。
 		//
-		// Verified=true 表示验证流程（POST /v1/bind/resolve → 短信验证码）已完成。
-		// 未验证时只返回哨兵错误，绝不降级为 auto——那等于把 confirm 配置
-		// 静默改成 auto，是最危险的一类静默失败。
-		if req.Verified {
+		// 证明方式由应用配置决定（sms / existing_binding / strict），
+		// 见 Proof。未满足时只返回哨兵错误，绝不降级为 auto——那等于把
+		// confirm 配置静默改成 auto，是最危险的一类静默失败。
+		if req.Proof.has(p.Verification) {
 			return p.Mode, nil
 		}
 		return p.Mode, ErrNeedVerification
@@ -275,14 +319,114 @@ func (s *Service) precheck(req Request) (string, error) {
 
 // Event/Audit 构造 ---
 
-func (s *Service) mergedEvent(req Request, op *mergex.Operation, remote *account.MergeResult) *mergex.ConvergeEvent {
+// converge 是"第 3 步"的唯一实现，执行路径与补偿路径共用。
+//
+// 合并成功后的收敛只有一份逻辑：绑定改挂、令牌撤销、事件、审计都必须
+// 完全一致。以前 Execute 与 Resume 各写一遍，任何一处漏改都会让"正常合并"
+// 与"补偿修复的合并"产生不同的数据形状——那类差异极难发现。
+func (s *Service) converge(ctx context.Context, req Request, op *mergex.Operation, remote *account.MergeResult) error {
+	disposal := s.disposeSource(ctx, req)
+	return s.deps.Converger.Converge(ctx, mergex.ConvergeInput{
+		AppID:        req.App.ID,
+		OperationID:  op.ID,
+		TargetUserID: req.TargetUserID,
+		SourceUserID: req.SourceUserID,
+		IdentityID:   identityIDOf(req.Identity),
+		RemoteResult: remoteRef(remote),
+		Event:        s.mergedEvent(req, op, remote, disposal),
+		Audit:        s.mergedAudit(ctx, req, op, remote, disposal),
+	})
+}
+
+// disposalResult 是"被合并账号处置"的执行结果，进事件体与审计。
+//
+// 为什么把失败也记进去：删除没做成是安全/合规意义上的欠账，必须能被
+// 外部系统（消费事件的业务方）与审计查询看到，而不是只躺在一条 Warn 日志里。
+type disposalResult struct {
+	// Policy 是生效的配置值（mark_merged / request_delete）。
+	Policy string
+	// Closed 表示用户中心确认该账号已注销。
+	Closed bool
+	// Err 是失败原因（不含凭据；仅取错误文本的前 200 字符）。
+	Err string
+}
+
+// disposeSource 按应用策略处置被合并的账号。
+//
+// 两种语义：
+//
+//	mark_merged    只标记（用户中心把 source 置为 merged 并指向 target）。
+//	               本地绑定已改挂、令牌已撤销，账号本身保留用于追溯。
+//	request_delete 额外请求用户中心注销该账号（数据最小化）。
+//	               这是不可逆操作，因此只在应用显式配置时执行。
+//
+// 三个必须守住的点：
+//
+//  1. 【失败不回滚合并】。远端已经合并完、本地也已改挂，此时"删除没做成"
+//     不该把整个流程判失败——那会让用户看到失败但账号已经被并走了。
+//  2. 【不继承请求的取消】。用户断开连接不能让"删除"这一步半途而废：
+//     半个删除比没删除更难解释。用 WithoutCancel + 独立超时。
+//  3. 【幂等】。补偿任务会重放整条流程，用户中心的 close 对已注销账号
+//     返回成功（见 AccountCloser 的语义要求），因此重放安全。
+func (s *Service) disposeSource(ctx context.Context, req Request) disposalResult {
+	policy := req.App.Policy.Merge.SourceDisposal
+	out := disposalResult{Policy: policy}
+	if policy != tenant.DisposalRequestDelete {
+		return out
+	}
+	if s.deps.Closer == nil {
+		// precheck 已经拦过一次；走到这里说明策略在合并过程中被改过。
+		out.Err = "未装配注销能力"
+		return out
+	}
+
+	// 3s：与 accountsync 的单次远端调用同一个预算，明显小于整条绑定链路。
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+
+	if err := s.deps.Closer.Close(callCtx, req.App.AppCode, req.SourceUserID); err != nil {
+		out.Err = truncate(err.Error(), 200)
+		s.logger().Warn("被合并账号的删除请求失败：合并已完成，需要人工跟进",
+			zap.Int64("app_id", req.App.ID),
+			zap.String("source", req.SourceUserID),
+			zap.String("policy", policy),
+			zap.Error(err))
+		return out
+	}
+	out.Closed = true
+	s.logger().Info("被合并账号已按策略删除",
+		zap.Int64("app_id", req.App.ID), zap.String("source", req.SourceUserID))
+	return out
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+func (s *Service) mergedEvent(req Request, op *mergex.Operation, remote *account.MergeResult, d disposalResult) *mergex.ConvergeEvent {
 	payload := map[string]any{
-		"merge_id":              op.ID,
-		"target_user_id":        req.TargetUserID,
-		"source_user_id":        req.SourceUserID,
-		"trigger":               string(req.Trigger),
-		"occurred_at":           s.deps.Now().Format(time.RFC3339),
-		"notify_source_account": true,
+		"merge_id":       op.ID,
+		"target_user_id": req.TargetUserID,
+		"source_user_id": req.SourceUserID,
+		"trigger":        string(req.Trigger),
+		"occurred_at":    s.deps.Now().Format(time.RFC3339),
+		// 取值来自应用策略，而不是写死 true。
+		// 注意：策略层的 Validate 仍强制它必须为 true（R4 红线 2），
+		// 所以"能配成 false"这件事依然不成立——但事件体必须如实反映
+		// 生效配置，否则消费方无法从事件判断我们到底承诺了什么。
+		"notify_source_account": req.App.Policy.Merge.NotifySourceAccount,
+		"source_disposal":       d.Policy,
+	}
+	if d.Policy == tenant.DisposalRequestDelete {
+		payload["source_closed"] = d.Closed
+		if d.Err != "" {
+			// 失败原因给消费方，便于其决定是否提示用户"删除处理中"。
+			payload["source_disposal_error"] = d.Err
+		}
 	}
 	if req.Identity != nil {
 		payload["identity_id"] = req.Identity.ID
@@ -299,20 +443,28 @@ func (s *Service) mergedEvent(req Request, op *mergex.Operation, remote *account
 	}
 }
 
-func (s *Service) mergedAudit(ctx context.Context, req Request, op *mergex.Operation, remote *account.MergeResult) *mergex.ConvergeAudit {
+func (s *Service) mergedAudit(ctx context.Context, req Request, op *mergex.Operation, remote *account.MergeResult, d disposalResult) *mergex.ConvergeAudit {
 	m := reqmeta.From(ctx)
 	a := &mergex.ConvergeAudit{
 		Action:         audit.ActionMerge,
 		ExternalUserID: req.SourceUserID,
 		TraceID:        m.TraceID,
 		Detail: map[string]any{
-			"merge_id":       op.ID,
-			"target_user_id": req.TargetUserID,
-			"source_user_id": req.SourceUserID,
-			"trigger":        string(req.Trigger),
-			"merge_mode":     req.App.Policy.Merge.Mode,
-			"reason":         req.Reason,
+			"merge_id":        op.ID,
+			"target_user_id":  req.TargetUserID,
+			"source_user_id":  req.SourceUserID,
+			"trigger":         string(req.Trigger),
+			"merge_mode":      req.App.Policy.Merge.Mode,
+			"reason":          req.Reason,
+			"source_disposal": d.Policy,
 		},
+	}
+	if d.Policy == tenant.DisposalRequestDelete {
+		// 审计里必须留下"删没删成"，它是合规口径下唯一可查的记录。
+		a.Detail["source_closed"] = d.Closed
+		if d.Err != "" {
+			a.Detail["source_disposal_error"] = d.Err
+		}
 	}
 	if req.Identity != nil {
 		a.Platform = req.Identity.Platform
@@ -385,16 +537,7 @@ func (s *Service) Resume(ctx context.Context, op *mergex.Operation) error {
 		Trigger:      TriggerAdmin,
 		Reason:       op.Reason,
 	}
-	if err := s.deps.Converger.Converge(ctx, mergex.ConvergeInput{
-		AppID:        op.AppID,
-		OperationID:  op.ID,
-		TargetUserID: op.TargetUserID,
-		SourceUserID: op.SourceUserID,
-		IdentityID:   op.IdentityID,
-		RemoteResult: remoteRef(remote),
-		Event:        s.mergedEvent(req, op, remote),
-		Audit:        s.mergedAudit(ctx, req, op, remote),
-	}); err != nil {
+	if err := s.converge(ctx, req, op, remote); err != nil {
 		if op.Attempts+1 >= mergex.MaxAttempts {
 			_ = s.deps.Ops.MarkDead(ctx, op.ID, "本地收敛失败且达到上限: "+err.Error())
 			return nil

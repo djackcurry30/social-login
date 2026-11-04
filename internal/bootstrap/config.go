@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/djackcurry30/social-login/internal/application/accountsync"
+	"github.com/djackcurry30/social-login/internal/domain/approval"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
@@ -39,6 +40,21 @@ type Config struct {
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// Tracing 是链路追踪配置（OpenTelemetry，OTLP/HTTP 上报）。
 	Tracing TracingConfig `mapstructure:"tracing"`
+	// Admin 是管理端的横切配置。
+	Admin AdminConfig `mapstructure:"admin"`
+}
+
+// AdminConfig 是管理端配置。
+type AdminConfig struct {
+	// ApprovalRequiredActions 是需要双人复核的动作（见 domain/approval 的常量）。
+	//
+	// 默认值随环境不同：
+	//   release 且未配置 → 三个高危轮换动作全部要求审批（安全默认）
+	//   debug 且未配置   → 不要求审批（本地流程不必走两遍账号）
+	//
+	// 这条规则刻意"生产默认安全"，因为漏配的后果是"高危操作没有第二个人"，
+	// 而调试环境漏配只意味着少点一次点击。
+	ApprovalRequiredActions []string `mapstructure:"approval_required_actions"`
 }
 
 // TracingConfig 是链路追踪配置。
@@ -573,6 +589,40 @@ func (c *Config) normalizeAndValidate() error {
 	if c.Tracing.Environment == "" {
 		c.Tracing.Environment = c.Auth.Env
 	}
+
+	// 双人复核：生产默认要求审批。
+	if len(c.Admin.ApprovalRequiredActions) == 0 && c.Server.IsProduction() {
+		c.Admin.ApprovalRequiredActions = []string{
+			approval.ActionAppRotateSecret,
+			approval.ActionConfigRotateSecret,
+			approval.ActionKeyRotate,
+		}
+	}
+	// 去重并拒绝未知动作：写错一个动作名等于"这个高危操作不受审批保护"，
+	// 而配置看起来是开着的——正是要避免的"能配不生效"。
+	seen := make(map[string]struct{}, len(c.Admin.ApprovalRequiredActions))
+	known := map[string]struct{}{
+		approval.ActionAppRotateSecret:    {},
+		approval.ActionConfigRotateSecret: {},
+		approval.ActionKeyRotate:          {},
+	}
+	actions := make([]string, 0, len(c.Admin.ApprovalRequiredActions))
+	for _, a := range c.Admin.ApprovalRequiredActions {
+		if _, ok := known[a]; !ok {
+			return errs.Newf(errs.CodeConfigInvalid, "未知的 admin.approval_required_actions: %s", a).
+				WithDetail("valid", []string{
+					approval.ActionAppRotateSecret,
+					approval.ActionConfigRotateSecret,
+					approval.ActionKeyRotate,
+				})
+		}
+		if _, dup := seen[a]; dup {
+			continue
+		}
+		seen[a] = struct{}{}
+		actions = append(actions, a)
+	}
+	c.Admin.ApprovalRequiredActions = actions
 
 	// 应用注册同步：留空取默认值，过密直接报错。
 	if c.Account.Sync.Interval <= 0 {

@@ -3,6 +3,7 @@ package middleware
 import (
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -59,7 +60,9 @@ type Counter = ratelimit.Counter
 // Limiter 是基于 Redis 固定窗口的入站限流器。
 type Limiter struct {
 	window *ratelimit.Window
-	cfg    LimitConfig
+	// cfg 用原子指针而不是值：阈值需要支持运行时调整（配置热更新）。
+	// 用 mutex 也行，但这是每个请求都要读一次的热路径，原子读没有额外开销。
+	cfg atomic.Pointer[LimitConfig]
 	// now 供测试覆盖时钟（窗口号由它决定）。保持字段而不是只留构造函数，
 	// 是因为既有测试在构造之后才注入时间，改成构造函数参数会破坏那批用例。
 	now func() time.Time
@@ -80,14 +83,41 @@ func NewLimiterWithCounter(c Counter, cfg LimitConfig) *Limiter {
 }
 
 func newLimiter(c ratelimit.Counter, cfg LimitConfig) *Limiter {
-	l := &Limiter{cfg: cfg, now: time.Now}
+	l := &Limiter{now: time.Now}
+	l.cfg.Store(&cfg)
 	// 时钟用闭包转发，而不是在构造时取一份：测试会在构造之后改 l.now。
 	l.window = ratelimit.NewWindowWithClock(c, func() time.Time { return l.now() })
 	return l
 }
 
+// config 返回当前生效的配置快照。
+func (l *Limiter) config() LimitConfig {
+	if l == nil {
+		return LimitConfig{}
+	}
+	if p := l.cfg.Load(); p != nil {
+		return *p
+	}
+	return LimitConfig{}
+}
+
+// LimitConfig 返回当前生效的配置快照（热更新时用它做增量修改）。
+func (l *Limiter) LimitConfig() LimitConfig { return l.config() }
+
+// Apply 原子替换限流配置（配置热更新入口）。
+//
+// ⚠️ 它只能调整【阈值】，不能把"启动时未挂载"变成"已挂载"：
+// 中间件是否挂到路由上在装配期就定了（见 httpapi.NewRouter）。
+// 从 enabled=false 改成 true 必须重启，RestartRequired 里会明确告警。
+func (l *Limiter) Apply(cfg LimitConfig) {
+	if l == nil {
+		return
+	}
+	l.cfg.Store(&cfg)
+}
+
 // Enabled 报告限流是否开启（供装配时决定要不要挂中间件）。
-func (l *Limiter) Enabled() bool { return l != nil && l.cfg.Enabled }
+func (l *Limiter) Enabled() bool { return l != nil && l.config().Enabled }
 
 // Notify 是平台通知入口的限流（平台 + IP 维度）。
 //
@@ -101,7 +131,7 @@ func (l *Limiter) Notify() gin.HandlerFunc {
 		}
 		platform := c.Param("platform")
 		key := fmt.Sprintf("rl:notify:%s:ip:%s", platform, c.ClientIP())
-		l.enforce(c, key, l.cfg.NotifyPerMinute)
+		l.enforce(c, key, l.config().NotifyPerMinute)
 	}
 }
 
@@ -123,7 +153,7 @@ func (l *Limiter) AppIP() gin.HandlerFunc {
 			return
 		}
 		key := fmt.Sprintf("rl:app:%d:ip:%s", app.ID, c.ClientIP())
-		l.enforce(c, key, l.cfg.AppIPPerMinute)
+		l.enforce(c, key, l.config().AppIPPerMinute)
 	}
 }
 

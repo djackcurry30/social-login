@@ -35,7 +35,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	app, err := bootstrap.New(ctx, bootstrap.Options{Config: cfg})
+	app, err := bootstrap.New(ctx, bootstrap.Options{Config: cfg, ConfigPath: *configPath})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)

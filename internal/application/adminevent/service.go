@@ -145,6 +145,10 @@ func (s *Service) Retry(ctx context.Context, id int64, principal *admin.Principa
 	if err != nil {
 		return err
 	}
+	// 应用范围：越界按"事件不存在"处理（不泄露别的应用有多少死信）。
+	if principal != nil && !admin.AllowsApp(principal.User, "event:write", e.AppID) {
+		return errs.New(errs.CodeNotFound, "事件不存在")
+	}
 	switch e.Status {
 	case event.StatusDead, event.StatusSkipped, event.StatusDiscarded:
 	case event.StatusSent:
@@ -185,6 +189,9 @@ func (s *Service) Discard(ctx context.Context, id int64, in DiscardInput) error 
 	e, err := s.load(ctx, id)
 	if err != nil {
 		return err
+	}
+	if in.Principal != nil && !admin.AllowsApp(in.Principal.User, "event:write", e.AppID) {
+		return errs.New(errs.CodeNotFound, "事件不存在")
 	}
 	if e.Status == event.StatusSent {
 		return errs.New(errs.CodeInvalidRequest, "已投递成功的事件不能丢弃")

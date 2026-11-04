@@ -48,6 +48,18 @@ func (h *AppsHandler) List(c *gin.Context) {
 		Status:   atoiDefault(c.Query("status"), -1),
 		Name:     c.Query("name"),
 	}
+	// 应用范围：受限管理员只能看到自己范围内的应用。
+	// 这里必须显式取（而不是依赖中间件）：列表接口没有 app_id 参数，
+	// 中间件无从判断"该给哪些应用"，只能由 handler 把范围传下去。
+	if p := adminmw.Principal(c); p != nil && p.User != nil {
+		if ids, restricted := p.User.ScopeFor("app:read"); restricted {
+			in.AllowedAppIDs = ids
+			if in.AllowedAppIDs == nil {
+				// 空范围要显式传空切片：nil 表示"不受限"，会把全部应用放出去。
+				in.AllowedAppIDs = []int64{}
+			}
+		}
+	}
 	out, err := h.svc.ListApps(c.Request.Context(), in)
 	if err != nil {
 		httputil.Fail(c, h.logger, err)

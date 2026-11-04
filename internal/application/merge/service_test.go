@@ -367,3 +367,185 @@ func TestIdempotencyKeyIsDeterministic(t *testing.T) {
 		t.Fatal("不同源账号必须生成不同幂等键")
 	}
 }
+
+// --- source_disposal（C1）---
+
+// closingAccounts = Provider + 注销能力。能力探测靠接口断言，
+// 因此这里用"实现了 Close"与"没实现"两种替身来覆盖两条路径。
+type closingAccounts struct {
+	*fakeAccounts
+	closed []string
+	err    error
+}
+
+func (c *closingAccounts) Close(_ context.Context, appKey, userID string) error {
+	c.closed = append(c.closed, appKey+"/"+userID)
+	return c.err
+}
+
+func appWithDisposal(disposal string) *tenant.Application {
+	p := tenant.DefaultPolicy()
+	p.Merge.Mode = tenant.MergeModeAuto
+	p.Merge.SourceDisposal = disposal
+	return &tenant.Application{ID: 3, AppCode: "app-x", Policy: p}
+}
+
+func newSvcWithAccounts(ac account.Provider) (*Service, *fakeStore, *fakeConverger) {
+	st := &fakeStore{}
+	cv := &fakeConverger{}
+	return New(Deps{
+		Ops:              st,
+		Converger:        cv,
+		Accounts:         ac,
+		Locker:           &fakeLocker{},
+		RemoteIdempotent: true,
+	}), st, cv
+}
+
+// TestMarkMergedDoesNotCloseSource：默认策略下不得调用注销。
+// 这条守的是"默认行为不变得更激进"——合并本身已经是不可逆操作，
+// 顺手把账号删掉会让"误合并"从可修复变成不可修复。
+func TestMarkMergedDoesNotCloseSource(t *testing.T) {
+	ac := &closingAccounts{fakeAccounts: &fakeAccounts{}}
+	svc, _, cv := newSvcWithAccounts(ac)
+
+	r := reqAuto()
+	r.App = appWithDisposal(tenant.DisposalMarkMerged)
+	if _, err := svc.Execute(context.Background(), r); err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	if len(ac.closed) != 0 {
+		t.Fatalf("mark_merged 不应调用注销，实际 %v", ac.closed)
+	}
+	if cv.last.Event.Payload["source_disposal"] != tenant.DisposalMarkMerged {
+		t.Fatalf("事件体必须带生效的处置策略: %+v", cv.last.Event.Payload)
+	}
+	if _, ok := cv.last.Event.Payload["source_closed"]; ok {
+		t.Fatal("mark_merged 不应出现 source_closed 字段")
+	}
+}
+
+// TestRequestDeleteClosesSource：配置了删除就必须真的删，并且事件与审计都留痕。
+func TestRequestDeleteClosesSource(t *testing.T) {
+	ac := &closingAccounts{fakeAccounts: &fakeAccounts{}}
+	svc, _, cv := newSvcWithAccounts(ac)
+
+	r := reqAuto()
+	r.App = appWithDisposal(tenant.DisposalRequestDelete)
+	if _, err := svc.Execute(context.Background(), r); err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	if len(ac.closed) != 1 || ac.closed[0] != "app-x/user-B" {
+		t.Fatalf("应注销 source 账号一次，实际 %v", ac.closed)
+	}
+	if cv.last.Event.Payload["source_closed"] != true {
+		t.Fatalf("事件体应标记已删除: %+v", cv.last.Event.Payload)
+	}
+	if cv.last.Audit.Detail["source_closed"] != true {
+		t.Fatalf("审计应记录删除结果: %+v", cv.last.Audit.Detail)
+	}
+}
+
+// TestDisposalFailureDoesNotFailMerge：删除失败不能回滚已完成的合并。
+//
+// 这是本轮最容易写错的一处：如果把它当普通错误返回，用户会看到"合并失败"，
+// 而账号实际上已经被并走了——信息与实际状态相反，比"删除失败"本身更糟。
+func TestDisposalFailureDoesNotFailMerge(t *testing.T) {
+	ac := &closingAccounts{fakeAccounts: &fakeAccounts{}, err: errors.New("用户中心超时")}
+	svc, _, cv := newSvcWithAccounts(ac)
+
+	r := reqAuto()
+	r.App = appWithDisposal(tenant.DisposalRequestDelete)
+	res, err := svc.Execute(context.Background(), r)
+	if err != nil {
+		t.Fatalf("删除失败不应让合并失败: %v", err)
+	}
+	if res == nil || res.OperationID != 42 {
+		t.Fatalf("合并结果不符: %+v", res)
+	}
+	if cv.last.Event.Payload["source_closed"] != false {
+		t.Fatalf("事件体应如实写 false: %+v", cv.last.Event.Payload)
+	}
+	if cv.last.Event.Payload["source_disposal_error"] == "" {
+		t.Fatal("失败原因必须进事件体，否则消费方无从判断")
+	}
+	if cv.last.Audit.Detail["source_closed"] != false {
+		t.Fatal("审计必须记录删除未成功")
+	}
+}
+
+// TestRequestDeleteWithoutCloserRejected：没接注销能力时，配置了删除必须
+// 在动手前被拒绝，而不是"合并完了发现没删"。
+func TestRequestDeleteWithoutCloserRejected(t *testing.T) {
+	svc, _, ac, _ := newSvc() // fakeAccounts 不带 Close
+	r := reqAuto()
+	r.App = appWithDisposal(tenant.DisposalRequestDelete)
+
+	_, err := svc.Execute(context.Background(), r)
+	if err == nil {
+		t.Fatal("缺少注销能力时必须拒绝合并")
+	}
+	var rej *RejectError
+	if !errors.As(err, &rej) {
+		t.Fatalf("应返回 RejectError，实际 %T: %v", err, err)
+	}
+	if ac.calls != 0 {
+		t.Fatal("拒绝必须发生在调用远端之前")
+	}
+}
+
+// --- 故障演练：远端成功 + 本地收敛失败 → 补偿自愈（C6）---
+
+// TestConvergeFailureThenResumeHeals 演练的是最危险的一种中间态：
+// 远端已经合并（数据已迁移），本地事务失败（绑定没改挂、令牌没撤）。
+//
+// 期望：
+//  1. 第一次 Execute 报错并标 failed（不能标 dead，否则没人再推进）；
+//  2. 补偿重放【复用同一个幂等键】——这是远端不会重复迁移的唯一保证；
+//  3. 第二遍收敛成功后流程闭环，且没有第二笔合并操作。
+func TestConvergeFailureThenResumeHeals(t *testing.T) {
+	cv := &fakeConverger{err: errors.New("本地数据库连接中断")}
+	svc, st, ac, _ := newSvc(func(d *Deps) { d.Converger = cv })
+	svc.SetAppLookup(func(context.Context, int64) (*tenant.Application, error) {
+		return appWithMode(tenant.MergeModeAuto), nil
+	})
+
+	r := reqAuto()
+	if _, err := svc.Execute(context.Background(), r); err == nil {
+		t.Fatal("收敛失败必须报错")
+	}
+	if st.markFailed != 1 || st.markDead != 0 {
+		t.Fatalf("应标 failed 等待补偿（不能进死信），实际 failed=%d dead=%d", st.markFailed, st.markDead)
+	}
+	firstKey := ac.last.IdempotencyKey
+	if firstKey == "" {
+		t.Fatal("远端调用必须带幂等键")
+	}
+
+	// 补偿：数据库恢复后重放同一条操作记录。
+	cv.err = nil
+	op := &mergex.Operation{
+		ID:             42,
+		AppID:          3,
+		IdempotencyKey: firstKey,
+		TargetUserID:   r.TargetUserID,
+		SourceUserID:   r.SourceUserID,
+		Status:         mergex.StatusFailed,
+		Attempts:       1,
+	}
+	if err := svc.Resume(context.Background(), op); err != nil {
+		t.Fatalf("补偿不应报错: %v", err)
+	}
+	if ac.calls != 2 {
+		t.Fatalf("应重放一次远端调用（共 2 次），实际 %d", ac.calls)
+	}
+	if ac.last.IdempotencyKey != firstKey {
+		t.Fatalf("补偿必须复用同一幂等键：%q vs %q", ac.last.IdempotencyKey, firstKey)
+	}
+	if cv.last == nil || cv.last.Event == nil {
+		t.Fatal("补偿也必须写事件，否则业务方永远不知道账号被合并")
+	}
+	if cv.last.OperationID != 42 {
+		t.Fatalf("收敛应指向原操作记录，实际 %d", cv.last.OperationID)
+	}
+}

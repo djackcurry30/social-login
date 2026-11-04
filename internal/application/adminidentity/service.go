@@ -294,6 +294,14 @@ func (s *Service) ForceUnbind(ctx context.Context, bindingID int64, in UnbindInp
 	if len([]rune(in.Reason)) < 4 {
 		return nil, errs.New(errs.CodeAdminReasonRequired, "强制解绑必须填写 reason（≥4 字符）")
 	}
+	// 应用范围：把 app_id 收敛到管理员范围内，再交给仓储当查询条件。
+	// 不这么做的话，受限管理员带一个自己范围内的 app_id、配别人的
+	// binding id，就能解绑别的应用的绑定——仓储只在 app_id>0 时过滤。
+	appID, ok := admin.RestrictApp(admin.UserOf(in.Principal), "binding:write", in.AppID)
+	if !ok {
+		return nil, errs.New(errs.CodeNotFound, "绑定不存在")
+	}
+	in.AppID = appID
 	// app_id 可选：仓储会按 binding id 读出真实归属（写入事件与审计需要它）。
 	// 传了就作为校验条件，防止运维看错应用而误操作。
 	ev := &binding.AdminEvent{
@@ -346,6 +354,11 @@ func (s *Service) Transfer(ctx context.Context, bindingID int64, in TransferInpu
 	if len([]rune(in.Reason)) < 4 {
 		return nil, errs.New(errs.CodeAdminReasonRequired, "transfer 必须填写 reason（≥4 字符）")
 	}
+	appID, ok := admin.RestrictApp(admin.UserOf(in.Principal), "binding:transfer", in.AppID)
+	if !ok {
+		return nil, errs.New(errs.CodeNotFound, "绑定不存在")
+	}
+	in.AppID = appID
 	ev := &binding.AdminEvent{
 		EventID:       event.NewEventID(s.deps.Now()),
 		Type:          event.TypeBindingRemoved,

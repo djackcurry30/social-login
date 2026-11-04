@@ -333,3 +333,132 @@ func TestVerifySuccessConsumesTicket(t *testing.T) {
 		t.Fatal("验证成功后应删除验证码挑战")
 	}
 }
+
+// --- existing_binding（C3）---
+
+// newExistingBindingSvc 构造一个"票据要求 existing_binding"的服务。
+func newExistingBindingSvc(t *testing.T, verification string) (*Service, *fakeTicketStore) {
+	t.Helper()
+	st := &fakeStore{}
+	tk := &fakeTicketStore{ticket: &ticket.MergeTicket{
+		Ticket:       "mtk_1",
+		AppID:        3,
+		AppCode:      "app_test",
+		TargetUserID: "user-C",
+		SourceUserID: "user-B",
+		Verification: verification,
+	}}
+	svc := New(Deps{
+		Ops:              st,
+		Converger:        &fakeConverger{},
+		Accounts:         &fakeAccountWithPhone{phone: "13800138000"},
+		Tickets:          tk,
+		RemoteIdempotent: true,
+	})
+	svc.SetAppLookup(func(context.Context, int64) (*tenant.Application, error) {
+		p := tenant.DefaultPolicy()
+		p.Merge.Mode = tenant.MergeModeConfirm
+		p.Merge.Verification = verification
+		return &tenant.Application{ID: 3, AppCode: "app_test", Policy: p}, nil
+	})
+	return svc, tk
+}
+
+// TestExistingBindingProofSatisfiesConfirm：verification=existing_binding 时，
+// 持有 source 会话即可合并，不需要短信。
+func TestExistingBindingProofSatisfiesConfirm(t *testing.T) {
+	svc, _ := newExistingBindingSvc(t, tenant.VerificationExistingBinding)
+
+	res, err := svc.CompleteExistingBinding(context.Background(), CompleteVerificationInput{
+		TicketID:     "mtk_1",
+		CallerUserID: "user-B", // source 本人的会话
+	})
+	if err != nil {
+		t.Fatalf("应允许合并: %v", err)
+	}
+	if res == nil || res.OperationID != 42 {
+		t.Fatalf("合并结果不符: %+v", res)
+	}
+}
+
+// TestExistingBindingRejectsTargetSession：拿 target 自己的会话来验证毫无意义，
+// 必须拒绝——否则"任意已登录用户都能并走别人的账号"。
+func TestExistingBindingRejectsTargetSession(t *testing.T) {
+	svc, _ := newExistingBindingSvc(t, tenant.VerificationExistingBinding)
+
+	_, err := svc.CompleteExistingBinding(context.Background(), CompleteVerificationInput{
+		TicketID:     "mtk_1",
+		CallerUserID: "user-C", // target
+	})
+	if err == nil {
+		t.Fatal("target 会话不能作为 source 的控制权证据")
+	}
+	if e := errs.From(err); e == nil || e.Code != errs.CodeForbidden {
+		t.Fatalf("应为 FORBIDDEN，实际 %v", err)
+	}
+}
+
+// TestExistingBindingRequiresToken：没有会话就不该走这条路。
+func TestExistingBindingRequiresToken(t *testing.T) {
+	svc, _ := newExistingBindingSvc(t, tenant.VerificationExistingBinding)
+	_, err := svc.CompleteExistingBinding(context.Background(), CompleteVerificationInput{
+		TicketID: "mtk_1",
+	})
+	if err == nil {
+		t.Fatal("缺少调用者身份必须拒绝")
+	}
+}
+
+// TestExistingBindingRejectedWhenPolicyIsSMS：策略要求短信时，
+// 会话证据不能替代——否则等于让应用的配置失效。
+func TestExistingBindingRejectedWhenPolicyIsSMS(t *testing.T) {
+	svc, _ := newExistingBindingSvc(t, tenant.VerificationSMS)
+	_, err := svc.CompleteExistingBinding(context.Background(), CompleteVerificationInput{
+		TicketID: "mtk_1", CallerUserID: "user-B",
+	})
+	if err == nil {
+		t.Fatal("策略要求短信时必须拒绝会话验证")
+	}
+}
+
+// TestSMSNotSentWhenPolicyIsExistingBinding：existing_binding 下不应发短信
+// （用户收到一条永远用不上的验证码，且产生费用）。
+func TestSMSNotSentWhenPolicyIsExistingBinding(t *testing.T) {
+	svc, tk := newExistingBindingSvc(t, tenant.VerificationExistingBinding)
+	tk.ticket.TargetUserID = "user-C"
+	sd := &fakeSender{}
+	svc.deps.Sender = sd
+	svc.deps.Challenges = &fakeChallenges{}
+
+	_, err := svc.StartSMSVerification(context.Background(), StartVerificationInput{
+		TicketID: "mtk_1", CallerUserID: "user-C",
+	})
+	if err == nil {
+		t.Fatal("existing_binding 策略下不应允许发码")
+	}
+	if sd.calls != 0 {
+		t.Fatalf("不应调用短信通道，实际 %d 次", sd.calls)
+	}
+}
+
+// TestStrictNeedsBothProofs：strict 要求两种证据同时具备。
+func TestStrictNeedsBothProofs(t *testing.T) {
+	svc, _ := newExistingBindingSvc(t, tenant.VerificationStrict)
+	r := Request{
+		App:          appWithMode(tenant.MergeModeConfirm),
+		TargetUserID: "user-C",
+		SourceUserID: "user-B",
+		Trigger:      TriggerBind,
+	}
+	r.App.Policy.Merge.Verification = tenant.VerificationStrict
+
+	r.Proof = Proof{ExistingBinding: true}
+	if _, err := svc.Execute(context.Background(), r); !errors.Is(err, ErrNeedVerification) {
+		t.Fatalf("只有会话证据时应要求继续验证，实际 %v", err)
+	}
+
+	r.Proof = Proof{SMS: true, ExistingBinding: true}
+	if _, err := svc.Execute(context.Background(), r); err != nil {
+		t.Fatalf("两种证据齐备应允许合并: %v", err)
+	}
+}

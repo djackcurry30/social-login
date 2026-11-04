@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
+	"github.com/djackcurry30/social-login/internal/application/adminapproval"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
@@ -61,6 +62,14 @@ type Deps struct {
 	AdminKey *adminkey.Service
 	// AdminGrant 是 K 组（管理员授权）用例。
 	AdminGrant *admingrant.Service
+	// ConfigReload 是配置热更新端口。为 nil 时不注册 /config/reload。
+	ConfigReload ConfigReloader
+	// Approvals 是双人复核用例。为 nil 时不注册 /approvals，
+	// 且所有高危操作都不要求审批（未接审批能力的部署形态）。
+	Approvals *adminapproval.Service
+	// ApprovalActions 是需要双人复核的动作集合（action → true）。
+	// 为空表示不启用任何审批——debug 与测试环境的默认值。
+	ApprovalActions map[string]bool
 	// AdminUser 是管理员账号管理用例。为 nil 时不注册该组路由——
 	// 与其它组一致，便于只关心某一组的测试。
 	AdminUser *adminuser.Service

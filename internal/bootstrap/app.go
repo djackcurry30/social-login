@@ -43,6 +43,7 @@ import (
 	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
 	"github.com/djackcurry30/social-login/internal/application/accountclose"
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
+	"github.com/djackcurry30/social-login/internal/application/adminapproval"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
 	"github.com/djackcurry30/social-login/internal/application/adminevent"
@@ -83,6 +84,10 @@ type App struct {
 	// tracer 是链路追踪的生命周期持有者。nil 不可能发生在正常装配路径上
 	// （关闭追踪时也是非 nil 的空壳），保留判断只是为 SkipDatabase 测试。
 	tracer *tracing.Provider
+	// logLevel 是日志级别的原子句柄，配置热更新用它改级别。
+	logLevel *zap.AtomicLevel
+	// reloader 是配置热更新器（管理端 /config/reload 与 SIGHUP 共用）。
+	reloader *Reloader
 	// accounts 是账号体系端口。暴露给集成测试用（构造 source/target 账号），
 	// 与 DB()/Redis() 同属测试可达的装配产物。
 	accounts domainaccount.Provider
@@ -97,6 +102,9 @@ type Options struct {
 	Logger *zap.Logger
 	// SkipDatabase 为 true 时跳过数据库与 Redis 连接（仅用于路由/中间件级测试）。
 	SkipDatabase bool
+	// ConfigPath 是配置文件路径。配置热更新要重新读它，因此必须在装配时记下来——
+	// 进程启动后无法反推"-config"参数是什么。
+	ConfigPath string
 }
 
 // New 装配运行实例。
@@ -106,10 +114,13 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 	cfg := opts.Config
 
-	logger := opts.Logger
+	var (
+		logger   = opts.Logger
+		logLevel *zap.AtomicLevel
+	)
 	if logger == nil {
 		var err error
-		logger, err = NewLogger(cfg.Log)
+		logger, logLevel, err = NewLoggerWithControl(cfg.Log)
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +132,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		gin.SetMode(gin.DebugMode)
 	}
 
-	app := &App{cfg: cfg, log: logger}
+	app := &App{cfg: cfg, log: logger, logLevel: logLevel}
 
 	// 追踪尽早初始化：注册同步、outbox 等后台循环在 New 的尾部就开始装配，
 	// 它们的出站调用要能带 traceparent，就必须先有全局 TracerProvider。
@@ -612,6 +623,13 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		&appWebhookTargets{apps: appRepo, keys: keyManager}, logger)
 	outboxDispatcher := outbox.New(eventRepo, webhookDeliverer, outbox.DefaultConfig(), logger)
 
+	// 双人复核：审批单仓储 + 用例。表在 00008 迁移里建。
+	approvalRepo := postgres.NewAdminApprovalRepository(db)
+	approvalSvc := adminapproval.New(adminapproval.Deps{
+		Store: approvalRepo,
+		Log:   logger,
+	})
+
 	adminLoginSvc := adminhandler.NewLoginService(adminhandler.LoginServiceDeps{
 		Users:    adminUserRepo,
 		Sessions: adminSessionRepo,
@@ -620,21 +638,23 @@ func New(ctx context.Context, opts Options) (*App, error) {
 
 	// 管理端被用来"启用"才会挂上路由；为保持简洁第一期默认挂上。
 	adminDeps := &adminhttp.RouterDeps{
-		Logger:        logger,
-		AuthSessions:  adminSessionRepo,
-		AuthUsers:     adminUserRepo,
-		AuthLogin:     adminLoginSvc,
-		AdminApp:      adminAppSvc,
-		AdminChan:     adminChanSvc,
-		AdminObs:      adminObsSvc,
-		AdminEvent:    adminEventSvc,
-		AdminAudit:    adminAuditSvc,
-		AdminMerge:    adminMergeSvc,
-		AdminIdentity: adminIdentitySvc,
-		AdminSession:  adminSessionSvc,
-		AdminKey:      adminKeySvc,
-		AdminGrant:    adminGrantSvc,
-		AdminUser:     adminUserSvc,
+		Logger:          logger,
+		AuthSessions:    adminSessionRepo,
+		AuthUsers:       adminUserRepo,
+		AuthLogin:       adminLoginSvc,
+		AdminApp:        adminAppSvc,
+		AdminChan:       adminChanSvc,
+		AdminObs:        adminObsSvc,
+		AdminEvent:      adminEventSvc,
+		AdminAudit:      adminAuditSvc,
+		AdminMerge:      adminMergeSvc,
+		AdminIdentity:   adminIdentitySvc,
+		AdminSession:    adminSessionSvc,
+		AdminKey:        adminKeySvc,
+		AdminGrant:      adminGrantSvc,
+		AdminUser:       adminUserSvc,
+		Approvals:       approvalSvc,
+		ApprovalActions: approvalActionSet(cfg.Admin.ApprovalRequiredActions),
 	}
 	_ = adminDeps
 
@@ -671,6 +691,11 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		NotifyPerMinute: cfg.RateLimit.NotifyPerMinute,
 		AppIPPerMinute:  cfg.RateLimit.AppIPPerMinute,
 	})
+
+	// 配置热更新：只热更日志级别与两档入站限流阈值，其余返回"需重启"。
+	// 装配在这里是因为它同时需要 limiter 与日志级别句柄。
+	app.reloader = NewReloader(configPath(opts), cfg, logLevel, limiter, logger)
+	adminDeps.ConfigReload = app.reloader
 
 	// --- 指标注册（架构 §11）---
 	//
@@ -842,6 +867,15 @@ func (a *App) Run(ctx context.Context) error {
 			a.appSync.Run(bgCtx)
 		}()
 	}
+	if a.reloader != nil {
+		// SIGHUP 热更新。与 /config/reload 走同一个 Reloader，避免两条路径
+		// 各有一套"哪些生效"的判断逻辑。
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			a.watchReloadSignal(bgCtx)
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -904,6 +938,26 @@ func (a *App) Shutdown(ctx context.Context) error {
 	a.log.Info("已退出")
 	_ = a.log.Sync()
 	return nil
+}
+
+// approvalActionSet 把动作列表转成集合（路由用 map 查，避免每次比较切片）。
+func approvalActionSet(actions []string) map[string]bool {
+	if len(actions) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(actions))
+	for _, a := range actions {
+		out[a] = true
+	}
+	return out
+}
+
+// configPath 返回生效的配置文件路径（未指定时取默认值）。
+func configPath(opts Options) string {
+	if opts.ConfigPath != "" {
+		return opts.ConfigPath
+	}
+	return "configs/config.yaml"
 }
 
 // Router 返回 HTTP 路由，供集成测试直接使用（无需监听端口）。

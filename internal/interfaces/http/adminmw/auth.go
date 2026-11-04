@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,12 +113,37 @@ func (a *Authenticator) Authenticate() gin.HandlerFunc {
 	}
 }
 
-// Require 是 RBAC 中间件工厂：要求当前主体拥有 perm 权限。
+// scopeExemptRoutes 是"受限管理员在没有应用上下文时也允许访问"的路由白名单。
 //
-// 用法：r.Group("/admin/v1", adminmw.Agent.Authenticate(), adminmw.Require("app:read"))
+// 键是 "方法 路由模板"。只放三件事：
+//   - 看自己是谁（前端据此渲染菜单与作用域）
+//   - 登出
+//   - 应用列表（handler 内部按 scope 过滤，见 adminapp.ListApps）
 //
-// super_admin 由 domain/admin.Role.Has() 内置判定：返回 true。
-// 其它角色查 Permissions 闭包表。
+// 其他所有不带应用上下文的接口（全局聚合看板、渠道健康、签名密钥、管理员
+// 名单…）对受限管理员一律拒绝：这些数据天然跨应用，无法"过滤一部分"，
+// 而返回全局数据等于把隔离破了。
+var scopeExemptRoutes = map[string]struct{}{
+	"GET /admin/v1/auth/me":      {},
+	"POST /admin/v1/auth/logout": {},
+	"GET /admin/v1/apps":         {},
+}
+
+// Require 是 RBAC 中间件工厂：要求当前主体拥有 perm 权限，且（若权限带应用
+// 范围）目标应用在范围内。
+//
+// 用法：api.GET("/apps/:appId", adminmw.Require("app:read"), h.Get)
+//
+// 三档判定，顺序不能换：
+//
+//  1. 有没有权限（Can：基础角色 ∪ 生效 grants）；
+//  2. 该权限是否带应用范围（ScopeFor）。不带就直接放行——绝大多数管理员
+//     的基础角色是全局的，不能让"某人还挂着一条单应用授权"反而缩小他的视野；
+//  3. 带范围时，请求里必须指明应用且命中：路径参数 appId 优先，其次查询参数
+//     app_id。两者都没有则看白名单，不在白名单就拒绝。
+//
+// 越界返回 404 而不是 403：403 等于告诉对方"这个 app_id 存在，只是你不能看"，
+// 对受限管理员来说应用 id 本身就是不该泄露的信息。
 func Require(perm string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p, ok := c.Get(CtxKeyPrincipal)
@@ -139,8 +165,62 @@ func Require(perm string) gin.HandlerFunc {
 				WithDetail("role", string(principal.User.Role)))
 			return
 		}
-		c.Next()
+
+		ids, restricted := principal.User.ScopeFor(perm)
+		if !restricted {
+			c.Next()
+			return
+		}
+
+		// ① 路径里的 appId（/apps/:appId/**）
+		if raw := c.Param("appId"); raw != "" {
+			if !appInScope(ids, raw) {
+				failAppOutOfScope(c, raw)
+				return
+			}
+			c.Next()
+			return
+		}
+		// ② 查询参数 app_id（C/D/E/G/H/J 组的列表与操作）
+		if raw := c.Query("app_id"); raw != "" {
+			if !appInScope(ids, raw) {
+				failAppOutOfScope(c, raw)
+				return
+			}
+			c.Next()
+			return
+		}
+		// ③ 没有应用上下文：只有白名单允许。
+		if _, ok := scopeExemptRoutes[c.Request.Method+" "+c.FullPath()]; ok {
+			c.Next()
+			return
+		}
+		httputil.Fail(c, nil, errs.New(errs.CodeForbidden,
+			"当前账号的应用范围受限，必须指定 app_id 才能访问该接口").
+			WithDetail("scope", "app").
+			WithDetail("allowed_app_ids", ids))
 	}
+}
+
+// appInScope 判断 appID 字符串是否在允许列表里。
+//
+// 解析失败一律当作越界：非法 app_id 不该因为"解析不出数字"而被放过。
+func appInScope(ids []int64, raw string) bool {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return false
+	}
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+func failAppOutOfScope(c *gin.Context, raw string) {
+	httputil.Fail(c, nil, errs.New(errs.CodeNotFound, "应用不存在").
+		WithDetail("app_id", raw))
 }
 
 // Principal 从 gin.Context 取出已认证的管理员。

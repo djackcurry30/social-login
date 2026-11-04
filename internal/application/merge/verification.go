@@ -14,6 +14,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/domain/account"
 	mergex "github.com/djackcurry30/social-login/internal/domain/merge"
+	"github.com/djackcurry30/social-login/internal/domain/tenant"
 	"github.com/djackcurry30/social-login/internal/domain/ticket"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 )
@@ -64,6 +65,13 @@ func (s *Service) StartSMSVerification(ctx context.Context, in StartVerification
 	if in.CallerUserID != "" && in.CallerUserID != t.TargetUserID {
 		// 票据是发给 target 的：换个账号拿它去验证，等于允许"别人替我合并"。
 		return nil, errs.New(errs.CodeForbidden, "该合并票据不属于当前账号")
+	}
+	// 应用只接受"已有绑定"验证时不发短信：发了也没有入口能提交，
+	// 用户会收到一条永远用不上的验证码（还产生费用）。
+	if t.Verification == tenant.VerificationExistingBinding {
+		return nil, errs.New(errs.CodeInvalidRequest,
+			"该应用使用已有绑定验证，不需要短信").
+			WithDetail("hint", tenant.VerificationExistingBinding)
 	}
 
 	// 重发限流。
@@ -199,7 +207,68 @@ func (s *Service) CompleteSMSVerification(ctx context.Context, in CompleteVerifi
 		SourceUserID: t.SourceUserID,
 		Trigger:      TriggerBind,
 		Reason:       "用户通过短信验证确认后合并",
-		Verified:     true,
+		Proof:        Proof{SMS: true},
+	})
+}
+
+// CompleteExistingBinding 用"持有 source 账号的有效会话"完成验证并合并。
+//
+// 这是 source 没有手机号时唯一的非人工路径（例如只有第三方 open_id 的账号）。
+// 语义是：调用方拿得出 source 的 access_token，就说明它已经是 source 的
+// 合法会话持有者——"已有的绑定"本身就是控制权证据，不需要再发一条短信。
+//
+// 三条边界：
+//
+//  1. 【必须是 source 的会话】，不能用 target 自证，也不能用第三个账号；
+//  2. 【只认本服务签发的 access_token】：CallerUserID 来自
+//     /v1/bind/resolve 的 Bearer → Introspect，验签 + jti 撤销都已校验；
+//  3. 【票据一次性】：验过即删，和短信路径同口径，避免同一票据被重放。
+//
+// 风险提示（写进文档）：这等于"拿到 source 的会话就能把它并到自己的账号"。
+// 对已经能冒用 source 会话的攻击者，这是权限提升而不是任意登录——但仍比
+// 短信弱，所以默认值仍是 sms，existing_binding 需要应用显式开启。
+func (s *Service) CompleteExistingBinding(ctx context.Context, in CompleteVerificationInput) (*Result, error) {
+	if s.deps.Tickets == nil {
+		return nil, errs.New(errs.CodeInternal, "合并票据未装配")
+	}
+	if in.TicketID == "" {
+		return nil, errs.New(errs.CodeInvalidRequest, "merge_ticket 不能为空")
+	}
+
+	t, err := s.deps.Tickets.GetMergeTicket(ctx, in.TicketID)
+	if err != nil {
+		return nil, mapTicketErr(err)
+	}
+	if t.Verification == tenant.VerificationSMS {
+		return nil, errs.New(errs.CodeInvalidRequest,
+			"该应用要求短信验证，不接受已有绑定验证").
+			WithDetail("hint", tenant.VerificationSMS)
+	}
+	if in.CallerUserID == "" {
+		return nil, errs.New(errs.CodeUnauthorized,
+			"该验证方式需要携带被合并账号的访问令牌（Authorization: Bearer）")
+	}
+	if in.CallerUserID != t.SourceUserID {
+		// 用 target 自己的会话自证毫无意义；用第三个账号则更是越权。
+		return nil, errs.New(errs.CodeForbidden,
+			"当前会话不属于被合并账号，无法用已有绑定完成验证").
+			WithDetail("method", tenant.VerificationExistingBinding)
+	}
+
+	_ = s.deps.Tickets.DeleteMergeTicket(ctx, in.TicketID)
+
+	app, err := s.loadAppPolicy(ctx, &mergex.Operation{AppID: t.AppID})
+	if err != nil {
+		return nil, err
+	}
+
+	return s.Execute(ctx, Request{
+		App:          app,
+		TargetUserID: t.TargetUserID,
+		SourceUserID: t.SourceUserID,
+		Trigger:      TriggerBind,
+		Reason:       "用户持有被合并账号的有效会话，按已有绑定验证后合并",
+		Proof:        Proof{ExistingBinding: true},
 	})
 }
 
