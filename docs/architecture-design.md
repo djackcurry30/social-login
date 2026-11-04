@@ -2103,6 +2103,17 @@ Admin API 更新配置
 
 `trace_id` 从 `/authorize` 生成，写入 ticket，回调时取出继续使用，贯穿整个流程。这样一次登录的 12 个步骤在 Jaeger 里是一条完整的链路，而不是两段。
 
+> **实现（2026-11-04，`internal/pkg/tracing`，见 implementation-status §36）**
+>
+> 落地形态与本文的设想有两处偏离，都是故意的：
+>
+> 1. **协议用 W3C `traceparent`，不是自建头**。`trace_id` 仍是同一条链路的标识，
+>    但承载它的是 OpenTelemetry 标准头，下游（用户中心、将来的业务方）不需要知道
+>    我们的约定就能接上；`X-Trace-Id` 保留为"人可读、curl 能带"的那一份。
+> 2. **出站埋点自己写，不用 `otelhttp`**。otelhttp 会记录 `url.full`（含 query），
+>    而 `/accounts/by-claim?value=<手机号>` 就在我们的调用里。§11.3 对日志的脱敏
+>    要求同样适用于 trace——否则只是把泄漏换了个存储。
+
 ### 11.3 日志
 
 结构化 JSON 日志，必带字段：`trace_id` `app_id` `platform` `scene` `external_user_id` `stage` `duration_ms` `error_code`。三方原始响应只在 DEBUG 级别记录且脱敏。

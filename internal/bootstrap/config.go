@@ -13,6 +13,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/application/accountsync"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // Config 是全量配置。
@@ -36,6 +37,60 @@ type Config struct {
 	SMS SMSConfig `mapstructure:"sms"`
 	// RateLimit 是入站限流配置（架构 §6.3）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
+	// Tracing 是链路追踪配置（OpenTelemetry，OTLP/HTTP 上报）。
+	Tracing TracingConfig `mapstructure:"tracing"`
+}
+
+// TracingConfig 是链路追踪配置。
+//
+// 默认关闭：多数开发/测试环境没有 collector，开着只会让进程每分钟打一批
+// "导出失败"的 Warn，而真正的问题被这些噪音盖住。
+type TracingConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// ServiceName 出现在 trace 的 service.name 上。两个服务必须不同，
+	// 否则在 Jaeger 的 service 下拉框里分不出是谁发的 span。
+	ServiceName string `mapstructure:"service_name"`
+	// Environment 是部署环境标识（dev / staging / prod）。
+	// 为空时回落到 auth.env：生产上这两个值本来就该一致，
+	// 允许单独配置是为了"生产配置、旁路验证"这种场景。
+	Environment string `mapstructure:"environment"`
+	// Endpoint 是 OTLP/HTTP 接收地址，例如 http://otel-collector:4318。
+	Endpoint string `mapstructure:"endpoint"`
+	// Insecure 表示明文传输（内网 collector 的常态）。
+	Insecure bool `mapstructure:"insecure"`
+	// SampleRatio 是入口采样比例（0–1）。见 pkg/tracing.Config.SampleRatio。
+	SampleRatio float64 `mapstructure:"sample_ratio"`
+	// ExportTimeout 是单批导出超时，也是退出时刷盘的上限。
+	ExportTimeout time.Duration `mapstructure:"export_timeout"`
+	// BatchTimeout 是批量导出的最大攒批时间。
+	BatchTimeout time.Duration `mapstructure:"batch_timeout"`
+	// MaxQueueSize 是待导出 span 的内存队列长度（满则丢弃新 span）。
+	MaxQueueSize int `mapstructure:"max_queue_size"`
+	// Headers 是导出请求附加头（collector 侧鉴权用）。
+	Headers map[string]string `mapstructure:"headers"`
+}
+
+// TracingOptions 把配置翻译成 tracing 包能直接消费的结构。
+//
+// version 由 bootstrap 注入，避免 pkg 反向依赖服务版本号。
+func (t TracingConfig) TracingOptions(version string) tracing.Config {
+	name := t.ServiceName
+	if name == "" {
+		name = "social-login"
+	}
+	return tracing.Config{
+		Enabled:        t.Enabled,
+		ServiceName:    name,
+		ServiceVersion: version,
+		Environment:    t.Environment,
+		Endpoint:       t.Endpoint,
+		Insecure:       t.Insecure,
+		SampleRatio:    t.SampleRatio,
+		Headers:        t.Headers,
+		ExportTimeout:  t.ExportTimeout,
+		BatchTimeout:   t.BatchTimeout,
+		MaxQueueSize:   t.MaxQueueSize,
+	}
 }
 
 // RateLimitConfig 是入站限流参数。
@@ -409,6 +464,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log.max_backups", 10)
 	v.SetDefault("log.max_age_days", 30)
 
+	// 追踪：默认关闭；开启时按 10% 采样。10% 是"够用来定位故障"与
+	// "不会把 collector 打满"之间的经验值，压测后按实际量再调。
+	v.SetDefault("tracing.enabled", false)
+	v.SetDefault("tracing.service_name", "social-login")
+	v.SetDefault("tracing.endpoint", "")
+	v.SetDefault("tracing.insecure", true)
+	v.SetDefault("tracing.sample_ratio", 0.1)
+	v.SetDefault("tracing.export_timeout", "5s")
+	v.SetDefault("tracing.batch_timeout", "5s")
+	v.SetDefault("tracing.max_queue_size", 2048)
+
 	v.SetDefault("migrate.enabled", true)
 
 	// 渠道熔断默认值：与架构 §5.6.5 完全一致。
@@ -491,6 +557,21 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		c.Server.ShutdownTimeout = 15 * time.Second
+	}
+
+	// 追踪：开启但没给收件地址属于配置漏项，必须在启动时拒绝。
+	// 放行的话现象是"服务正常、Jaeger 里查不到任何东西"，而排查会从
+	// 业务代码开始——这类"配置没生效但没人报错"的问题代价最高。
+	if c.Tracing.Enabled && strings.TrimSpace(c.Tracing.Endpoint) == "" {
+		return errs.New(errs.CodeConfigInvalid, "tracing.endpoint 不能为空").
+			WithDetail("hint", "例如 http://otel-collector:4318；不需要追踪时把 tracing.enabled 关掉")
+	}
+	if c.Tracing.SampleRatio < 0 || c.Tracing.SampleRatio > 1 {
+		return errs.Newf(errs.CodeConfigInvalid,
+			"tracing.sample_ratio 必须在 0–1 之间（当前 %v）", c.Tracing.SampleRatio)
+	}
+	if c.Tracing.Environment == "" {
+		c.Tracing.Environment = c.Auth.Env
 	}
 
 	// 应用注册同步：留空取默认值，过密直接报错。

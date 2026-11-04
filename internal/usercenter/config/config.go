@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // Config 是用户中心的全部配置。
@@ -20,6 +22,50 @@ type Config struct {
 	Security SecurityConfig `mapstructure:"security"`
 	Log      LogConfig      `mapstructure:"log"`
 	Migrate  MigrateConfig  `mapstructure:"migrate"`
+	Tracing  TracingConfig  `mapstructure:"tracing"`
+}
+
+// TracingConfig 是链路追踪配置。
+//
+// 与登录中心的同名配置保持独立：两个服务是独立进程、独立配置文件，
+// 共用一个结构体就需要把 bootstrap 包暴露给本服务——那正是边界护栏
+// 禁止的方向（docs/user-center-mvp-design.md §15）。
+//
+// 字段含义见 internal/pkg/tracing.Config：那边是唯一实现，这里是它的
+// 配置投影，不复制默认值的逻辑（默认值在 Load 里设一次）。
+type TracingConfig struct {
+	Enabled       bool              `mapstructure:"enabled"`
+	ServiceName   string            `mapstructure:"service_name"`
+	Environment   string            `mapstructure:"environment"`
+	Endpoint      string            `mapstructure:"endpoint"`
+	Insecure      bool              `mapstructure:"insecure"`
+	SampleRatio   float64           `mapstructure:"sample_ratio"`
+	ExportTimeout time.Duration     `mapstructure:"export_timeout"`
+	BatchTimeout  time.Duration     `mapstructure:"batch_timeout"`
+	MaxQueueSize  int               `mapstructure:"max_queue_size"`
+	Headers       map[string]string `mapstructure:"headers"`
+}
+
+// TracingOptions 把配置翻译成 tracing 包能消费的结构。
+func (t TracingConfig) TracingOptions(version string) tracing.Config {
+	name := t.ServiceName
+	if name == "" {
+		// 与登录中心必须不同，否则 Jaeger 的 service 下拉框里两者会合并。
+		name = "usercenter"
+	}
+	return tracing.Config{
+		Enabled:        t.Enabled,
+		ServiceName:    name,
+		ServiceVersion: version,
+		Environment:    t.Environment,
+		Endpoint:       t.Endpoint,
+		Insecure:       t.Insecure,
+		SampleRatio:    t.SampleRatio,
+		Headers:        t.Headers,
+		ExportTimeout:  t.ExportTimeout,
+		BatchTimeout:   t.BatchTimeout,
+		MaxQueueSize:   t.MaxQueueSize,
+	}
 }
 
 // ServerConfig 是 HTTP 服务配置。
@@ -140,6 +186,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log.format", "json")
 
 	v.SetDefault("migrate.enabled", false)
+
+	// 追踪默认关闭；开启时按 10% 采样（与登录中心同一策略，
+	// 否则会出现"上游记了、下游没记"的半截链路）。
+	v.SetDefault("tracing.enabled", false)
+	v.SetDefault("tracing.service_name", "usercenter")
+	v.SetDefault("tracing.endpoint", "")
+	v.SetDefault("tracing.insecure", true)
+	v.SetDefault("tracing.sample_ratio", 0.1)
+	v.SetDefault("tracing.export_timeout", "5s")
+	v.SetDefault("tracing.batch_timeout", "5s")
+	v.SetDefault("tracing.max_queue_size", 2048)
 }
 
 // normalizeAndValidate 补齐派生默认值并做启动自检。
@@ -181,6 +238,17 @@ func (c *Config) normalizeAndValidate() error {
 	c.Security.KEKID = strings.TrimSpace(c.Security.KEKID)
 	if c.Security.KEKID == "" {
 		return fmt.Errorf("security.kek_id 不能为空：它是密文的密钥版本标识")
+	}
+
+	c.Tracing.Endpoint = strings.TrimSpace(c.Tracing.Endpoint)
+	if c.Tracing.Enabled && c.Tracing.Endpoint == "" {
+		// 开了追踪却没给地址：放行的结果是"服务正常、链路查不到"，
+		// 而排查会从业务代码开始。
+		return fmt.Errorf("tracing.endpoint 不能为空（例如 http://otel-collector:4318）；" +
+			"不需要追踪时请关闭 tracing.enabled")
+	}
+	if c.Tracing.SampleRatio < 0 || c.Tracing.SampleRatio > 1 {
+		return fmt.Errorf("tracing.sample_ratio 必须在 0–1 之间（当前 %v）", c.Tracing.SampleRatio)
 	}
 
 	if c.Server.IsProduction() {

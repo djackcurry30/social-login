@@ -17,14 +17,15 @@
 | 管理端前端 | 11 组界面 | 11 组 / 14 页 | **100%** |
 | 第一期 · 骨架与最小闭环 | 10 项 | 10 项 | **100%** |
 | 第二期 · 真实渠道 | 7 项 | 7 项 | **100%**（代码） |
-| 第三期 · 绑定与合并 | 12 项 | 7 项 + 3 项部分 + 2 项未做 | **约 71%**（按工作量 85%） |
-| 第四期 · 生产化 | 21 项 | 8 项 | **约 38%**（按工作量 35%） |
-| **合计** | **50 项** | **32 完成 / 3 部分 / 15 未做** | **约 64%**（部分项按半计 67%） |
+| 第三期 · 绑定与合并 | 12 项 | 8 项 + 2 项部分 + 2 项未做 | **约 75%**（按工作量 85%） |
+| 第四期 · 生产化 | 21 项 | 15 项 + 1 项部分 + 5 项未做 | **约 74%**（按工作量 70%） |
+| **合计** | **50 项** | **40 完成 / 3 部分 / 7 未做** | **约 80%**（部分项按半计 83%） |
 
 **一句话**：前三期的**功能面**基本闭环（业务端 14 个接口、管理端 11 组 53 个端点、
-11 组前端页面全部到位），剩下的缺口集中在**第四期生产化**——KMS、配置热更新、
-账号注销合规、双人复核、管理员开户、两档限流、tracing 与告警规则、压测演练。
-另有三处第三期「能配不生效」的遗留，见 §25。
+11 组前端页面全部到位），第四期的生产化骨架也基本补齐——**KMS 信封加密、账号注销
+合规、管理员开户、两档限流、`/metrics`、告警规则、链路追踪**均已落地（§32–§36）。
+剩下的缺口是**流程与验证类**：`Unbind` 平台侧、配置热更新、双人复核、`ScopeAppID`
+鉴权、压测演练，以及第三期两处「能配不生效」的遗留，见 §25.4。
 
 **原先的 P0 缺陷已修复**（见 §1）。
 
@@ -148,6 +149,11 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 ---
 
 ## 4. 管理端 API（§15.4）
+
+> **⚠️ 第 4–6 节是 2026-10-14 首次复核的快照，已经不代表现状。**
+> 里面的 ❌ 大多已在后续几轮补齐（合并链路、Webhook、`/metrics`、限流、KMS、
+> 分布式追踪等）。保留原文是为了回溯"当时判断到什么程度"。
+> **当前状态一律以 §25 的对照表为准**，实现细节看 §26–§36。
 
 已挂载 27 个业务端点 + 3 个 auth 端点（`login` / `me` / `logout`）。
 §15.4 表内共 54 个端点，**未实现 27 个**（G 组 4 个已补齐，另新增 1 个 A 组补充端点 `PUT /apps/{id}/webhook`）。
@@ -1986,10 +1992,11 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 
 - **实机抓取验证**：容器未重建（Docker daemon 不可用），`/metrics` 尚未在
   真实进程上抓取过。启动后 `curl :8080/metrics | grep social_login` 验证。
-- **Tracing**：只有 trace_id 串日志，没有 OpenTelemetry 上报。
+- **Tracing**：已补，见 §36（OpenTelemetry + OTLP/HTTP；Jaeger 里能看到
+  `social-login → usercenter` 的同一条链路）。
 - **直方图分位数**：要看 P99 需要加 histogram bucket，当前只有平均值。
-- **告警规则**：指标有了，但没有配套的告警表达式（`outbox_dead > 0`、
-  `merge_compensation_lag_seconds > 300`、`claim_mismatch_open > 0`）。
+- **告警规则**：指标有了，规则也有（`deploy/prometheus/alerts.yaml`），但
+  **通知通道未接**——规则触发了没人收到，等于没有。
 
 ---
 
@@ -2047,7 +2054,7 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 | 四 | Webhook 事件体系（签名/重试/去重/死信） | ✅ | 提前到二期交付，见 §11 |
 | 四 | 可观测性：`/metrics` | ✅ | §24，已含 `uc_sync_failed` / `apps_total` |
 | 四 | 可观测性：告警规则 | ✅ | `deploy/prometheus/alerts.yaml`（6 条），接收端待运维接入 |
-| 四 | 可观测性：tracing | ❌ | 只有 trace_id 串日志 |
+| 四 | 可观测性：tracing | ✅ | 2026-11-04 补：OTel SDK + OTLP/HTTP，两服务同一条链路，见 §36 |
 | 四 | KMS 信封加密 | ✅ | 2026-11-04 补：真信封（每行 DEK）+ KEK 端口 + KMS/本地两种实现 + 迁移工具，见 §35 |
 | 四 | 配置热更新 | ❌ | 改配置需重启 |
 | 四 | 账号注销与数据合规 | ✅ | 2026-11-04 补，`POST /v1/account/close`：关对端 → 级联解绑 → 撤令牌 → 删凭证密文；见 §34 |
@@ -2065,15 +2072,17 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 | 一 | 10 | 10 | 0 | 0 |
 | 二 | 7 | 7 | 0 | 0 |
 | 三 | 12 | 8 | 2 | 2 |
-| 四 | 21 | 14 | 1 | 6 |
-| **合计** | **50** | **39** | **3** | **8** |
+| 四 | 21 | 15 | 1 | 5 |
+| **合计** | **50** | **40** | **3** | **7** |
 
-**按项数看：规划 50 项，完成 39 项、部分 3 项、未做 8 项 → 约 78%**
+**按项数看：规划 50 项，完成 40 项、部分 3 项、未做 7 项 → 约 80%**
 
-比 10-29 那版（32/3/15，64%）多了 6 项完成。三轮的推进方式不同：
+比 10-29 那版（32/3/15，64%）多了 8 项完成。四轮的推进方式不同：
 第一轮是"等对端"的项终于有对端（联调、部署验证）；第二轮把"知道该做、
 但一直排在后面"的三项补上（状态闸门/换绑、两档限流、告警）；
-第三轮清掉上线阻塞项（日配额、管理员开户）并补上注销编排。
+第三轮清掉上线阻塞项（日配额、管理员开户）并补上注销编排；
+第四轮补 KMS 信封加密（§35）与链路追踪（§36）——两项都属于"出事之后
+才想起没有它"的能力。
 
 ### 25.3 本轮（2026-11-02）实际变化
 
@@ -2091,7 +2100,7 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 三件事共同的判断标准是**"会不会静默出事"**：状态不校验 = 封禁不生效且没人知道；
 同步失败 = 单应用登录全挂但报"应用不存在"；告警缺失 = 指标躺着没人看。
 
-### 25.4 剩下 10 项，按上线必要性排序
+### 25.4 剩下 10 项，按上线必要性排序（2026-11-04 更新：tracing 已清）
 
 **A. 上线阻塞（0 项）**
 
@@ -2099,12 +2108,13 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 `rl:platform:day`（§33）。**这是首次出现"没有上线阻塞项"的状态**——
 但下面的 B 组仍是灰度前的门禁，不等于可以上生产。
 
-**B. 灰度前（2 项）**
+**B. 灰度前（1 项）**
 
 1. `Unbind` 平台侧解绑——**卡在凭据**：平台撤销需要渠道的 refresh_token，
    而本服务从不持久化它（见 §33.3 的取舍）。降级提示已在注销里给出
    （`unbind_manual_required`），真实撤销要等平台令牌存储的安全评审。
-2. tracing——链路横跨用户中心 → 本服务 → 渠道，只能靠 trace_id 手工串日志。
+
+> tracing 已清（2026-11-04）：跨服务链路不再靠手工串日志，见 §36。
 
 **C. 可延后（6 项）**
 
@@ -2774,7 +2784,8 @@ app + IP，identityID 要等平台返回 open_id 才有。代价是平台调用�
 ### 32.5 仍未做（与 §25 一致）
 
 `rl:platform:day`（A 组唯一剩余项）、注销的完整链路、`Unbind` 平台侧接线、
-KMS、tracing、`ScopeAppID` 鉴权、双人复核、配置热更新。
+`ScopeAppID` 鉴权、双人复核、配置热更新。
+> KMS 已于 §35 补齐、tracing 已于 §36 补齐。
 告警规则已写，但 Alertmanager 的接收端（邮件/IM）属于部署侧，未接。
 
 ---
@@ -2866,7 +2877,8 @@ B 组里最"该有却没有"的一项——管理员账号管理。做完之后 
 
 ### 33.6 仍未做
 
-B 组剩 4 项：账号注销编排、`Unbind` 平台侧（受阻于凭据决策）、KMS、tracing。
+B 组剩 1 项：`Unbind` 平台侧（受阻于凭据决策）。
+> 账号注销编排见 §34、KMS 见 §35、tracing 见 §36，此三项已清。
 C 组 6 项与用户中心 P1/P2 见 §25。
 
 ---
@@ -3153,3 +3165,148 @@ KMS 停机的错误文案刻意不写成"凭据解密失败"：那会让运维�
   两边共享的只是"信封"这个概念，不是代码（服务边界规则 §15）。
 - **`secret_dek_id` 列名**：语义已从"主密钥版本"变成"包装 DEK 的 KEK"，列名没改。
   改列名要动两边服务与迁移，收益只是命名一致，留到下次表结构变更时一起做。
+
+---
+
+## 36. 链路追踪（OpenTelemetry，2026-11-04）
+
+> 上一状态：`X-Trace-Id` 只在本服务内串日志，调用用户中心时**连头都不带**——
+> 用户中心自己生成一个 ULID，一次登录失败要在两套日志里各查一遍，靠时间戳猜。
+
+### 36.1 落地形态
+
+| 环节 | 实现 | 说明 |
+| --- | --- | --- |
+| SDK | `go.opentelemetry.io/otel` v1.47 + `sdk/trace` | 只接 trace，不接 OTel 的 metrics/log（已有自建 `/metrics` 与 zap，重复接会得到两套口径） |
+| 上报协议 | OTLP/**HTTP**（4318） | 不选 gRPC：HTTP 能穿过现有代理与网关，少一套连接管理；且本地 Jaeger 的 4318 直接可用 |
+| 入站 | `otelgin`（两服务各挂一层）+ `pkg/tracing.GinMiddleware` | 过滤 `/healthz` `/readyz` `/metrics` |
+| 出站 | `pkg/tracing.Transport`（自写 RoundTripper） | 注入 `traceparent`，**不记录 query**（见 §36.2） |
+| 传播 | 仅 W3C `tracecontext` + `baggage` | 不开 B3/Zipkin：多一种入口就多一种伪造 trace 的途径 |
+| 采样 | `ParentBased(TraceIDRatioBased)`，默认 0.1 | 下游跟随上游决定，避免半截链路 |
+| trace_id | 仍是 `X-Trace-Id`，取值改为 span 的 trace id | 对外字段名不变，见 §36.3 |
+
+两个服务共用 `internal/pkg/tracing`（通用工具，符合 §30 的边界规则：
+`pkg` 可共用、业务码不可共用）。装配点各自在 `bootstrap.New` / `app.New`。
+
+### 36.2 一个必须自己写的 transport：为什么不用 `otelhttp`
+
+`otelhttp` 会给每个 client span 写 **`url.full`（含 query）**。本服务的查询串里
+带手机号：
+
+```
+GET /v1/apps/{app}/accounts/by-claim?type=phone&value=13800000000
+```
+
+日志侧早就为此做了 `MaskURL`。如果 trace 侧原样记录，脱敏就只是"换个系统继续泄漏"——
+而且 trace 存储通常比日志保留更久、访问权限更宽。
+
+所以出站埋点是自己写的 80 行 `RoundTripper`：只写 `http.request.method`、
+`url.path`、`server.address`、`server.port`、`http.response.status_code`、
+`span.kind=client`，**不写 `url.full` / `url.query`**。单测
+`TestTransportDoesNotLeakQuery` 用真实手机号跑一遍并断言 span 属性里不含它；
+实机验证时导出器里的 client span 也只有 7 个标签（见 §36.7）。
+
+顺带的收益：httpx 是"一个渠道一个实例"的，把埋点放在 `httpx.New` 里包一层，
+**新增渠道不需要记得接追踪**——漏接一个渠道在 Jaeger 里就是一条断链，很难发现。
+
+### 36.3 trace_id 的四处统一
+
+改造后一个请求的标识在四个地方取值相同：**审计表 `trace_id` 列、访问日志、
+响应头 `X-Trace-Id`、Jaeger 的 traceID**。取值优先级（`middleware.RequestID`）：
+
+1. 当前 span 的 trace id（追踪开启时）—— 32 位小写十六进制
+2. 入站 `X-Trace-Id`（追踪关闭时，保持历史行为）
+3. 自建 ULID（`tr_...`，两者都没有）
+
+副作用（正面的）：追踪开启后，客户端无法再把任意文本塞进审计表的 `trace_id`。
+用户中心侧同理：`request_id` 依次取 span trace id → `X-Trace-Id` → `X-Request-Id` → ULID，
+四个来源都覆盖到了"对方接没接追踪"的所有组合。
+
+### 36.4 中间件顺序（改了就要重排）
+
+```
+Tracing → RequestID → Metrics → Recovery → AccessLog
+```
+
+- **Tracing 最外层**：span 要覆盖 Recovery，否则 panic 的请求在 trace 里没有耗时；
+- **RequestID 在 Tracing 之后**：它要读 span 的 trace id；
+- **Metrics 在 Recovery 之外层**：这条是原有约束（§24.3），没有变。
+
+用户中心侧同理：`Tracing → requestID → recoverPanic → accessLog → measure → maxBody`。
+
+### 36.5 后台任务也要有根 span
+
+对账、outbox 投递、合并补偿都没有入站请求。不显式开根 span 的话，它们内部的
+出站调用会各自变成一条"只有一个 span 的 trace"——在 Jaeger 里看得到，但看不出
+是哪一轮任务、处理的是哪条记录。现在三处各有根 span：
+
+| 位置 | span 名 | 关键属性 |
+| --- | --- | --- |
+| `accountsync.syncApp` | `job.appsync.sync` | `app.code` |
+| `outbox.deliverOne` | `job.outbox.deliver` | `event.id`、`event.type`、`outbox.status`、`outbox.attempts` |
+| `merge.Compensator.RunOnce` | `job.merge.compensate` | `merge.compensated` |
+
+失败用 `tracing.Fail(span, err)` 标 Error：后台任务没有 HTTP 状态码，SDK 无从
+得知失败，不显式标注的话 Jaeger 里所有任务 span 都是"成功"。
+
+### 36.6 关闭态与采样
+
+- `tracing.enabled=false` 时**不注册全局 TracerProvider、不建 exporter、不设 propagator**，
+  中间件退化成空处理器、`Transport` 原样返回底层实现。不是"注册一个不发数据的
+  provider"——那样每次请求仍会分配 span。单测 `TestInitDisabledIsNoop`、
+  `TestTracingDisabledProducesNoSpans` 守住这两条。
+- 采样率 `<=0` 视为"没配"，取默认 1.0；**想不采就关 `enabled`**。
+  "开着但一条不记"是纯粹的故障制造机（配置看起来是开的，实际什么都看不到）。
+- 队列满时丢弃新 span 而不是阻塞业务：追踪是旁路，不能让它拖慢登录。
+
+### 36.7 实机验证（本地 compose + Jaeger，`ACCOUNT_PROVIDER=http`）
+
+| 步骤 | 结果 |
+| --- | --- |
+| 启动两个服务 | 两侧日志各一行 `链路追踪已启用 {"service": "social-login"/"usercenter", "endpoint": "jaeger:4318"}` |
+| `GET /api/services` | `["social-login","usercenter"]` |
+| 启动即对账产生的链路 | 3 个 span，跨 2 个服务（见下方树） |
+| 手工带 `traceparent` 请求 `/v1/jwks` | 响应头 `X-Trace-Id: 4b35…00ea` = 传入 trace id |
+| 同一个 trace id 打到用户中心 | 响应头 `X-Request-Id` 同值；Jaeger 里该 trace 有 2 个 server span（两个服务） |
+| 两侧访问日志 | `trace_id` / `request_id` 均为 `4b35ee3f257b4c86b8fd95c6f20100ea` |
+| client span 标签 | 仅 `http.request.method` / `url.path` / `server.address` / `server.port` / `url.scheme` / `http.response.status_code` / `span.kind`，**无 `url.full`** |
+| 探针 | `/healthz` 不产生 span（日志里仍是 ULID，说明走了关闭态分支） |
+
+真实的跨服务链路（启动即对账，`ACCOUNT_PROVIDER=http`）：
+
+```
+social-login  job.appsync.sync                                7.8ms
+└─ social-login  POST usercenter:8099/internal/v1/apps         7.4ms
+   └─ usercenter  POST /internal/v1/apps                        2.1ms
+```
+
+这正是改造前需要手工 grep 三段日志才能拼出来的东西。
+
+### 36.8 测试
+
+| 包 | 用例 | 守住什么 |
+| --- | --- | --- |
+| `pkg/tracing` | 7 | 关闭态零开销、缺 endpoint 报错、endpoint 规整、默认值夹紧、**跨服务父子关系**、**query 不落 span**、探针过滤 |
+| `middleware`（登录） | 4 | 入站 traceparent 被采纳、无上游时用 span id、关闭态保留 ULID 回退、关闭态不产生 span |
+| `usercenter/httpapi` | 3 | request_id 继承 traceparent、退回 `X-Trace-Id`、都没有时生成 ULID |
+
+跨服务链路用 `tracetest.InMemoryExporter` 断言"B 的 server span 挂在 A 的 client
+span 下、trace id 相同"，不依赖 collector。
+
+> ⚠️ 踩过的坑：`InMemoryExporter.Shutdown()` 会**清空**已收集的 span，
+> 因此测试必须用 `Provider.Flush()`（`ForceFlush`）而不是 `Shutdown` 后才断言。
+> 这也是 `Provider.Flush` 存在的原因——排障时手工触发一次后想立刻在 Jaeger 里看到，
+> 同样是它。
+
+### 36.9 仍未做
+
+- **数据库 span**：GORM 层没有埋点，慢查询只能看 `slow_threshold` 日志。
+  需要 `otelsql` 或自写 callback；会引入 `db.statement`，得先解决"SQL 里带手机号"的脱敏。
+- **trace 与告警联动**：告警规则（§32）里没有"附最近一条 trace 链接"，
+  值班的人仍要从告警跳到 Jaeger 手工搜。
+- **生产 collector 未实机验证**：配置已写（`deploy/otel/collector.yaml`：
+  批处理 + 尾部采样 + 出口兜底脱敏），但本地 compose 不用它——两个服务直连
+  Jaeger，少一跳少一个故障点。这份配置没有在本机跑过 collector 镜像
+  （本机拉不到该镜像），属于"照文档写的、未验证"的部分。
+- **traceparent 入口信任**：目前不校验入站 `traceparent` 的来源。它只影响采样位，
+  不影响业务；但公网暴露时应由网关剥离或重签，避免被人塞满采样额度。

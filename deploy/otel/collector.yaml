@@ -1,0 +1,93 @@
+# OpenTelemetry Collector · 生产形态参考配置
+#
+# 本地 compose 不用它：两个服务直连 Jaeger 的 OTLP 端口，少一跳就少一个
+# "trace 到底丢在哪一跳"的问题（见 docs/implementation-status.md §36）。
+# 生产才需要 collector，理由是它承担了三件服务端做不了的事：
+#
+#   1. 【批处理】把 N 个小请求合并成大包，后端压力降一个数量级；
+#   2. 【尾部采样 tail_sampling】服务端只能按比例在入口决定采不采，
+#      而"这条链路出错了必须留"只有拿到整条链路才知道；
+#   3. 【收敛出口】后端从 Jaeger 换成 Tempo/自建存储时，只改这里，
+#      不用重新发布两个业务服务。
+#
+# 用法：
+#   otelcol-contrib --config deploy/otel/collector.yaml
+# 镜像：otel/opentelemetry-collector-contrib（版本请与后端一起锁死）
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        # 业务服务上报用这个口（OTLP/HTTP）。只在内网监听。
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # 内存保护必须放第一位：collector 自己 OOM 会比"没数据"更难排查。
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # 批处理。timeout 是"最晚多久发一次"，不是"攒够才发"——
+  # 调大能省带宽，代价是刚发生的错误要晚一点才能在 UI 里看到。
+  batch:
+    timeout: 2s
+    send_batch_size: 1024
+
+  # 尾部采样：先看完整条链路，再决定留不留。
+  # 采样比例在入口已经做过一次（0.1），这里只做"补留"：
+  # 错误链路与慢链路 100% 保留，其余按 10% 抽样。
+  tail_sampling:
+    decision_wait: 5s
+    num_traces: 100000
+    policies:
+      - name: errors
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: slow
+        type: latency
+        latency: {threshold_ms: 800}
+      - name: baseline
+        type: probabilistic
+        probabilistic: {sampling_percentage: 10}
+
+  # 兜底脱敏：即使代码里漏了某个属性，也在出口把明显的手机号/邮箱抹掉。
+  # ⚠️ 这是防线不是许可——业务侧仍然不允许把凭证写进 span（§36.2）。
+  transform/redact:
+    trace_statements:
+      - context: span
+        statements:
+          # 属性名命中即整条删除，而不是替换值：值可能以别的形式再出现。
+          - delete_key(attributes, "url.query")
+          - delete_key(attributes, "url.full")
+          - delete_key(attributes, "http.request.header.authorization")
+          - replace_pattern(attributes["url.path"], "(?P<h>[^/]+)$", "***")
+
+exporters:
+  # 后端换成 Tempo / 自建存储时只改这一段。
+  otlp:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # 排障用：确认"collector 到底收到了什么"。生产建议关掉（量大）。
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, transform/redact, batch]
+      exporters: [otlp]
+  telemetry:
+    logs:
+      # collector 自己的日志走 stderr，级别 warn：正常运行时不该有输出。
+      level: warn

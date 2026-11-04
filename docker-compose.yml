@@ -93,6 +93,30 @@ services:
     ports:
       - "127.0.0.1:16379:6379"
 
+  # ---------- 链路追踪后端（本地）----------
+
+  # Jaeger 只用于本地：内存存储，容器一停 trace 就没了。
+  #
+  # 生产形态是"collector（批处理/限流/多后端）→ 持久化后端"，collector 的
+  # 配置不在本文件里——本地两个容器直连 Jaeger 的 OTLP 端口，少一层就少一个
+  # "trace 到底丢在哪一跳"的问题。见 docs/implementation-status.md §36。
+  #
+  # 镜像走 hub.rat.dev：本机直连 registry-1.docker.io 被拒、daocloud 对
+  # jaegertracing 返回 403，与 Dockerfile 里用 daocloud 是同一类网络问题。
+  # ⚠️ Jaeger v1 已 EOL（2025-12-31）。用它只是因为本地能拉到的镜像是 v1；
+  #    新环境请换成 Jaeger v2（jaegertracing/jaeger:2.x）或任意 OTLP 后端。
+  jaeger:
+    image: ${JAEGER_IMAGE:-hub.rat.dev/jaegertracing/all-in-one:latest}
+    environment:
+      # v1.35 起默认开启，显式写出来是为了让"为什么 4318 能用"在文件里可见。
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # UI：看链路、按 trace id 搜索
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      # OTLP/HTTP：宿主机也能直接 curl 上报（排障时验证"能不能发出去"）
+      - "${JAEGER_OTLP_PORT:-4318}:4318"
+    restart: "no"
+
   # ---------- 初始化（一次性，跑完即退出） ----------
 
   migrate:
@@ -175,6 +199,12 @@ services:
       SOCIAL_LOGIN_SECURITY_KMS_KEY_ID: ${KMS_KEY_ID:-}
       SOCIAL_LOGIN_SECURITY_KMS_TOKEN: ${KMS_TOKEN:-}
       SOCIAL_LOGIN_SECURITY_KMS_DEK_CACHE_TTL: ${KMS_DEK_CACHE_TTL:-5m}
+      # 链路追踪。本地默认开启并 1.0 全采：
+      # 采样率 0.1 时手工点几下很可能一条都采不到，验证时容易误判成"没接上"。
+      # 真正的生产值见 configs/config.yaml（0.1），这里只为本地可验证。
+      SOCIAL_LOGIN_TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      SOCIAL_LOGIN_TRACING_ENDPOINT: ${TRACING_ENDPOINT:-http://jaeger:4318}
+      SOCIAL_LOGIN_TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1.0}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
@@ -197,6 +227,10 @@ services:
       # 很难联想到"对端还没起来"。用一个依赖换掉这个排查陷阱。
       usercenter:
         condition: service_healthy
+      # 追踪后端只要求"已启动"：collector 没起来不该拦住业务服务，
+      # 导出失败会落在 Warn 日志里，而不是让登录不可用。
+      jaeger:
+        condition: service_started
 
   # ---------- 用户中心（账号主数据） ----------
 
@@ -211,6 +245,12 @@ services:
       # ⚠️ 仅本地：生产必须由密钥管理系统注入 UC_SECURITY_MASTER_KEY。
       UC_SECURITY_MASTER_KEY: ${UC_MASTER_KEY:-dSmcH26cwhbLBQSMCD2/E3NV9Hs4c8Bmz+E75YP4Uo4=}
       UC_MIGRATE_ENABLED: "true"
+      # 链路追踪：与登录中心同一个 collector，服务名不同（usercenter）。
+      # 本服务是链路下游，上游已采样的请求会强制记录，这里的比例只影响
+      # "直接打到本服务的请求"。
+      UC_TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      UC_TRACING_ENDPOINT: ${TRACING_ENDPOINT:-http://jaeger:4318}
+      UC_TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1.0}
     ports:
       - "${UC_PORT:-8099}:8099"
     # 镜像里的 HEALTHCHECK 打的是 8080（social-login 的端口）。
@@ -227,6 +267,8 @@ services:
         condition: service_healthy
       uc-db:
         condition: service_completed_successfully
+      jaeger:
+        condition: service_started
 
 volumes:
   pg-data:

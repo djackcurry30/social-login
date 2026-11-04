@@ -52,3 +52,25 @@ migrate:
   # 本地开启，启动时自动建表。
   # ⚠️ 生产必须为 false：多副本滚动发布时并发迁移会互相抢锁。
   enabled: true
+
+tracing:
+  # 链路追踪。默认关闭——没有 collector 的环境里打开只会每分钟刷一批
+  # "导出失败"，把真正的告警盖掉。
+  #
+  # 本地 compose 已内置 otel-collector + jaeger，默认打开；单独跑本服务时
+  # 用 UC_TRACING_ENABLED=false 关掉，或把 endpoint 指向自己的 collector。
+  enabled: false
+  # 必须与 social-login 不同：Jaeger 的 service 下拉框按它分组。
+  service_name: "usercenter"
+  # 部署环境，出现在 deployment.environment.name 上。留空时用 "dev"。
+  environment: "dev"
+  # OTLP/HTTP 接收地址。collector 在同机时用 127.0.0.1；容器里用服务名。
+  endpoint: "http://127.0.0.1:4318"
+  # 内网明文。跨网络安全域时改为 false（走 TLS）。
+  insecure: true
+  # 入口采样比例。本服务写在链路的【下游】，上游已采样的请求会强制记录，
+  # 所以这里的比例只影响"直接打到本服务的请求"。0.1 与登录中心保持一致。
+  sample_ratio: 0.1
+  export_timeout: "5s"
+  batch_timeout: "5s"
+  max_queue_size: 2048

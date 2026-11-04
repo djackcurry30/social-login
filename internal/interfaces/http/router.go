@@ -27,6 +27,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/interfaces/http/middleware"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/metrics"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // 各路由分组的超时预算（架构 §5.7 的第二段超时）。
@@ -59,6 +60,9 @@ type RouterDeps struct {
 	// Metrics 是指标注册表。为 nil 时不采集中、也不挂 /metrics
 	// （单元测试与不需要观测的嵌入式部署）。
 	Metrics *metrics.Registry
+	// ServiceName 是链路追踪里的服务名，出现在 span 的 service.name 上。
+	// 为空时取 "social-login"。测试与嵌入式场景可以用它区分实例。
+	ServiceName string
 }
 
 // NewRouter 构造 gin 引擎。
@@ -67,10 +71,26 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// 前者会绕过我们统一的 zap 日志与 trace_id 注入，后者会把堆栈打到 stdout。
 	r := gin.New()
 
-	// 中间件顺序有讲究：Metrics 必须在 Recovery【之外层】。
-	// 洋葱模型下，handler panic 会被 Recovery（内层）先捕获并写成 500，
-	// Metrics 的 defer 随后执行时才能读到 500；反过来会把它记成 200。
-	chain := []gin.HandlerFunc{middleware.RequestID()}
+	// 中间件顺序有讲究：
+	//
+	//	Tracing → RequestID → Metrics → Recovery → AccessLog
+	//
+	//  1. Tracing 必须在最外层：span 要覆盖后续全部中间件（含 Recovery），
+	//     否则 panic 的那个请求在 trace 里看不到耗时与状态。
+	//  2. RequestID 必须在 Tracing 之后：它优先取当前 span 的 trace id，
+	//     早于 Tracing 挂载就只能拿到客户端的头（甚至自建 ULID），
+	//     日志与 trace 会对不上。
+	//  3. Metrics 必须在 Recovery 之外层：洋葱模型下，handler panic 会被
+	//     Recovery（内层）先捕获并写成 500，Metrics 的 defer 随后执行时
+	//     才能读到 500；反过来会把它记成 200——监控上看一切正常，实际在 500。
+	serviceName := deps.ServiceName
+	if serviceName == "" {
+		serviceName = "social-login"
+	}
+	chain := []gin.HandlerFunc{
+		tracing.GinMiddleware(serviceName),
+		middleware.RequestID(),
+	}
 	if deps.Metrics != nil {
 		chain = append(chain, middleware.Metrics(deps.Metrics))
 	}

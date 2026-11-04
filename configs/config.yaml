@@ -210,3 +210,33 @@ ratelimit:
   platform_daily: {}
   # 未单独列出的渠道用这个默认值，0 = 不限。
   platform_daily_default: 0
+
+tracing:
+  # 链路追踪（OpenTelemetry，OTLP/HTTP 上报）。
+  #
+  # 默认关闭：没有 collector 的环境里打开只会每分钟刷一批"导出失败"，
+  # 把真正的告警盖掉。本地 compose 已内置 otel-collector + jaeger，
+  # 默认打开（见 docker-compose.yml 的 SOCIAL_LOGIN_TRACING_ENABLED）。
+  enabled: false
+  # 服务名，出现在 trace 的 service.name 上。两个服务必须不同。
+  service_name: "social-login"
+  # 部署环境。留空时回落到 auth.env（生产上两者本来就该一致）。
+  environment: "dev"
+  # OTLP/HTTP 接收地址：collector 的 4318 端口。
+  # ⚠️ 注意不是 4317（那是 gRPC），本服务只用 HTTP 协议上报。
+  endpoint: "http://127.0.0.1:4318"
+  # 内网明文。跨网络安全域时改为 false（走 TLS）。
+  insecure: true
+  # 入口采样比例（0–1）。本服务是链路起点，比例决定了总采样量。
+  # 0.1 = 十次请求记一条完整链路；定位故障足够，且不会把 collector 打满。
+  # 压测或排障时临时改成 1.0 全采。
+  sample_ratio: 0.1
+  # 单批导出超时，也是退出时刷盘的上限。
+  export_timeout: "5s"
+  # 批量导出的最大攒批时间。调大能减少请求数，代价是"刚发生的错误"
+  # 要晚一点才能在 Jaeger 里看到。
+  batch_timeout: "5s"
+  # 待导出 span 的内存队列。满时丢弃新 span（不阻塞业务）。
+  max_queue_size: 2048
+  # 导出请求附加头（collector 侧鉴权）。键值都不进日志。
+  headers: {}

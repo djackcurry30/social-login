@@ -29,6 +29,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // 默认值。可被 Config 覆盖。
@@ -54,8 +56,11 @@ type Config struct {
 	// MaxBodyBytes 响应体读取上限（字节）。0 取默认。
 	MaxBodyBytes int64
 	// Transport 允许注入自定义 RoundTripper。
-	// 可观测性接入点：第四期在这里换成 otelhttp.NewTransport(...)，
-	// 本层不需要为 OTel 做任何改造（这也是不引入第三方 HTTP 客户端库的原因之一）。
+	//
+	// 无论是否注入，New 都会再用 pkg/tracing.Transport 包一层：追踪是
+	// 横切关注点，不能要求每个渠道适配器自己记得接（漏接的那个渠道
+	// 在 Jaeger 里就是一条断掉的链路，而且很难发现漏了谁）。
+	// 未开启追踪时包一层是零成本的——tracing.Transport 直接返回原值。
 	Transport http.RoundTripper
 	// Logger 可选。nil 表示不记录调试日志。
 	Logger *zap.Logger
@@ -102,6 +107,8 @@ func New(cfg Config) *Client {
 	if cfg.Transport == nil {
 		cfg.Transport = newTransport(cfg)
 	}
+	// 出站追踪与 traceparent 注入都在这一层完成（见 pkg/tracing/transport.go）。
+	cfg.Transport = tracing.Transport(cfg.Transport)
 	return &Client{
 		name: cfg.Name,
 		hc: &http.Client{
@@ -157,6 +164,21 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*Response, error) {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.totalTmo)
 		defer cancel()
+	}
+
+	// 透传追踪标识。
+	//
+	//	traceparent —— 由 tracing.Transport 注入，机器读（W3C 标准头）
+	//	X-Trace-Id  —— 这里注入，人读：对端没接追踪也能在日志里对上号
+	//
+	// 二者取值相同。调用方显式设置过就尊重它（某些渠道要求自定义追踪头）。
+	if req.Header.Get(reqmeta.TraceIDHeader) == "" {
+		if traceID := reqmeta.TraceID(ctx); traceID != "" {
+			if req.Header == nil {
+				req.Header = make(http.Header, 2)
+			}
+			req.Header.Set(reqmeta.TraceIDHeader, traceID)
+		}
 	}
 
 	started := time.Now()

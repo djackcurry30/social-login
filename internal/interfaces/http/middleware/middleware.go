@@ -16,6 +16,7 @@ import (
 
 	"github.com/djackcurry30/social-login/internal/pkg/ids"
 	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // gin context 中使用的键。用常量而非字面量，避免拼写不一致造成的静默失效。
@@ -25,7 +26,7 @@ const (
 )
 
 // TraceIDHeader 是追踪标识的请求/响应头名。
-const TraceIDHeader = "X-Trace-Id"
+const TraceIDHeader = reqmeta.TraceIDHeader
 
 // TraceID 读取当前请求的追踪标识。
 func TraceID(c *gin.Context) string {
@@ -39,10 +40,23 @@ func TraceID(c *gin.Context) string {
 
 // RequestID 为每个请求分配追踪标识，并写入请求 context 供审计与日志使用。
 //
-// 优先复用调用方传入的 X-Trace-Id：跨服务调用时这是把两边的日志串起来的唯一手段。
+// 取值的优先级（顺序不能改）：
+//
+//  1. 当前 span 的 trace id —— 追踪开启时。这是唯一能让"日志里的 trace_id"
+//     与"Jaeger 里的那一条链路"对上的取值：审计表、访问日志、响应头、
+//     trace 存储四处的标识必须完全一致，否则排障时仍要在两个系统之间手工比对。
+//  2. 调用方传入的 X-Trace-Id —— 追踪未开启时。跨服务调用靠它把两边日志串起来。
+//  3. 自建 ULID —— 前两者都没有。
+//
+// 注意顺序带来一个副作用（正面的）：追踪开启后，日志与审计里的 trace_id
+// 不再是客户端可以任意指定的字符串，而是由本服务（或上游 span）生成的
+// 32 位十六进制。这堵掉了"客户端塞一段伪造文本进审计表"的路径。
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		traceID := c.GetHeader(TraceIDHeader)
+		traceID := tracing.TraceID(c.Request.Context())
+		if traceID == "" {
+			traceID = c.GetHeader(TraceIDHeader)
+		}
 		if traceID == "" {
 			traceID = ids.New(ids.PrefixTrace)
 		}

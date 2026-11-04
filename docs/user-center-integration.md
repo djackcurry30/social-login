@@ -220,6 +220,11 @@ POST /internal/v1/apps
    不能并存——否则 `by-claim` 返回哪个都是"看起来对、实际错"。
 7. **`user_id` 不可枚举**（ULID/UUID），且**不做懒注册**（未注册的 `app_key` 一律 400）。
 
+> 追踪头（2026-11-04 起）：调用会带 `traceparent`（W3C）与 `X-Trace-Id`。
+> 对端**不接也没关系**（未知头会被忽略，接口行为不变）；接了就能在一条 trace 里
+> 看到 `social-login → usercenter` 的完整链路。反过来，对端若回写
+> `X-Trace-Id`/`X-Request-Id`，本服务会原样沿用，见 implementation-status §36。
+
 ---
 
 ## 4. 对端就绪后怎么买账：联调步骤

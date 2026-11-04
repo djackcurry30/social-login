@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 	"github.com/djackcurry30/social-login/internal/usercenter/domain"
 	"github.com/djackcurry30/social-login/internal/usercenter/observe"
 )
@@ -21,11 +22,25 @@ const (
 
 // requestID 为每个请求分配标识，并回写响应头。
 //
-// 优先透传上游的 X-Request-Id：social-login 已经有一条链路追踪，
-// 本服务另起一个编号会让"一次登录失败"在两个日志里对不上。
+// 取值优先级（顺序不能改）：
+//
+//  1. 当前 span 的 trace id —— 追踪开启时。这样本服务的日志、响应头
+//     与 Jaeger 里的那条链路是同一个标识。
+//  2. 上游的 X-Trace-Id —— 登录中心即使没开追踪也会带（pkg/httpx 注入）。
+//  3. 上游的 X-Request-Id —— 历史调用方的习惯头，保留兼容。
+//  4. 自建 ULID —— 前面都没有。
+//
+// 顺序的意义：一旦追踪可用，就用"跨服务、跨系统都认"的那个 id；退化路径
+// 保证任何调用方都能被串起来，不会因为对方没接追踪就丢掉关联能力。
 func requestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := trimParam(c.GetHeader(requestIDHeader))
+		id := tracing.TraceID(c.Request.Context())
+		if id == "" {
+			id = trimParam(c.GetHeader(traceIDHeader))
+		}
+		if id == "" {
+			id = trimParam(c.GetHeader(requestIDHeader))
+		}
 		if id == "" {
 			id = ids.ULID()
 		}

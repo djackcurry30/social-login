@@ -33,6 +33,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
 	"github.com/djackcurry30/social-login/internal/pkg/guards/breaker"
 	"github.com/djackcurry30/social-login/internal/pkg/metrics"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 
 	// blank import 触发各渠道适配器的编译期注册（决策 D7）。
 	// 新增渠道时改这一行即可，装配代码与核心编排都不需要动。
@@ -79,6 +80,9 @@ type App struct {
 	compensator *appmerge.Compensator
 	// appSync 是应用注册同步循环（契约 v1.1 §2.6）；nil 表示没有用户中心或已关闭。
 	appSync *accountsync.Service
+	// tracer 是链路追踪的生命周期持有者。nil 不可能发生在正常装配路径上
+	// （关闭追踪时也是非 nil 的空壳），保留判断只是为 SkipDatabase 测试。
+	tracer *tracing.Provider
 	// accounts 是账号体系端口。暴露给集成测试用（构造 source/target 账号），
 	// 与 DB()/Redis() 同属测试可达的装配产物。
 	accounts domainaccount.Provider
@@ -118,6 +122,18 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 
 	app := &App{cfg: cfg, log: logger}
+
+	// 追踪尽早初始化：注册同步、outbox 等后台循环在 New 的尾部就开始装配，
+	// 它们的出站调用要能带 traceparent，就必须先有全局 TracerProvider。
+	//
+	// 失败即终止启动：走到这里说明配置层已经校验过 endpoint 非空，
+	// 再失败就是"地址/凭据/证书"这类环境问题，带病启动只会把问题
+	// 推迟到"某天发现追踪一直没数据"。
+	tracer, err := tracing.Init(ctx, cfg.Tracing.TracingOptions(Version), logger)
+	if err != nil {
+		return nil, errs.Wrap(errs.CodeConfigInvalid, "初始化链路追踪失败", err)
+	}
+	app.tracer = tracer
 
 	keyManager, err := buildKeyManager(cfg, logger)
 	if err != nil {
@@ -775,6 +791,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Admin:        adminDeps,
 		WebFS:        embedweb.FS(),
 		Metrics:      metricsReg,
+		ServiceName:  cfg.Tracing.TracingOptions(Version).ServiceName,
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 	app.dispatcher = outboxDispatcher
@@ -862,6 +879,16 @@ func (a *App) Shutdown(ctx context.Context) error {
 		defer cancel()
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
 			a.log.Error("HTTP 服务优雅退出失败", zap.Error(err))
+		}
+	}
+	// 追踪刷盘放在 HTTP 关闭之后、日志与存储关闭之前：
+	//   - 之后：在途请求的 span 已经 End，能赶上最后一批；
+	//   - 之前：日志还活着，导出失败能留痕。
+	// 漏掉这一步的后果是"每次部署前后的那几十秒永远没有 trace"——
+	// 而那恰好是最容易出问题的窗口。
+	if a.tracer != nil {
+		if err := a.tracer.Shutdown(ctx); err != nil {
+			a.log.Warn("链路追踪刷盘失败（不影响退出）", zap.Error(err))
 		}
 	}
 	if a.rdb != nil {

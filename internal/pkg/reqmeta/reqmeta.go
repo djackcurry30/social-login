@@ -6,6 +6,16 @@ package reqmeta
 
 import "context"
 
+// TraceIDHeader 是跨服务传递追踪标识的请求/响应头。
+//
+// 与 W3C 的 traceparent 并存，不是替代关系：
+//   - traceparent 供 OpenTelemetry 使用（采样位、span 父子关系都在里面）；
+//   - X-Trace-Id 供"没有接追踪的调用方"与运维手工排查使用
+//     （curl 一句就能带上，不必拼 55 个字符的 traceparent）。
+//
+// 两者取值在开启追踪时是同一个 trace id，见 middleware.RequestID。
+const TraceIDHeader = "X-Trace-Id"
+
 type key struct{}
 
 // Meta 是请求元信息。

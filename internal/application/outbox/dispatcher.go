@@ -16,9 +16,11 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/domain/event"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // Deliverer 是投递端口（实现见 infrastructure/webhook）。
@@ -154,10 +156,28 @@ func (s *Service) DispatchOnce(ctx context.Context) (Stats, error) {
 
 // deliverOne 投递并推进状态。返回的错误只表示【状态回写失败】，
 // 投递本身的失败会体现在 e.Status 上。
-func (s *Service) deliverOne(ctx context.Context, e *event.Event) error {
+// deliverOne 投递一条事件。
+//
+// span 上带 event.id / event.type / 最终状态：这条链路是"事件从我们的库走到
+// 业务方"的唯一一次尝试，出问题时要回答的是"哪条事件、第几次、对方怎么回的"，
+// 靠日志要在 retry 序列里拼，靠 trace 是一棵树。
+func (s *Service) deliverOne(ctx context.Context, e *event.Event) (err error) {
+	ctx, span := tracing.Start(ctx, "job.outbox.deliver",
+		attribute.Int64("event.id", e.ID),
+		attribute.String("event.type", e.Type))
+	defer func() {
+		// defer 里读 e：状态在下面的 switch 里被改写，这里拿到的才是最终值。
+		span.SetAttributes(
+			attribute.String("outbox.status", string(e.Status)),
+			attribute.Int("outbox.attempts", e.Attempts),
+		)
+		tracing.Fail(span, err)
+		span.End()
+	}()
+
 	attempts := e.Attempts + 1
 
-	err := s.deliverer.Deliver(ctx, e)
+	err = s.deliverer.Deliver(ctx, e)
 	switch {
 	case err == nil:
 		e.Status = event.StatusSent

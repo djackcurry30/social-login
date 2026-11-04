@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/pkg/metrics"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 	ucmigrations "github.com/djackcurry30/social-login/migrations/usercenter"
 
 	"github.com/djackcurry30/social-login/internal/usercenter/config"
@@ -39,11 +40,21 @@ type App struct {
 	log    *zap.Logger
 	store  *postgres.Store
 	server *http.Server
+	// tracer 是链路追踪生命周期。关闭追踪时是非 nil 的空壳。
+	tracer *tracing.Provider
 }
 
 // New 构造服务。
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	log, err := observe.NewLogger(cfg.Log.Level, cfg.Log.Format, cfg.Log.File)
+	if err != nil {
+		return nil, err
+	}
+
+	// 追踪在路由装配之前初始化：中间件在 NewRouter 里就要判断"要不要挂"。
+	// 失败即启动失败——配置层已校验 endpoint 非空，这里再失败属于环境问题
+	//（地址不可解析、证书不对），带病启动只会把问题推到"某天发现没数据"。
+	tracer, err := tracing.Init(ctx, cfg.Tracing.TracingOptions(Version), log)
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +97,14 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Token:           cfg.Security.ServiceToken,
 		MaxBodyBytes:    cfg.Server.MaxBodyBytes,
 		Mode:            ginMode(cfg.Server.Mode),
+		ServiceName:     cfg.Tracing.TracingOptions(Version).ServiceName,
 	})
 
 	return &App{
-		cfg:   cfg,
-		log:   log,
-		store: store,
+		cfg:    cfg,
+		log:    log,
+		store:  store,
+		tracer: tracer,
 		server: &http.Server{
 			Addr:    cfg.Server.Addr,
 			Handler: router,
@@ -109,6 +122,14 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	defer a.store.Close()
 	defer func() { _ = a.log.Sync() }()
+	// 刷盘顺序（defer 是后进先出）：追踪 → 存储 → 日志。
+	// 追踪要在存储之前关：span 里不含需要数据库的内容，但导出器
+	// 失败时的告警还依赖日志句柄活着。
+	defer func() {
+		if err := a.tracer.Shutdown(context.Background()); err != nil {
+			a.log.Warn("链路追踪刷盘失败（不影响退出）", zap.Error(err))
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	mergex "github.com/djackcurry30/social-login/internal/domain/merge"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 // Compensator 是合并补偿循环（§7.3「补偿任务」）。
@@ -85,12 +87,21 @@ func (c *Compensator) Run(ctx context.Context) {
 }
 
 // RunOnce 处理一批待补偿记录，返回处理条数。可单测直接调用。
-func (c *Compensator) RunOnce(ctx context.Context) (int, error) {
+//
+// span 覆盖整批：补偿是"远端已成功、本地提交失败"这类断点的唯一自愈路径，
+// 出问题时需要看到"这一轮捞到了几条、每条重放到哪一步"。
+func (c *Compensator) RunOnce(ctx context.Context) (done int, err error) {
+	ctx, span := tracing.Start(ctx, "job.merge.compensate")
+	defer func() {
+		span.SetAttributes(attribute.Int("merge.compensated", done))
+		tracing.Fail(span, err)
+		span.End()
+	}()
+
 	items, err := c.ops.ListDue(ctx, c.batch)
 	if err != nil {
 		return 0, err
 	}
-	done := 0
 	for _, op := range items {
 		if ctx.Err() != nil {
 			return done, ctx.Err()

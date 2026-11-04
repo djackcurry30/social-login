@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/pkg/metrics"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 	"github.com/djackcurry30/social-login/internal/usercenter/domain"
 	"github.com/djackcurry30/social-login/internal/usercenter/observe"
 	"github.com/djackcurry30/social-login/internal/usercenter/service"
@@ -30,6 +31,8 @@ type Deps struct {
 	Token        string
 	MaxBodyBytes int64
 	Mode         string
+	// ServiceName 是链路追踪里的服务名。为空取 "usercenter"。
+	ServiceName string
 }
 
 // NewRouter 装配路由。
@@ -46,7 +49,17 @@ func NewRouter(d Deps) *gin.Engine {
 	// gin.New 而不是 gin.Default：Default 带 Logger/Recovery，格式与本服务
 	// 的日志、错误信封都不一致。
 	r := gin.New()
+	// 顺序：Tracing → requestID → recoverPanic → accessLog → measure → maxBody。
+	//
+	//   - Tracing 必须最外层：入站 span 要覆盖 panic 与访问日志，
+	//     并且它先把上游的 traceparent 解出来，requestID 才能取到同一个 id。
+	//   - recoverPanic 在 requestID 之后：panic 日志里要能带上 trace_id。
+	serviceName := d.ServiceName
+	if serviceName == "" {
+		serviceName = "usercenter"
+	}
 	r.Use(
+		tracing.GinMiddleware(serviceName),
 		requestID(),
 		recoverPanic(d.Logger),
 		accessLog(d.Logger),

@@ -27,10 +27,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/domain/account"
 	"github.com/djackcurry30/social-login/internal/domain/tenant"
+	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 )
 
 const (
@@ -298,7 +300,17 @@ func (s *Service) syncByCode(ctx context.Context, appCode string) {
 }
 
 // syncApp 同步单个应用，并把结果写回状态。
-func (s *Service) syncApp(ctx context.Context, app *tenant.Application) error {
+//
+// 开一个后台任务 span：这一轮对账里"哪个应用同步失败、卡在哪一步"，
+// 靠日志要在几百行里 grep，靠 trace 一眼能看到（出站调用是它的子 span）。
+func (s *Service) syncApp(ctx context.Context, app *tenant.Application) (err error) {
+	ctx, span := tracing.Start(ctx, "job.appsync.sync",
+		attribute.String("app.code", app.AppCode))
+	defer func() {
+		tracing.Fail(span, err)
+		span.End()
+	}()
+
 	reg := account.AppRegistration{
 		AppKey:         app.AppCode,
 		Name:           app.Name,

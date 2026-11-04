@@ -34,6 +34,14 @@ type ErrorBody struct {
 // requestIDHeader 是请求标识头。有则透传（便于跨服务串联），无则新生成。
 const requestIDHeader = "X-Request-Id"
 
+// traceIDHeader 是登录中心透传的追踪头。
+//
+// 与 W3C 的 traceparent 并存：traceparent 由追踪 SDK 读写，X-Trace-Id
+// 是"人也看得懂、curl 也能带上"的那一份。本服务优先按 traceparent 续链路
+// （那样是真正的父子关系），拿不到时才退化成读这个头——两者的取值在
+// 正常链路里是同一个 trace id。
+const traceIDHeader = "X-Trace-Id"
+
 // fail 把错误写成契约信封。
 func fail(c *gin.Context, logger *zap.Logger, err error) {
 	e, ok := domain.As(err)
