@@ -124,6 +124,24 @@ type ClaimReplacer interface {
 	ReplaceClaim(ctx context.Context, req ReplaceClaimRequest) (*Account, error)
 }
 
+// AccountCloser 是"注销账号"这一能力的可选端口。
+//
+// 与 ClaimReplacer 同样是可选端口，理由相同：Provider 是登录链路的最小
+// 必需集合，而"注销"只被主动注销流程调用。并且它【必须可缺省】——
+// 账号状态的权威在用户中心（约束 C4），没有对端时根本无处可注销，
+// 此时调用方要能明确地拒绝，而不是假装注销成功。
+//
+// 语义要求：
+//   - 幂等：账号已是 closed、或对端返回 ACCOUNT.NOT_FOUND，都算成功。
+//     重复注销是本流程的正常路径（客户端超时重试、以及"本地级联失败后
+//     用户再点一次"），把已注销当成错误会让用户永远卡在中间态。
+//   - 这是【不可逆】操作。实现方不得为了"看起来更友好"而做软关闭——
+//     软关闭意味着用户可以继续用旧令牌访问，而界面告诉他账号已删除。
+type AccountCloser interface {
+	// Close 把某账号置为已注销（closed）。
+	Close(ctx context.Context, appKey, userID string) error
+}
+
 // Provider 是账号体系的 SPI。
 //
 // 生产实现为 HTTPAccountProvider；用户中心尚未就位时用 StubAccountProvider

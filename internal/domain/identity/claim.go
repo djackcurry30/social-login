@@ -117,6 +117,17 @@ type ClaimRepository interface {
 
 	// Revoke 撤销某身份下的指定凭证（换号/解绑）。
 	Revoke(ctx context.Context, appID, identityID int64, claimType, valueHash string, at time.Time) error
+
+	// PurgeByIdentities 物理删除若干身份下的全部凭证，返回删除行数。
+	//
+	// 只用于账号注销（数据合规），不要用在换号/解绑上——那两个场景要保留
+	// 历史，Revoke 才是对的。
+	//
+	// 与 Revoke 的本质区别：Revoke 只置 revoked_at，行里仍留着 value_hash
+	// 与 value_cipher 密文；注销要求的是"这段个人数据不再存在"，而不是
+	// "它被标记为不可用"。留着哈希虽然不可逆，但仍是一个可用于关联的
+	// 假名标识（同一个号码再来注册时能认出"以前是那个人"），与删除承诺不符。
+	PurgeByIdentities(ctx context.Context, appID int64, identityIDs []int64) (int64, error)
 }
 
 // ClaimAdminQuery 是管理端 J 组的凭证查询条件（与关系）。

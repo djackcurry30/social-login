@@ -259,3 +259,8 @@ func TestTransferEmitsEvent(t *testing.T) {
 		t.Fatalf("transfer 事件应带 reason=admin_transfer: %+v", w.lastEvent)
 	}
 }
+
+// PurgeByIdentities 是账号注销用的物理删除，管理端不涉及。
+func (f *fakeClaims) PurgeByIdentities(context.Context, int64, []int64) (int64, error) {
+	panic("unexpected PurgeByIdentities")
+}

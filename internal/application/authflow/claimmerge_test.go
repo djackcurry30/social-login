@@ -458,3 +458,8 @@ func TestTryClaimMergeRejectsConflictingClaims(t *testing.T) {
 		t.Fatal("被拒绝时不得建立任何绑定")
 	}
 }
+
+// PurgeByIdentities 属于注销流程，登录链路不涉及。
+func (f *fakeClaims) PurgeByIdentities(context.Context, int64, []int64) (int64, error) {
+	panic("unexpected PurgeByIdentities")
+}

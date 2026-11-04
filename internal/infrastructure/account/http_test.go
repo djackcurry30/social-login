@@ -635,3 +635,74 @@ func TestGetRejectsEmptyUserID(t *testing.T) {
 		t.Fatal("空 user_id 不应发出请求")
 	}
 }
+
+// --- 注销（Close）---
+
+// 注销走内部接口前缀，不是业务契约的 /v1。
+//
+// 这条断言看似琐碎，但它守的是一个已经发生过的故障：路径写成 /v1/... 时，
+// 对端返回 404，而 404 与"账号不存在"同码——注销于是"成功"了，
+// 本地数据清空、对端账号仍在。
+func TestCloseUsesInternalPath(t *testing.T) {
+	f := newFakeCenter(t)
+	f.reply = func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("注销应为 POST，实际 %s", r.Method)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"user_id": "u-1", "status": "closed"})
+	}
+	if err := f.provider(t, time.Second).Close(context.Background(), testAppKey, "u-1"); err != nil {
+		t.Fatalf("注销应成功: %v", err)
+	}
+	want := "/internal/v1/apps/" + testAppKey + "/accounts/u-1/close"
+	if f.lastPath != want {
+		t.Fatalf("路径应为 %s，实际 %s", want, f.lastPath)
+	}
+}
+
+// 带信封的 404 表示"账号本就不存在"，按幂等成功处理。
+func TestCloseTreatsEnvelopedNotFoundAsSuccess(t *testing.T) {
+	f := newFakeCenter(t)
+	f.reply = func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(w, http.StatusNotFound, CodeUpstreamNotFound, "account not found")
+	}
+	if err := f.provider(t, time.Second).Close(context.Background(), testAppKey, "u-1"); err != nil {
+		t.Fatalf("账号不存在应视为已注销: %v", err)
+	}
+}
+
+// 裸 404 必须报错。
+//
+// 它可能来自路径写错、base_url 少前缀、网关没转发、对端版本落后。
+// 把这些当成"已注销"，用户会得到一句 200 和一份还在的账号数据。
+func TestCloseRejectsBareNotFound(t *testing.T) {
+	f := newFakeCenter(t)
+	f.reply = func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r) // 无信封的裸 404
+	}
+	err := f.provider(t, time.Second).Close(context.Background(), testAppKey, "u-1")
+	if err == nil {
+		t.Fatal("裸 404 不能被当成注销成功")
+	}
+	if errs.CodeOf(err) != errs.CodeAccountUnavailable {
+		t.Fatalf("应为 ACCOUNT.UNAVAILABLE，实际 %s", errs.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "未提供注销接口") {
+		t.Fatalf("文案应指向真正原因（对端没有该接口），实际: %v", err)
+	}
+}
+
+// 5xx 可重试：这类失败重试一次往往就好了。
+func TestCloseMapsServerErrorAsRetryable(t *testing.T) {
+	f := newFakeCenter(t)
+	f.reply = func(w http.ResponseWriter, r *http.Request) {
+		writeEnvelope(w, http.StatusServiceUnavailable, "PROVIDER.UNAVAILABLE", "down")
+	}
+	err := f.provider(t, time.Second).Close(context.Background(), testAppKey, "u-1")
+	if errs.CodeOf(err) != errs.CodeAccountUnavailable {
+		t.Fatalf("应为 ACCOUNT.UNAVAILABLE，实际 %s", errs.CodeOf(err))
+	}
+	if !errs.Retryable(err) {
+		t.Fatalf("5xx 应标记为可重试，实际 %v", err)
+	}
+}

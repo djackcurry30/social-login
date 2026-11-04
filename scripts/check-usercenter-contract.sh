@@ -310,7 +310,35 @@ if [ "$WRITE" = 1 ] && [ "$code" != "404" ] && [ "$code" != "405" ] && [ "$code"
       *) bad "换绑返回 $code9：$body9" ;;
     esac
 
-    yellow "  注意 本次检查已在对端创建测试账号 $UID1（契约无删除接口），需在对端侧清理"
+    # ---------- 9. 注销（内部接口，路径在 /internal/v1 下） ----------
+    #
+    # 这一项专门盯路径：注销挂在 /internal/v1 而不是 /v1。写错前缀时对端返回
+    # 404，而 404 与"账号不存在"同码——适配层若不区分信封，就会把"打错了"
+    # 当成"已注销"，本地清理照做、对端账号还活着。
+    r11=$(req POST "/internal/v1/apps/$APP/accounts/$UID1/close" "")
+    code11="${r11%%$'\t'*}"; body11="${r11#$'\t'}"
+    case "$code11" in
+      200)
+        case "$body11" in
+          *closed*) pass "注销成功（内部接口路径正确）" ;;
+          *) passing "注销返回 200 但未声明 closed 状态" ;;
+        esac
+        ;;
+      404) bad "注销返回 404：检查是否用了 /v1 前缀（注销在 /internal/v1 下）" ;;
+      401|403) bad "注销鉴权失败（$code11）：检查服务 token" ;;
+      *) bad "注销返回 $code11：$body11" ;;
+    esac
+
+    # 重复注销必须幂等：客户端超时重试与"本地级联失败后再点一次"都会走到这里。
+    r12=$(req POST "/internal/v1/apps/$APP/accounts/$UID1/close" "")
+    code12="${r12%%$'\t'*}"
+    case "$code12" in
+      200) pass "重复注销幂等" ;;
+      404) pass "重复注销返回 404（视为已注销，需适配层按信封区分）" ;;
+      *) bad "重复注销返回 $code12，应幂等成功" ;;
+    esac
+
+    yellow "  注意 本次检查已在对端创建测试账号 $UID1 并注销，需在对端侧清理"
   fi
 else
   skip "跳过建号/幂等/强一致读/合并/隔离/换绑检查（未加 --write，或对端不支持创建）"

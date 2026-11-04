@@ -164,7 +164,7 @@ func (s *Service) autoCreateAndBind(
 		AvatarURL: profileString(out.Profile, "avatar_url"),
 		// 幂等键固定可按 (app, identity) 推导：同一个三方身份的重复首次登录
 		// 不应产生两个账号。
-		IdempotencyKey: "first_login:" + app.AppCode + ":" + strconv.FormatInt(idn.ID, 10),
+		IdempotencyKey: firstLoginKey(app.AppCode, idn.ID, ""),
 	})
 	if err != nil {
 		if errs.CodeOf(err) == errs.CodeAccountNotSupported {
@@ -173,6 +173,41 @@ func (s *Service) autoCreateAndBind(
 				WithDetail("app_id", app.AppCode)
 		}
 		return nil, err
+	}
+
+	// Create 是幂等的：同一个 (app, identity) 会重放第一次的结果。
+	//
+	// 这带来一个注销之后才会暴露的问题——重放回来的是那个【已注销】的账号。
+	// 若不处理，用户注销后再登录会被重新绑回 closed 账号：他能拿到授权码、
+	// 看起来登录成功，但所有需要用户中心参与的操作都会被状态闸门拒绝，
+	// 而且这个状态会永远重复（幂等键不变 ⇒ 每次都拿到同一个 closed 账号）。
+	//
+	// 所以这里按状态分流：
+	//   - closed：用户主动注销过。换一个幂等键重新建号——"注销后再注册"
+	//     与"从未注册过"在产品上是同一件事，只是账号 id 不同。
+	//     幂等键里带上那个 closed 账号的 id：同一轮重试仍然幂等，
+	//     而再次注销后又会变成新键，不会无限重放同一个结果。
+	//   - frozen 等其它非 active：拒绝。冻结是管理动作，不能靠"再登录一次"
+	//     绕过——那等于给封禁留了一个自助解封入口。
+	if acc.Status != account.StatusActive {
+		if acc.Status != account.StatusClosed {
+			return nil, errs.New(errs.CodeForbidden, "该账号已被停用或注销").
+				WithDetail("account_status", string(acc.Status))
+		}
+		acc, err = s.deps.Accounts.Create(ctx, account.CreateRequest{
+			AppKey:         app.AppCode,
+			Claims:         accClaims,
+			Nickname:       profileString(out.Profile, "nickname"),
+			AvatarURL:      profileString(out.Profile, "avatar_url"),
+			IdempotencyKey: firstLoginKey(app.AppCode, idn.ID, acc.UserID),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if acc.Status != account.StatusActive {
+			return nil, errs.New(errs.CodeForbidden, "该账号已被停用或注销").
+				WithDetail("account_status", string(acc.Status))
+		}
 	}
 
 	_, alreadyExists, err := s.deps.Bindings.Activate(ctx, binding.ActivateInput{
@@ -645,4 +680,22 @@ func profileString(profile map[string]any, key string) string {
 	}
 	v, _ := profile[key].(string)
 	return v
+}
+
+// firstLoginKey 推导"首次登录建号"的幂等键。
+//
+// afterClosed 为空表示这个身份的第一次建号；非空表示上一次账号已被注销，
+// 现在为同一个身份再建一次。
+//
+// 为什么把 closed 账号 id 放进键里，而不是用时间戳/随机数：
+//   - 时间戳会让"同一次登录的两个并发请求"算出不同键，产生两个账号；
+//   - 随机数根本谈不上幂等；
+//   - 用 closed 账号 id，同一轮重试恒定（并发安全），而每次注销后
+//     这个值都会变（不会永远重放同一个死账号）。
+func firstLoginKey(appCode string, identityID int64, afterClosedUserID string) string {
+	base := "first_login:" + appCode + ":" + strconv.FormatInt(identityID, 10)
+	if afterClosedUserID == "" {
+		return base
+	}
+	return base + ":after:" + afterClosedUserID
 }

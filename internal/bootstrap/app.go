@@ -40,6 +40,7 @@ import (
 	wechatadapter "github.com/djackcurry30/social-login/internal/infrastructure/provider/adapters/wechat"
 
 	// 管理端（/admin/v1）依赖：单独成一组 import，与业务端依赖视觉分隔。
+	"github.com/djackcurry30/social-login/internal/application/accountclose"
 	"github.com/djackcurry30/social-login/internal/application/adminapp"
 	"github.com/djackcurry30/social-login/internal/application/adminaudit"
 	"github.com/djackcurry30/social-login/internal/application/adminchan"
@@ -322,6 +323,23 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Tokens:   tokenSvc,
 		Audit:    auditRepo,
 		Logger:   logger,
+	})
+
+	// 账号注销（数据合规）：关对端 → 断本地绑定 → 撤令牌 → 清凭证密文。
+	//
+	// 只在 provider 真的能关账号时才装配。装配了但 provider 不支持，
+	// 会让用户点"注销"得到一个语法上成功、语义上什么都没发生的响应——
+	// 所以服务内部也会二次检查（account.AccountCloser 类型断言）。
+	accountCloseSvc := accountclose.New(accountclose.Deps{
+		Tenant:     tenantSvc,
+		Accounts:   accounts,
+		Bindings:   bindingRepo,
+		Identities: identityRepo,
+		Sessions:   sessionRepo,
+		Revocation: revocationStore,
+		Claims:     claimRepo,
+		Audit:      auditRepo,
+		Logger:     logger,
 	})
 
 	// 平台服务端通知（Apple 解约 / 支付宝异步通知）。
@@ -612,6 +630,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Bindings:     bindingSvc,
 		Notify:       notifySvc,
 		Merge:        mergeSvc,
+		AccountClose: accountCloseSvc,
 		Signer:       signer,
 		SecretHasher: appSecretHasher,
 		Issuer:       cfg.Server.Issuer,

@@ -112,8 +112,16 @@
 | POST | `/v1/apps/{app_key}/accounts` | 200/201 账号 | 404/405/501（无码）不提供该能力；409 `ACCOUNT.CLAIM_TAKEN` |
 | POST | `/v1/apps/{app_key}/accounts/merge` | 200 合并结果 | 404 任一端不存在；409 `ACCOUNT.MERGE_REJECTED` |
 | PUT | `/v1/apps/{app_key}/accounts/{user_id}/claims/{claim_type}` | 200 账号 | 404 账号不存在；409 `ACCOUNT.CLAIM_TAKEN` |
+| POST | `/internal/v1/apps/{app_key}/accounts/{user_id}/close` | 200 `{"user_id","status":"closed"}` | 404 + `ACCOUNT.NOT_FOUND` 账号不存在；**已 closed 重复调用必须仍 200** |
 
 写操作（Create / Merge）**必须**带 `Idempotency-Key` 请求头。
+
+**注销在 `/internal/v1` 下，不在 `/v1` 下**（它是内部接口，网关上只对内开放）。
+这一条要单独强调，因为写错前缀的表现极具迷惑性：对端返回 404，而 404 与
+"账号不存在"同码。本服务的适配层只把**带 `ACCOUNT.NOT_FOUND` 信封**的 404
+当作"已注销"；没有信封的裸 404 一律报"对端未提供注销接口"。
+（真实踩过：错用 `/v1` 时本地数据清空了、对端账号仍是 active、接口返回 200。
+详见 implementation-status §34.4。）
 
 **`/internal/v1/apps` 是服务间接口**：它不在应用前缀下（它本身就是"声明一个应用
 存在"），由本服务的注册同步任务调用（建应用时立即一次 + 每 5 分钟全量重放）。

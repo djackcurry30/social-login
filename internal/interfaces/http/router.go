@@ -177,6 +177,8 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		userGroup.GET("/userinfo", h.UserInfo)
 		userGroup.GET("/bindings", h.ListBindings)
 		userGroup.DELETE("/bind/:identity_id", h.Unbind)
+		// 注销账号。放在用户端点组：主体是用户本人，凭据是他的 access_token。
+		userGroup.POST("/account/close", h.CloseAccount)
 	}
 
 	// 统一 404 / 405 响应，避免 gin 默认的纯文本 "404 page not found"

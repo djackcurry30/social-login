@@ -46,6 +46,11 @@
 //	     → 409 + ACCOUNT.CLAIM_TAKEN 新值被别的账号占用
 //	     → 409 + ACCOUNT.CONFLICT 并发换绑，后到者失败（可重试）
 //
+//	POST {base}/internal/v1/apps/{app_key}/accounts/{user_id}/close
+//	     → 200 {"user_id","status":"closed"}
+//	     → 404 + ACCOUNT.NOT_FOUND  账号本就不存在（视为已注销）
+//	     ⚠️ 幂等：已 closed 的账号重复调用必须仍返回 200。
+//
 // 统一错误信封 {"code","message","retryable"}：
 // 适配层【优先按 code 翻译，状态码只作兜底】。原先只看状态码时，Create 上
 // 任何 409 都被译成"凭证已被占用"——一旦对端用 409 表达别的冲突（幂等处理中），
@@ -67,6 +72,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -85,6 +91,12 @@ const (
 	// pathPrefix 是租户前缀。用 /v1 而不是无版本路径：契约会演进，
 	// 没有版本号的那一天只能靠"双方同时上线"来改行为。
 	pathPrefix = "/v1/apps/"
+	// pathPrefixInternal 是内部接口（应用注册、账号注销）的前缀。
+	//
+	// 分两段不是洁癖：内部接口在部署上只对网关开放、对外不可见，
+	// 把它们和业务契约放在同一前缀下，网关就得按路径正则挑出要拦的那几条，
+	// 而路径正则一旦漏一条，内部接口就露在网上。
+	pathPrefixInternal = "/internal/v1/apps/"
 )
 
 // 对端错误码。语义见文件头的映射表与 docs/user-center-mvp-design.md §2.5。
@@ -182,6 +194,15 @@ func NewHTTPProvider(cfg HTTPConfig) (*HTTPProvider, error) {
 // accountsPath 拼出某应用下的账号集合地址。
 func (p *HTTPProvider) accountsPath(appKey string) string {
 	return p.baseURL + pathPrefix + url.PathEscape(appKey) + "/accounts"
+}
+
+// internalAccountsPath 是"内部接口"的账号路径。
+//
+// 与 accountsPath 分开而不是加参数：两者属于不同的契约分区（内部 vs 对外），
+// 混在一个函数里，调用方很容易顺手传错——而传错的代价是 404，
+// 又恰好与"不存在"同码（见 Close 的判定）。
+func (p *HTTPProvider) internalAccountsPath(appKey string) string {
+	return p.baseURL + pathPrefixInternal + url.PathEscape(appKey) + "/accounts"
 }
 
 // Get 按 user_id 查询账号。
@@ -347,6 +368,49 @@ func (p *HTTPProvider) ReplaceClaim(ctx context.Context, req domainaccount.Repla
 		return decodeAccount(resp.Raw, "ReplaceClaim")
 	}
 	return nil, p.classify("ReplaceClaim", resp)
+}
+
+// Close 注销账号（把状态置为 closed）。
+//
+// ⚠️ 路径在 /internal/v1 下，不是 /v1：注销是"内部接口"（对端只在网关上
+// 开放给本服务），而按 id 查、建号、换绑是对外契约。这两组混用会得到
+// 一个 404，而 404 恰好与"账号本来就不存在"同码——见下面的判定。
+func (p *HTTPProvider) Close(ctx context.Context, appKey, userID string) error {
+	if err := requireAppKey(appKey, "Close"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(userID) == "" {
+		return errs.New(errs.CodeInvalidRequest, "注销缺少 user_id")
+	}
+
+	resp, err := p.call(ctx, http.MethodPost,
+		p.internalAccountsPath(appKey)+"/"+url.PathEscape(userID)+"/close", nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+
+	err = p.classify("Close", resp)
+	if !errors.Is(err, domainaccount.ErrNotFound) {
+		return err
+	}
+
+	// 只有【带信封的 ACCOUNT.NOT_FOUND】才算"账号本就不存在"。
+	//
+	// 裸 404 绝不能当成功。它可能来自：路径写错、base_url 少了前缀、
+	// 网关没转发、对端版本落后没有这个接口。把这些都当成"已注销"的后果
+	// 是——本地数据清干净了、对端账号还活着，接口返回 200，用户以为自己
+	// 注销了。这类"静默成功"比直接报错危险得多，因为它不会有人来查。
+	//
+	// （这不是假设：首版把路径写成 /v1/... 时，实测就是这个表现——对端
+	// 404、本地清理照做、响应 200，而 accounts.status 仍是 active。）
+	if ue := parseErrorEnvelope(resp.Raw); ue == nil || ue.Code != CodeUpstreamNotFound {
+		return p.fail("Close", resp, errs.CodeAccountUnavailable,
+			"用户中心未提供注销接口（检查 base_url 与契约版本）", false, nil)
+	}
+	return nil
 }
 
 // --- 内部 ---

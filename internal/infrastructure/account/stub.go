@@ -61,6 +61,7 @@ func NewStubProvider() *StubProvider {
 var (
 	_ domainaccount.Provider      = (*StubProvider)(nil)
 	_ domainaccount.ClaimReplacer = (*StubProvider)(nil)
+	_ domainaccount.AccountCloser = (*StubProvider)(nil)
 )
 
 // space 返回某应用的空间，不存在时创建。调用方必须持锁。
@@ -292,8 +293,43 @@ func (s *StubProvider) ReplaceClaim(_ context.Context, req domainaccount.Replace
 	return cloneAccount(acc), nil
 }
 
-// SetClaims 直接设置某账号的已验证凭证，供测试构造"用户中心里已有该手机号"的场景。
+// Close 注销账号：状态置为 closed 并释放凭证占用。
 //
+// 与真实用户中心保持同一语义（claims.go 的 CloseAccount）：账号行保留
+// （status=closed），凭证被撤销。不删行是刻意的——"这个 user_id 曾经存在过"
+// 是审计与排障需要的事实，而"它现在不能登录"由状态表达。
+func (s *StubProvider) Close(_ context.Context, appKey, userID string) error {
+	if appKey == "" {
+		return errs.New(errs.CodeInternal, "Close 缺少 app_key")
+	}
+	if userID == "" {
+		return errs.New(errs.CodeInvalidRequest, "注销缺少 user_id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sp, ok := s.apps[appKey]
+	if !ok {
+		// 对端不存在＝目标状态已达成，按幂等成功处理（与 HTTP 实现一致）。
+		return nil
+	}
+	acc, ok := sp.byID[userID]
+	if !ok {
+		return nil
+	}
+	if acc.Status == domainaccount.StatusClosed {
+		return nil
+	}
+	for _, c := range acc.Claims {
+		if c.Value != "" {
+			delete(sp.byClaim, claimKey(c.Type, c.Value))
+		}
+	}
+	acc.Claims = nil
+	acc.Status = domainaccount.StatusClosed
+	return nil
+}
+
+// SetClaims 直接设置某账号的已验证凭证，供测试构造"用户中心里已有该手机号"的场景。//
 // 会清掉该账号原有的反向索引：否则测试里改完凭证后，按旧号码仍能反查到它，
 // 而真实用户中心不会这样。
 func (s *StubProvider) SetClaims(appKey, userID string, claims []domainaccount.Claim) error {

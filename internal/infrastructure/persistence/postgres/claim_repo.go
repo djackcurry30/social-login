@@ -196,6 +196,31 @@ func (r *ClaimRepository) Revoke(ctx context.Context, appID, identityID int64, c
 	return nil
 }
 
+// PurgeByIdentities 物理删除若干身份下的全部凭证（账号注销专用）。
+//
+// 用单条 DELETE ... IN (...) 而不是逐条删：注销是"要么这些都没了、
+// 要么都还在"的语义，逐条删会让中途失败留下"删了一半 PII"的状态，
+// 而那种状态既不能重试判定（不知道删到哪）也很难解释给用户。
+//
+// 空 id 列表直接返回 0：GORM 会把 "IN ()" 拼成非法 SQL，而"没有身份"
+// 在注销流程里是合法情况（账号只存在于用户中心、本地从未绑定过）。
+func (r *ClaimRepository) PurgeByIdentities(ctx context.Context, appID int64, identityIDs []int64) (int64, error) {
+	if appID <= 0 {
+		return 0, errs.New(errs.CodeInternal, "凭证清理缺少 app_id（会跨应用删除）")
+	}
+	if len(identityIDs) == 0 {
+		return 0, nil
+	}
+	ctx = appctx.WithAppScope(ctx, appID)
+	res := r.db.WithContext(ctx).
+		Where("app_id = ? AND identity_id IN ?", appID, identityIDs).
+		Delete(&claimModel{})
+	if res.Error != nil {
+		return 0, errs.Wrap(errs.CodeInternal, "清理身份凭证失败", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 func claimToDomain(m *claimModel) *identity.Claim {
 	return &identity.Claim{
 		ID:          m.ID,
