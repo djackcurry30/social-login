@@ -135,7 +135,11 @@ func IsPermanent(err error) bool {
 
 // Filter 是管理端查询条件。零值字段表示不过滤。
 type Filter struct {
-	AppID    int64
+	AppID int64
+	// AppIDs 是调用者可见的应用集合（受限管理员的应用范围）。
+	//
+	// nil 表示不受限；非 nil 且为空表示"一个都不许看"（不是"不过滤"）。
+	AppIDs   []int64
 	Status   Status
 	Type     string
 	From     *time.Time

@@ -16,6 +16,9 @@ type MergeInput struct {
 	TargetPublicID string
 	SourcePublicID string
 	Reason         string
+	// Audit 为 nil 表示不写审计；生产路径由 service 构造。
+	// 重放（已合并）不写审计：本次没有改变任何数据。
+	Audit *AuditInput
 }
 
 // MergeResult 是合并结果。
@@ -200,6 +203,26 @@ func (s *Store) MergeAccounts(ctx context.Context, in MergeInput) (*MergeResult,
 			TargetPublicID: target.publicID,
 			SourcePublicID: source.publicID,
 			Discarded:      discarded,
+		}
+
+		// ⑧ 审计。source 与 target 都记：只记 target 会丢掉
+		//    "哪个账号被并走了"——而这正是客服最常被问到的问题。
+		if in.Audit != nil {
+			a := *in.Audit
+			a.AccountID = target.id
+			a.UserID = target.publicID
+			if a.Detail == nil {
+				a.Detail = map[string]any{}
+			}
+			a.Detail["source_user_id"] = source.publicID
+			a.Detail["source_account_id"] = source.id
+			a.Detail["discarded_claims"] = len(discarded)
+			if in.Reason != "" {
+				a.Detail["reason"] = in.Reason
+			}
+			if err := insertAudit(ctx, tx, &a); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

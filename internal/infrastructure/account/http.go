@@ -446,6 +446,10 @@ func (p *HTTPProvider) call(ctx context.Context, method, fullURL string, body an
 		return nil, errs.Wrap(errs.CodeInternal, "构造用户中心请求失败", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	// 声明调用方身份，供用户中心的审计记录 actor。
+	// 和 trace_id 分工：trace_id 说"这次调用串到哪"，actor 说"记在谁头上"。
+	// 用户中心读不到我们的服务名（token 是共用的一把），只能靠这个头。
+	req.Header.Set("X-Actor", "social-login")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

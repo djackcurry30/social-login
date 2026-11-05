@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 	"github.com/djackcurry30/social-login/internal/pkg/tracing"
 	"github.com/djackcurry30/social-login/internal/usercenter/domain"
 	"github.com/djackcurry30/social-login/internal/usercenter/observe"
@@ -19,6 +20,13 @@ const (
 	ctxKeyApp       = "uc.app"
 	ctxKeyRequestID = "uc.request_id"
 )
+
+// actorHeader 声明"这次调用以谁的身份发起"。
+//
+// 可选头：不传时审计里的 actor 记为 "service"。为什么让调用方声明而不是
+// 本服务推断：token 是共用的一把，本服务无法从它区分"用户在登录"与
+// "运维在后台强制注销"，而这两件事在审计里必须能分开看。
+const actorHeader = "X-Actor"
 
 // requestID 为每个请求分配标识，并回写响应头。
 //
@@ -46,6 +54,16 @@ func requestID() gin.HandlerFunc {
 		}
 		c.Set(ctxKeyRequestID, id)
 		c.Header(requestIDHeader, id)
+
+		// 把审计与遥测需要的元信息放进 context：应用层写审计时不依赖 gin
+		// （service 包不认识 HTTP，这是分层的意义）。
+		ctx := reqmeta.With(c.Request.Context(), reqmeta.Meta{
+			TraceID:   id,
+			ClientIP:  clientIP(c),
+			UserAgent: c.Request.UserAgent(),
+			Actor:     trimParam(c.GetHeader(actorHeader)),
+		})
+		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	}
 }
@@ -171,4 +189,15 @@ func maxBody(limit int64) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// clientIP 取调用方 IP。
+//
+// gin 的 ClientIP() 会读 X-Forwarded-For，而默认信任所有代理——这意味着
+// 请求头里随便写一个 IP 就会被采信。本服务的审计把 client_ip 当作"谁在
+// 什么位置发起的调用"的证据之一，因此部署时必须把可信代理收窄
+// （engine.SetTrustedProxies），否则这一列可以被人随意伪造。
+// 这一点写在 docs/user-center-mvp-design.md §8，不在代码里硬编码网关地址。
+func clientIP(c *gin.Context) string {
+	return c.ClientIP()
 }

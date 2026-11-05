@@ -84,7 +84,13 @@ type Repository interface {
 
 // AdminFilter 是管理端 C 组的绑定查询条件（与关系）。
 type AdminFilter struct {
-	AppID          int64
+	AppID int64
+	// AppIDs 是调用者可见的应用集合（受限管理员的应用范围）。
+	//
+	// nil 表示不受限；非 nil 时【即使为空】也必须当成"一个都不许看"——
+	// 空切片退化成不过滤，正是应用范围隔离最容易被写错的地方。
+	// 与 AppID 同时存在时以 AppID 为准（它一定在范围内，由中间件保证）。
+	AppIDs         []int64
 	ExternalUserID string
 	// Status 为空表示不过滤——管理端要能看到 unbound 的历史。
 	Status     string

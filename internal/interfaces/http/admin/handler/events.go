@@ -42,6 +42,7 @@ func (h *EventsHandler) List(c *gin.Context) {
 
 	out, err := h.svc.List(c.Request.Context(), adminevent.ListInput{
 		AppID:    appID,
+		AppIDs:   scopeAppIDs(c),
 		Status:   c.Query("status"),
 		Type:     c.Query("event_type"),
 		From:     c.Query("from"),

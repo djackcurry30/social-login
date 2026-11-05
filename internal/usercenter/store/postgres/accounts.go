@@ -39,6 +39,9 @@ type CreateInput struct {
 	Nickname    string
 	AvatarURL   string
 	Claims      []ClaimInput
+	// Audit 为 nil 表示不写审计（仅出现在单测与命令行工具里）。
+	// 生产路径上由 service 构造：账号数据是合规对象，改动必须留痕。
+	Audit *AuditInput
 }
 
 // CreateResult 是建号结果。
@@ -143,6 +146,17 @@ func (s *Store) CreateAccount(ctx context.Context, in CreateInput) (*CreateResul
 			 WHERE app_id = $2 AND scope = 'create_account' AND key = $3`,
 			string(snapshot), in.AppID, in.IdemKey); err != nil {
 			return translateDBError("update_idempotency", err)
+		}
+
+		// ⑤ 审计。放在同一事务的最后一步：前面任何一步失败都不会留下
+		//    "建号成功但审计说没建"的错位记录。
+		if in.Audit != nil {
+			audit := *in.Audit
+			audit.AccountID = accountID
+			audit.UserID = in.PublicID
+			if err := insertAudit(ctx, tx, &audit); err != nil {
+				return err
+			}
 		}
 
 		out = &CreateResult{

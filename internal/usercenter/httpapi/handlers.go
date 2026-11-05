@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -220,4 +221,38 @@ func (h *handler) closeAccount(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user_id": userID, "status": string(domain.StatusClosed)})
+}
+
+// listAudit 处理 GET /internal/v1/apps/{app_key}/audit。
+//
+// 只读、只在 /internal 下：审计里含"某账号在什么时候被关掉/被合并"，
+// 属于合规与客服数据，不该出现在业务方可见的接口面里。
+//
+// 用游标（before_id）而不是 offset：审计表随时间线性增长，offset 翻页
+// 在几百万行后会退化成全表扫描，而这个接口正是出事时最需要能快速翻的。
+func (h *handler) listAudit(c *gin.Context) {
+	app, ok := appFromContext(c)
+	if !ok {
+		fail(c, h.log, domain.New(domain.CodeInternal, "应用上下文缺失"))
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	beforeID, _ := strconv.ParseInt(c.Query("before_id"), 10, 64)
+
+	items, err := h.store.ListAudit(c.Request.Context(), postgres.AuditFilter{
+		AppID:    app.ID,
+		UserID:   trimParam(c.Query("user_id")),
+		Action:   trimParam(c.Query("action")),
+		BeforeID: beforeID,
+		Limit:    limit,
+	})
+	if err != nil {
+		fail(c, h.log, err)
+		return
+	}
+	next := int64(0)
+	if len(items) > 0 {
+		next = items[len(items)-1].ID
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "next_before_id": next})
 }

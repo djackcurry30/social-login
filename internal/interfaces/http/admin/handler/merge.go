@@ -40,6 +40,7 @@ func (h *MergeHandler) List(c *gin.Context) {
 	appID, _ := strconv.ParseInt(c.Query("app_id"), 10, 64)
 	out, err := h.svc.List(c.Request.Context(), adminmerge.ListInput{
 		AppID:    appID,
+		AppIDs:   scopeAppIDs(c),
 		Status:   c.Query("status"),
 		UserID:   c.Query("user_id"),
 		From:     c.Query("from"),

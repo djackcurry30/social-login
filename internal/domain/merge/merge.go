@@ -102,7 +102,10 @@ type Store interface {
 
 // Filter 是管理端查询条件。
 type Filter struct {
-	AppID  int64
+	AppID int64
+	// AppIDs 是调用者可见的应用集合（受限管理员的应用范围）。
+	// nil 表示不受限；非 nil 且为空表示"一个都不许看"。
+	AppIDs []int64
 	Status string
 	// UserID 命中 target 或 source 任一侧。
 	UserID   string

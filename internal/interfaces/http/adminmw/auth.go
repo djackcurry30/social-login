@@ -113,6 +113,12 @@ func (a *Authenticator) Authenticate() gin.HandlerFunc {
 	}
 }
 
+// 上下文键：当前请求的管理员应用范围。
+const (
+	CtxKeyScopeAppIDs     = "adminmw.scope_app_ids"
+	CtxKeyScopeRestricted = "adminmw.scope_restricted"
+)
+
 // scopeExemptRoutes 是"受限管理员在没有应用上下文时也允许访问"的路由白名单。
 //
 // 键是 "方法 路由模板"。只放三件事：
@@ -167,6 +173,10 @@ func Require(perm string) gin.HandlerFunc {
 		}
 
 		ids, restricted := principal.User.ScopeFor(perm)
+		// 范围始终放进上下文：即使本次请求显式带了 app_id（走下面的分支），
+		// handler 在列表接口里仍需要知道"这个人的全部范围是什么"。
+		c.Set(CtxKeyScopeAppIDs, ids)
+		c.Set(CtxKeyScopeRestricted, restricted)
 		if !restricted {
 			c.Next()
 			return
@@ -200,6 +210,22 @@ func Require(perm string) gin.HandlerFunc {
 			WithDetail("scope", "app").
 			WithDetail("allowed_app_ids", ids))
 	}
+}
+
+// ScopeAppIDs 返回当前管理员的应用范围，供列表接口下推到查询条件。
+//
+// 返回 (nil, false) 表示不受限；返回 (ids, true) 时即使 ids 为空，
+// 调用方也必须按"一个都不许看"处理——空切片退化成不过滤是这类隔离
+// 最典型的事故形态。
+func ScopeAppIDs(c *gin.Context) ([]int64, bool) {
+	v, ok := c.Get(CtxKeyScopeAppIDs)
+	if !ok {
+		return nil, false
+	}
+	ids, _ := v.([]int64)
+	restricted, _ := c.Get(CtxKeyScopeRestricted)
+	r, _ := restricted.(bool)
+	return ids, r
 }
 
 // appInScope 判断 appID 字符串是否在允许列表里。

@@ -101,6 +101,12 @@ type DatabaseConfig struct {
 	// 一条因为锁等待卡住的 SQL 会拖到调用方超时，而"我们还在算"这件事
 	// 对方看不到；有上限则双方都能在日志里看到同一时刻的失败。
 	StatementTimeout time.Duration `mapstructure:"statement_timeout"`
+	// SlowQueryThreshold 是慢查询日志阈值（只记录，不中断）。
+	//
+	// 与 statement_timeout 配合使用：阈值应明显小于上限（默认 200ms vs 3s），
+	// 这样"快要超时的语句"会先出现在日志里，而不是等它被杀掉才发现。
+	// 设为 0 关闭。⚠️ 日志里只有 SQL 模板与参数个数，没有参数值。
+	SlowQueryThreshold time.Duration `mapstructure:"slow_query_threshold"`
 }
 
 // SecurityConfig 是密钥与鉴权配置。
@@ -186,6 +192,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log.format", "json")
 
 	v.SetDefault("migrate.enabled", false)
+	// 200ms：本服务所有线上语句都是索引命中 + 单行写入，正常在 5ms 以内；
+	// 200ms 已经意味着"锁等待或索引失效"，值得记一条。
+	v.SetDefault("database.slow_query_threshold", 200*time.Millisecond)
 
 	// 追踪默认关闭；开启时按 10% 采样（与登录中心同一策略，
 	// 否则会出现"上游记了、下游没记"的半截链路）。

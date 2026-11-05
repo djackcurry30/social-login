@@ -97,9 +97,7 @@ func (r *MergeRepository) List(ctx context.Context, f merge.Filter) ([]*merge.Op
 	ctx = appctx.WithCrossAppScope(ctx)
 
 	apply := func(q *gorm.DB) *gorm.DB {
-		if f.AppID > 0 {
-			q = q.Where("app_id = ?", f.AppID)
-		}
+		q = applyAppScope(q, f.AppID, f.AppIDs, "app_id")
 		if f.Status != "" {
 			q = q.Where("status = ?", f.Status)
 		}

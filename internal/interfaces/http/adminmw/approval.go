@@ -23,7 +23,9 @@ const HeaderApprovalID = "X-Approval-Id"
 // 定义在中间件包而不是 application 层：中间件不该依赖用例层的具体类型，
 // 而 application 层实现这个接口不需要 import 本包（Go 的隐式接口）。
 type ApprovalConsumer interface {
-	Consume(ctx context.Context, id int64, action string, appID *int64) error
+	// actorID 是"用掉这张单的人"：审批单要能回答"谁批的、谁执行的"。
+	// 两者必须都能查——只有批准人而不知道谁执行，出事后无法定责。
+	Consume(ctx context.Context, id int64, action string, appID *int64, actorID int64) error
 }
 
 // RequireApproval 要求请求携带一张已批准、未使用、动作与目标匹配的审批单。
@@ -65,7 +67,11 @@ func RequireApproval(consumer ApprovalConsumer, action string) gin.HandlerFunc {
 			appID = &n
 		}
 
-		if err := consumer.Consume(c.Request.Context(), id, action, appID); err != nil {
+		actorID := int64(0)
+		if p := Principal(c); p != nil && p.User != nil {
+			actorID = p.User.ID
+		}
+		if err := consumer.Consume(c.Request.Context(), id, action, appID, actorID); err != nil {
 			httputil.Fail(c, nil, err)
 			return
 		}

@@ -25,7 +25,7 @@ import (
 //	如果这里加了 FOR UPDATE，后到者会等第一个提交、然后看到【新】凭证并把
 //	它撤销，最后两个请求都返回 200（last-write-wins）。用户看到"换成了 A"，
 //	实际生效的是 B——这种静默覆盖比报错危险得多。
-func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, in ClaimInput) error {
+func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, in ClaimInput, audit *AuditInput) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		// ① 定位账号。已关闭的账号不允许换绑：它的凭证应当已经全部撤销，
 		//    再插一条会让"已注销"的账号重新出现在 by-claim 的结果里。
@@ -109,6 +109,28 @@ func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, 
 			}
 			return translateDBError("replace_insert", err)
 		}
+
+		// 审计动作由这里判定：只有 store 知道这次是首次绑定还是换绑。
+		// 写成同一个动作（claim.replaced）会让"用户第一次绑手机号"看起来像
+		// 换过一次号，客服据此回答"你换过号码"就是错的。
+		if audit != nil {
+			a := *audit
+			if hasOld {
+				a.Action = AuditClaimReplaced
+			} else {
+				a.Action = AuditClaimBound
+			}
+			a.AccountID = accountID
+			a.UserID = publicID
+			if a.Detail == nil {
+				a.Detail = map[string]any{}
+			}
+			a.Detail["claim_type"] = in.Type
+			a.Detail["source"] = in.Source
+			if err := insertAudit(ctx, tx, &a); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -121,7 +143,7 @@ func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, 
 //
 // 幂等：已关闭账号再次注销返回 nil，不报错。注销是用户可能重复点击的操作，
 // 第二次报"账号不存在"会让前端弹出莫名其妙的错误。
-func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string) error {
+func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string, audit *AuditInput) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		var accountID int64
 		var status string
@@ -140,7 +162,8 @@ func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string) 
 
 		// 先撤销凭证再关账号：反过来的话，若撤销失败，账号已是 closed 而凭证
 		// 仍然活跃，by-claim 会查到一个"已注销但还绑着手机号"的账号。
-		if _, err := revokeRemaining(ctx, tx, appID, accountID, "closed"); err != nil {
+		revoked, err := revokeRemaining(ctx, tx, appID, accountID, "closed")
+		if err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -148,6 +171,20 @@ func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string) 
 			 WHERE app_id = $1 AND id = $2 AND status <> 'closed'`,
 			appID, accountID); err != nil {
 			return translateDBError("close_account", err)
+		}
+
+		// 审计：记账撤销了几条凭证。合规问"注销后还剩什么"时，这是唯一依据。
+		if audit != nil {
+			a := *audit
+			a.AccountID = accountID
+			a.UserID = publicID
+			if a.Detail == nil {
+				a.Detail = map[string]any{}
+			}
+			a.Detail["claims_revoked"] = len(revoked)
+			if err := insertAudit(ctx, tx, &a); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

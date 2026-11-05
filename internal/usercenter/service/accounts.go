@@ -59,6 +59,10 @@ func (s *Service) Create(ctx context.Context, app domain.App, req CreateRequest)
 		Nickname:    req.Nickname,
 		AvatarURL:   req.AvatarURL,
 		Claims:      inputs,
+		// 账号创建是数据主体生命周期上的第一个事件，必须留痕。
+		Audit: s.auditFor(ctx, app, postgres.AuditAccountCreated, "", map[string]any{
+			"claim_types": claimTypesOf(normalized),
+		}),
 	})
 	if err != nil {
 		if e, ok := domain.As(err); ok && e.Code == domain.CodeClaimTaken {
@@ -170,6 +174,9 @@ func (s *Service) Merge(ctx context.Context, app domain.App, req MergeRequest) (
 		TargetPublicID: req.TargetUserID,
 		SourcePublicID: req.SourceUserID,
 		Reason:         req.Reason,
+		Audit: s.auditFor(ctx, app, postgres.AuditAccountMerged, req.TargetUserID, map[string]any{
+			"trigger": "merge",
+		}),
 	})
 	if err != nil {
 		if e, ok := domain.As(err); ok && e.Code == domain.CodeMergeRejected {
@@ -221,7 +228,10 @@ func (s *Service) ReplaceClaim(ctx context.Context, app domain.App, userID, clai
 		return nil, err
 	}
 
-	if err := s.store.ReplaceClaim(ctx, app.ID, userID, inputs[0]); err != nil {
+	// 动作名（绑定 / 换绑）由 store 判定：只有它知道这次是首次绑定还是覆盖。
+	// 这里只给触发者与元信息。
+	audit := s.auditFor(ctx, app, postgres.AuditClaimBound, userID, map[string]any{})
+	if err := s.store.ReplaceClaim(ctx, app.ID, userID, inputs[0], audit); err != nil {
 		if e, ok := domain.As(err); ok &&
 			(e.Code == domain.CodeClaimTaken || e.Code == domain.CodeConflict) {
 			s.m.RecordConflict(app.Key, "replace")
@@ -241,7 +251,8 @@ func (s *Service) Close(ctx context.Context, app domain.App, userID string) erro
 	if strings.TrimSpace(userID) == "" {
 		return domain.New(domain.CodeInvalid, "缺少 user_id")
 	}
-	if err := s.store.CloseAccount(ctx, app.ID, userID); err != nil {
+	audit := s.auditFor(ctx, app, postgres.AuditAccountClosed, userID, nil)
+	if err := s.store.CloseAccount(ctx, app.ID, userID, audit); err != nil {
 		return err
 	}
 	s.m.RecordClosed(app.Key)

@@ -65,13 +65,14 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 
 	store, err := postgres.Open(ctx, postgres.Config{
-		DSN:              cfg.Database.DSN,
-		MaxConns:         cfg.Database.MaxConns,
-		MinConns:         cfg.Database.MinConns,
-		MaxConnLifetime:  cfg.Database.MaxConnLifetime,
-		MaxConnIdleTime:  cfg.Database.MaxConnIdleTime,
-		ConnectTimeout:   cfg.Database.ConnectTimeout,
-		StatementTimeout: cfg.Database.StatementTimeout,
+		DSN:                cfg.Database.DSN,
+		MaxConns:           cfg.Database.MaxConns,
+		MinConns:           cfg.Database.MinConns,
+		MaxConnLifetime:    cfg.Database.MaxConnLifetime,
+		MaxConnIdleTime:    cfg.Database.MaxConnIdleTime,
+		ConnectTimeout:     cfg.Database.ConnectTimeout,
+		StatementTimeout:   cfg.Database.StatementTimeout,
+		SlowQueryThreshold: cfg.Database.SlowQueryThreshold,
 	}, log)
 	if err != nil {
 		return nil, err

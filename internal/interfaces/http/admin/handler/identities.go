@@ -41,6 +41,7 @@ func (h *IdentitiesHandler) ListIdentities(c *gin.Context) {
 	appID, _ := strconv.ParseInt(c.Query("app_id"), 10, 64)
 	out, err := h.svc.ListIdentities(c.Request.Context(), adminidentity.IdentityListInput{
 		AppID:          appID,
+		AppIDs:         scopeAppIDs(c),
 		Platform:       c.Query("platform"),
 		OpenID:         c.Query("open_id"),
 		IdentityKey:    c.Query("identity_key"),
@@ -79,6 +80,7 @@ func (h *IdentitiesHandler) ListBindings(c *gin.Context) {
 	identityID, _ := strconv.ParseInt(c.Query("identity_id"), 10, 64)
 	out, err := h.svc.ListBindings(c.Request.Context(), adminidentity.BindingListInput{
 		AppID:          appID,
+		AppIDs:         scopeAppIDs(c),
 		ExternalUserID: c.Query("external_user_id"),
 		Status:         c.Query("status"),
 		IdentityID:     identityID,

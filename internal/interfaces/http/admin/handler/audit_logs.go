@@ -48,6 +48,7 @@ func (h *AuditLogsHandler) List(c *gin.Context) {
 	appID, _ := strconv.ParseInt(c.Query("app_id"), 10, 64)
 	out, err := h.svc.List(c.Request.Context(), adminaudit.ListInput{
 		AppID:          appID,
+		AppIDs:         scopeAppIDs(c),
 		Action:         c.Query("action"),
 		Result:         c.Query("result"),
 		ExternalUserID: c.Query("external_user_id"),

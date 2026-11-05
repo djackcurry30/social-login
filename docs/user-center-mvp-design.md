@@ -551,13 +551,20 @@ social-login 在调用前就归一化并只传归一化后的值，UC 不再做�
    4 个 HTTP provider 用例全过（可把测试里的假对端地址换成真实地址跑一遍）
 3. 并发用例：10 并发同 key Create → 1 个账号；A→B 与 B→A 并发合并 → 无死锁、1 成功
 
-### P0.5 · 可运维（上线前必须有）
+### P0.5 · 可运维（上线前必须有）— 已全部交付
 
 - 建应用后同步注册 UC + 每 5 分钟对账（§2.6）；存量应用的补注册脚本
 - 停用应用的拒绝逻辑（`APP.DISABLED`）
 - 注销（`close`）：置 closed + 撤销全部凭证 + 事件占位
-- 审计日志（谁在什么时候对哪个账号做了什么）
-- 慢查询与连接池配置
+- **审计日志**（2026-11-05）：迁移 `00002_account_audit_logs`，
+  `account.created` / `claim.bound` / `claim.replaced` / `account.merged` /
+  `account.closed` 五类动作**与业务同事务写入**；detail 不含凭证明文；
+  `actor` 取调用方声明的 `X-Actor`，真实的人通过 `trace_id` 与 social-login
+  的审计关联。只读查询 `GET /internal/v1/apps/{app_key}/audit`（游标翻页）。
+- **慢查询**（2026-11-05）：pgx `QueryTracer` 挂在连接上，阈值
+  `database.slow_query_threshold`（默认 200ms，只记录不中断）；
+  日志只有 SQL 模板与**参数个数**，不记参数值；与 `statement_timeout` 的分工
+  是"先看见"与"最终杀掉"。连接池参数见 `configs/usercenter.yaml`。
 
 ### P1 · 补齐契约语义
 

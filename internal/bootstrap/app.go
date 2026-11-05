@@ -627,6 +627,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	approvalRepo := postgres.NewAdminApprovalRepository(db)
 	approvalSvc := adminapproval.New(adminapproval.Deps{
 		Store: approvalRepo,
+		// 审批的生命周期写进 admin_audit_logs：审计查询页要能看到
+		// "谁申请、谁批准、谁执行"，只写普通日志等于查不到。
+		Audit: adminAuditRepo,
 		Log:   logger,
 	})
 

@@ -40,6 +40,12 @@ type Config struct {
 	MaxConnIdleTime  time.Duration
 	ConnectTimeout   time.Duration
 	StatementTimeout time.Duration
+	// SlowQueryThreshold 是慢查询阈值，0 表示不记录。
+	//
+	// 与 StatementTimeout 是两个东西：后者会【杀掉】慢查询，前者只记录。
+	// 只配前者会让慢查询一直占着连接；只配后者会让日志里看不到"到底哪条
+	// 语句超时了"（服务端已经取消，客户端只拿到一句 timeout）。
+	SlowQueryThreshold time.Duration
 }
 
 // Store 是 PostgreSQL 存储。
@@ -78,6 +84,10 @@ func Open(ctx context.Context, cfg Config, log *zap.Logger) (*Store, error) {
 	}
 	// 让 pg_stat_activity 里能一眼看出是哪个服务连上来的。
 	poolCfg.ConnConfig.RuntimeParams["application_name"] = "user-center"
+	// 慢查询追踪挂在连接上，因此对所有语句生效（含仓储层未手工埋点的新 SQL）。
+	if cfg.SlowQueryThreshold > 0 && log != nil {
+		poolCfg.ConnConfig.Tracer = &slowTracer{log: log, threshold: cfg.SlowQueryThreshold}
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {

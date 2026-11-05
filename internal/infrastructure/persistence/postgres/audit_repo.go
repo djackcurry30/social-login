@@ -49,9 +49,7 @@ var _ audit.Query = (*AuditRepository)(nil)
 // 单独成函数是为了让 List 与 Stream 共用同一套条件——导出与页面筛选
 // 若走两份过滤逻辑，迟早会出现"页面上看到 3 条，导出的 CSV 里有 5 条"。
 func auditFilter(q *gorm.DB, f audit.Filter) *gorm.DB {
-	if f.AppID > 0 {
-		q = q.Where("app_id = ?", f.AppID)
-	}
+	q = applyAppScope(q, f.AppID, f.AppIDs, "app_id")
 	if f.Action != "" {
 		q = q.Where("action = ?", f.Action)
 	}

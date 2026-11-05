@@ -23,6 +23,14 @@ type Meta struct {
 	TraceID   string
 	ClientIP  string
 	UserAgent string
+	// Actor 是"这次调用以谁的身份发起"。
+	//
+	// 跨服务调用时它是调用方的服务名（由 X-Actor 声明，缺省 "service"）；
+	// 本服务内部的用户请求则由中间件填 "user" 或管理员标识。
+	// 它与 TraceID 的分工：TraceID 回答"这次调用串到哪了"，
+	// Actor 回答"这条审计该记在谁头上"。没有 Actor 时审计只剩时间与动作，
+	// 合规口径下无法回答"谁"。
+	Actor string
 }
 
 // With 把元信息写入 context。

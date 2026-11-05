@@ -97,6 +97,8 @@ func NewRouter(d Deps) *gin.Engine {
 		// 注销只做 UC 侧的原子动作（§11）：完整流程要联动 social-login。
 		inner.POST("/accounts/:user_id/close", h.closeAccount)
 		inner.GET("/accounts/count", h.countAccounts)
+		// 审计只读查询：客服/合规用它回答"这个账号被谁动过"。
+		inner.GET("/audit", h.listAudit)
 	}
 
 	return r

@@ -31,9 +31,7 @@ func (r *IdentityAdminRepository) ListAdmin(ctx context.Context, q identity.Admi
 	ctx = appctx.WithCrossAppScope(ctx)
 
 	apply := func(db *gorm.DB) *gorm.DB {
-		if q.AppID > 0 {
-			db = db.Where("i.app_id = ?", q.AppID)
-		}
+		db = applyAppScope(db, q.AppID, q.AppIDs, "i.app_id")
 		if q.Platform != "" {
 			db = db.Where("i.platform = ?", q.Platform)
 		}

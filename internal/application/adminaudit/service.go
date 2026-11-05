@@ -60,7 +60,9 @@ func New(d Deps) *Service {
 
 // ListInput 是 GET /admin/v1/audit-logs 的入参。
 type ListInput struct {
-	AppID          int64
+	AppID int64
+	// AppIDs 是受限管理员的应用范围（nil = 不受限，空切片 = 一个都不许看）。
+	AppIDs         []int64
 	Action         string
 	Result         string
 	ExternalUserID string
@@ -101,7 +103,7 @@ type ListOutput struct {
 
 // List 查询业务审计。
 func (s *Service) List(ctx context.Context, in ListInput) (*ListOutput, error) {
-	f, err := parseFilter(in.AppID, in.Action, in.Result, in.ExternalUserID,
+	f, err := parseFilter(in.AppID, in.AppIDs, in.Action, in.Result, in.ExternalUserID,
 		in.TraceID, in.Platform, in.Client, in.From, in.To, in.Page, in.PageSize)
 	if err != nil {
 		return nil, err
@@ -431,11 +433,12 @@ func canAccess(t *audit.ExportTask, p *admin.Principal) bool {
 	return t.SubjectID == subjectOf(p)
 }
 
-func parseFilter(appID int64, action, result, externalUserID, traceID, platform, client, from, to string,
+func parseFilter(appID int64, appIDs []int64, action, result, externalUserID, traceID, platform, client, from, to string,
 	page, size int,
 ) (audit.Filter, error) {
 	f := audit.Filter{
 		AppID:          appID,
+		AppIDs:         appIDs,
 		Action:         action,
 		Result:         result,
 		ExternalUserID: externalUserID,

@@ -57,7 +57,9 @@ type Item struct {
 
 // ListInput 是 GET /admin/v1/merge-operations 的入参。
 type ListInput struct {
-	AppID    int64
+	AppID int64
+	// AppIDs 是受限管理员的应用范围（nil = 不受限，空切片 = 一个都不许看）。
+	AppIDs   []int64
 	Status   string
 	UserID   string
 	From     string
@@ -78,6 +80,7 @@ type ListOutput struct {
 func (s *Service) List(ctx context.Context, in ListInput) (*ListOutput, error) {
 	f := mergex.Filter{
 		AppID:    in.AppID,
+		AppIDs:   in.AppIDs,
 		Status:   in.Status,
 		UserID:   in.UserID,
 		Page:     in.Page,

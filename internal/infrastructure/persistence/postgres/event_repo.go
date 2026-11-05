@@ -182,9 +182,7 @@ func (r *EventRepository) Get(ctx context.Context, id int64) (*event.Event, erro
 func (r *EventRepository) List(ctx context.Context, f event.Filter) ([]*event.Event, int64, error) {
 	ctx = appctx.WithCrossAppScope(ctx)
 	q := r.db.WithContext(ctx).Model(&eventOutboxModel{})
-	if f.AppID > 0 {
-		q = q.Where("app_id = ?", f.AppID)
-	}
+	q = applyAppScope(q, f.AppID, f.AppIDs, "app_id")
 	if f.Status != "" {
 		q = q.Where("status = ?", string(f.Status))
 	}

@@ -83,7 +83,10 @@ type Record struct {
 // 所有字段都是【与关系】。零值表示不限制——这一点由应用层在构造时保证：
 // 管理端请求不带 app_id 时是"全应用"，带了就按应用过滤（§9.1 的显式跨应用）。
 type Filter struct {
-	AppID          int64
+	AppID int64
+	// AppIDs 是调用者可见的应用集合（受限管理员的应用范围）。
+	// nil 表示不受限；非 nil 且为空表示"一个都不许看"。
+	AppIDs         []int64
 	Action         string
 	Result         string
 	ExternalUserID string

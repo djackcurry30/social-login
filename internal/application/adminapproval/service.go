@@ -17,6 +17,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -24,11 +26,16 @@ import (
 	"github.com/djackcurry30/social-login/internal/domain/admin"
 	"github.com/djackcurry30/social-login/internal/domain/approval"
 	"github.com/djackcurry30/social-login/internal/pkg/errs"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 )
 
 // Deps 是用例依赖。
 type Deps struct {
 	Store approval.Store
+	// Audit 写 admin_audit_logs。可为 nil（单测），生产必须装配：
+	// 审批的意义是"可追责"，只写普通日志的话，审计查询页里看不到
+	// "谁批的、谁用掉了这张单"。
+	Audit admin.AuditWriter
 	Log   *zap.Logger
 	Now   func() time.Time
 	// TTL 是审批单有效期。0 取 approval.DefaultTTL。
@@ -92,6 +99,8 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*approval.Approva
 	if err := s.deps.Store.Create(ctx, a); err != nil {
 		return nil, errs.Wrap(errs.CodeInternal, "创建审批单失败", err)
 	}
+	s.writeAudit(ctx, in.RequesterID, "approval.create", fmt.Sprintf("%d", a.ID), in.Reason, nil,
+		map[string]any{"action": a.Action, "app_id": a.AppID, "expires_at": a.ExpiresAt}, "success", nil)
 	if s.deps.Log != nil {
 		s.deps.Log.Info("审批单已创建",
 			zap.Int64("approval_id", a.ID),
@@ -131,6 +140,8 @@ func (s *Service) Approve(ctx context.Context, id, approverID int64) (*approval.
 	if err != nil {
 		return nil, translate(err)
 	}
+	s.writeAudit(ctx, approverID, "approval.approve", fmt.Sprintf("%d", id), "批准："+a.Reason, nil,
+		map[string]any{"action": a.Action, "app_id": a.AppID, "requested_by": a.RequestedBy}, "success", nil)
 	if s.deps.Log != nil {
 		s.deps.Log.Info("审批单已批准",
 			zap.Int64("approval_id", id), zap.String("action", a.Action),
@@ -148,6 +159,8 @@ func (s *Service) Reject(ctx context.Context, id, approverID int64) (*approval.A
 	if err != nil {
 		return nil, translate(err)
 	}
+	s.writeAudit(ctx, approverID, "approval.reject", fmt.Sprintf("%d", id), "驳回："+a.Reason, nil,
+		map[string]any{"action": a.Action, "app_id": a.AppID, "requested_by": a.RequestedBy}, "success", nil)
 	if s.deps.Log != nil {
 		s.deps.Log.Info("审批单已驳回",
 			zap.Int64("approval_id", id), zap.String("action", a.Action),
@@ -159,8 +172,17 @@ func (s *Service) Reject(ctx context.Context, id, approverID int64) (*approval.A
 // Consume 校验并消费审批单（供执行接口的中间件调用）。
 //
 // 返回的错误已经是面向外部的错误码，调用方直接输出即可。
-func (s *Service) Consume(ctx context.Context, id int64, action string, appID *int64) error {
-	return translate(s.deps.Store.Consume(ctx, id, action, appID, s.deps.Now()))
+func (s *Service) Consume(ctx context.Context, id int64, action string, appID *int64, actorID int64) error {
+	if err := s.deps.Store.Consume(ctx, id, action, appID, s.deps.Now()); err != nil {
+		// 失败也要留痕：一张被反复尝试的审批单（过期了还在用、拿 A 的单做 B）
+		// 是"有人在绕流程"的信号，只在日志里出现是查不到的。
+		s.writeAudit(ctx, actorID, "approval.consume", fmt.Sprintf("%d", id), "", nil,
+			map[string]any{"executed_action": action, "app_id": appID}, "denied", err)
+		return translate(err)
+	}
+	s.writeAudit(ctx, actorID, "approval.consume", fmt.Sprintf("%d", id), "", nil,
+		map[string]any{"executed_action": action, "app_id": appID}, "success", nil)
+	return nil
 }
 
 // IsSuperAdmin 报告该管理员是否是超管（handler 用它决定能否看全部/审批）。
@@ -188,6 +210,49 @@ func translate(err error) error {
 		return errs.New(errs.CodeAdminApprovalRequired, "审批单与本次操作不匹配（动作或应用不一致）")
 	default:
 		return errs.Wrap(errs.CodeInternal, "审批处理失败", err)
+	}
+}
+
+// writeAudit 把审批生命周期写进管理端审计表。
+//
+// 三条约定：
+//
+//	subject_id 用 "admin:<id>"，与 adminapp 等写操作同一套命名——
+//	           审计查询页按 subject 过滤时才不会漏掉审批记录；
+//	target     是审批单（approval/<id>），app_id 带上，方便按应用筛；
+//	失败只记日志不返回错误：审计写失败时审批本身已经提交，
+//	           返回错误会让调用方以为"没批成功"而重试，反而产生第二张单。
+func (s *Service) writeAudit(ctx context.Context, actorID int64, action, targetID, reason string,
+	before, after map[string]any, result string, cause error,
+) {
+	if s.deps.Audit == nil {
+		return
+	}
+	if reason == "" {
+		// 审计表 reason 是 NOT NULL 且为空字符串会被仓储拒绝，这里给一个
+		// 不会误导人的缺省值（而不是编一句"无"）。
+		reason = "审批流程：" + action
+	}
+	ev := &admin.AuditEvent{
+		SubjectID:   "admin:" + strconv.FormatInt(actorID, 10),
+		Action:      action,
+		TargetType:  "approval",
+		TargetID:    targetID,
+		Reason:      reason,
+		BeforeState: before,
+		AfterState:  after,
+		Result:      result,
+		TraceID:     reqmeta.TraceID(ctx),
+	}
+	if cause != nil {
+		if e := errs.From(cause); e != nil {
+			ev.ErrorCode = string(e.Code)
+		} else {
+			ev.ErrorCode = string(errs.CodeInternal)
+		}
+	}
+	if err := s.deps.Audit.Write(ctx, ev); err != nil && s.deps.Log != nil {
+		s.deps.Log.Error("写入审批审计失败", zap.String("action", action), zap.Error(err))
 	}
 }
 

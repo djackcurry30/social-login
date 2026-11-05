@@ -2133,9 +2133,10 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 
 ### 25.5 用户中心侧
 
-用户中心 P0 已完整交付，缺口按 `docs/user-center-mvp-design.md` §10 分期：
+用户中心 P0 与 P0.5 已完整交付（P0.5 的审计与慢查询于 2026-11-05 补齐，见 §38），
+缺口按 `docs/user-center-mvp-design.md` §10 分期：
 
-- **P0.5**：审计日志、慢查询日志、`uc_sync_failed` 在**对端**侧的指标（登录侧已有）。
+- **P0.5**：✅ 应用注册与对账、停用拒绝、注销、审计日志（§38.1）、慢查询（§38.2）。
 - **P1**：`claim.invalidated` 推送、注销的完整链路、管理端账号只读视图、
   换绑 24h 回滚窗口、`discarded_claims` 通知用户。其中"停用状态在登录链路生效"
   本轮已由登录侧的 `accountgate.go` 补上（对端不需要改）。
@@ -2145,7 +2146,8 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 
 - **功能面**：业务端 14 接口、管理端 11 组 53 端点、11 组前端，加上用户中心
   五端点，链路已闭环，且有契约脚本 + 真实联调 + 容器部署三层验证。
-- **生产化面**：剩 12 项，其中 6 项属于"上生产前必须有"（A 组 1 + B 组 5）。
+- **生产化面**：A 组上线阻塞为 0；剩余集中在 `Unbind` 平台侧（卡凭据取舍）
+  与三项"可延后"的收尾（全链路压测、热更新扩项、管理端审计范围过滤）。
 - **三处「能配不生效」仍是当前最该修的质量问题**——它们不会报错，只会让运维
   以为自己配好了：`source_disposal`、`page_token`、`ScopeAppID`。
 
@@ -3461,10 +3463,126 @@ P50/P95/P99 2.849ms / 6.019ms / 11.015ms（max 18.277ms）
 
 - **登录全链路压测**：`/v1/authorize → callback → token` 的端到端 QPS 与 P99 未测，
   而它才是真实容量。需要 mock 平台 + 脚本化 code，属下一轮。
-- **审批与审计的联动**：审批单本身没有写进 `admin_audit_logs`（写的是日志），
-  合规口径下"谁批的"应当可查。表里有 `approved_by`，但审计查询页还没接。
-- **`ScopeAppID` 的列表类接口**（identities/events/audit/merge）未做应用过滤：
-  带 `app_id` 时受中间件约束，不带 `app_id` 会被 403——安全但不好用，
-  要放开必须给每个列表加 scope 过滤。
+- ~~**审批与审计的联动**~~：已补，见 §38.3（申请/批准/驳回/消费四段都进
+  `admin_audit_logs`，失败记 denied）。
+- ~~**`ScopeAppID` 的列表类接口**~~：已补，见 §38.4（identities/bindings/
+  events/audit/merge 下推范围；`admin_audit_logs` 仍要求显式 app_id）。
 - **热更新的配置项仍然很少**：这是刻意的，但 `account.sync.interval`、
   渠道超时这类"运维真的会想改"的项还不在白名单里。
+
+---
+
+## 38. 用户中心 P0.5 可运维 + C 组遗留（2026-11-05）
+
+上一状态：用户中心上线前必备的 **P0.5 只做了两项**（同步注册 / 停用拒绝 / 注销），
+审计与慢查询缺位；C 组遗留的审批审计联动、列表应用范围过滤也还欠着。
+
+### 38.1 账号审计日志（`account_audit_logs`，迁移 00002）
+
+回答的是合规口径下的一个问题：**谁在什么时候对哪个账号做了什么**。
+
+| 动作 | 触发点 | 关键 detail |
+| --- | --- | --- |
+| `account.created` | 建号 | `claim_types`（只有类型） |
+| `claim.bound` / `claim.replaced` | 换绑 | `claim_type`、`source`；动作由 store 判定 |
+| `account.merged` | 合并 | `source_user_id`、`source_account_id`、`discarded_claims`、`reason` |
+| `account.closed` | 注销 | `claims_revoked` |
+
+三个决定：
+
+1. **与业务同一事务写入**。审计在 store 的事务里 INSERT，失败则整个操作回滚。
+   "操作成功后再写审计、失败只记日志"的做法会在数据库抖动时产生
+   「数据改了但查不到是谁改的」——那正是审计最该有用的时刻。
+2. **只记已成为事实的状态变更**。幂等重放、重复注销、被拒绝的合并都不写：
+   它们没有改变任何数据，写进去只会让"这个账号被改过几次"不可读。
+   拒绝类事件归 social-login 的审计表（那边有 `result=failure`）。
+3. **detail 不含凭证明文**。审计表保留期更长、可查的人更多，把手机号抄进去
+   等于换一个系统继续泄漏。集成测试直接断言 detail 里搜不到手机号。
+
+**actor 从哪来**：本服务的每个写操作都由 social-login 发起，真实的人在对面。
+所以 `X-Actor`（可选头，登录侧固定发 `social-login`）声明调用方，
+`trace_id` 与登录侧审计同值——**用 trace_id 关联即可回答"到底是谁点的"**。
+这是两服务各管一半责任的必然结果，而不是遗漏；不在本服务复制一份用户身份，
+是为了避免同一事实出现两个可能不一致的来源。
+
+**只读查询**：`GET /internal/v1/apps/{app_key}/audit?user_id=&action=&before_id=&limit=`
+（游标翻页，不用 offset——审计表随时间线性增长，深翻页会退化成全表扫）。
+
+### 38.2 慢查询日志
+
+用 pgx 的 `QueryTracer` 挂在连接上，而不是在仓储层逐个包：
+仓储有几十个调用点，手工包必然漏，而漏掉的那个往往就是出问题的那条。
+
+- 阈值 `database.slow_query_threshold`（默认 200ms），**只记录不中断**；
+  与 `statement_timeout`（2s，会杀语句）是两个东西，两者必须都配：
+  前者让"快要超时"的语句先出现在日志里，后者保证慢查询不会一直占着连接。
+- 日志字段：`took` / `sql`（压成一行、截 500 字符）/ `args`（**个数**）/ `trace_id`。
+- **不记参数值**：本服务的参数就是手机号哈希与密文，进了日志前面所有脱敏都白做。
+- 实现细节：`TraceQueryEndData` 里没有 SQL 与参数，必须在 `TraceQueryStart`
+  把要记的东西塞进 context——顺带保证"记的语句"与"测的耗时"是同一次调用。
+
+### 38.3 审批与审计联动
+
+审批单的生命周期现在写进 `admin_audit_logs`（`subject_id = admin:<id>`，
+`target_type = approval`）：
+
+| action | 谁 | 记什么 |
+| --- | --- | --- |
+| `approval.create` | 申请人 | 动作、目标应用、有效期 |
+| `approval.approve` / `.reject` | 批准人 | 审批单原本要做什么、申请人是谁 |
+| `approval.consume` | 执行人 | `executed_action`、`app_id`、成功/拒绝 |
+
+消费失败也记（`result=denied` + 错误码）：一张被反复尝试的过期单、或拿 A 的单
+去做 B，是"有人在绕流程"的信号，只写日志是查不到的。
+
+审计写失败只记 error 不返回错误——审批此时已经提交，返回错误会让调用方重试，
+反而产生第二张单。
+
+### 38.4 列表类接口按应用范围过滤
+
+上一轮受限管理员访问 `identities` / `bindings` / `events/outbox` / `audit-logs` /
+`merge-operations` 时，不带 `app_id` 会被 403：安全，但等于这五个页面用不了。
+
+现在改为**下推到 SQL**：middleware 把范围放进 gin context，handler 读出来塞进
+查询条件（`applyAppScope`）。三态语义，第三种是这类隔离最典型的事故形态：
+
+```
+appID > 0        app_id = ?
+appIDs == nil    不过滤（全局管理员 / 内部调用）
+appIDs == []     1 = 0（"一个都不许看"，绝不能退化成不过滤）
+```
+
+- 显式带越界 `app_id` 仍然是 404（不泄露应用是否存在）；
+- 不带的 `app_id` 的全局聚合视图（看板、渠道健康、管理员名单）**仍然拒绝**：
+  那些数据天然跨应用，过滤不了；
+- `admin_audit_logs` 保持原状（它的 `app_id` 可空，含全局操作），
+  受限管理员必须显式带 `app_id`——这是本轮明确留下的边界。
+
+### 38.5 测试
+
+| 包 | 用例 | 守住什么 |
+| --- | --- | --- |
+| `usercenter/store/postgres` | 2 | SQL 压行、按 rune 截断（中文不被切半） |
+| `usercenter/service`（集成） | 1 | 审计四类动作落库、trace/actor/IP 透传、detail 无明文、重放不写审计 |
+| `application/adminapproval` | 2 | 申请/批准/执行三段审计、失败记 denied 并带错误码 |
+| `infrastructure/postgres` | 1（5 子例） | 四种范围状态生成的 SQL（含空范围 → `1 = 0`） |
+| `admin/handler` | 1（4 子例） | 不受限 vs 受限空范围在 handler 层的区分 |
+
+### 38.6 本轮未验证的部分（重要）
+
+**用户中心的集成用例没有跑过**：本机 Docker（Rancher Desktop 的 WSL 后端）
+当前不可用，`TEST_USER_CENTER_DSN` 指向的库连不上，`TestIntegrationAuditTrail`
+与迁移 00002 的实机应用都未执行。其余为纯单测（不依赖库），均通过。
+
+上线前必须补跑：`TEST_USER_CENTER_DSN=... go test ./internal/usercenter/... -run Integration -v`，
+并确认 `account_audit_logs` 的 `ck_audit_action` 与代码里的常量一致
+（不一致时插入会被约束拒绝，表现为"建号失败"——这也是刻意让它失败，
+而不是静默写一条没人认得的动作）。
+
+### 38.7 仍未做
+
+- **登录全链路压测**（`authorize → callback → token`）：仍是唯一没有数字的地方。
+- **热更新白名单扩项**：`account.sync.interval`、渠道超时仍未纳入；
+  这两项会动到已建立的客户端，属"需要重新装配"而不是"改个阈值"。
+- **管理端审计日志按范围过滤**：见 §38.4 的边界说明。
+- **`Unbind` 平台侧**：仍卡在"是否持久化渠道 refresh_token"的安全取舍。

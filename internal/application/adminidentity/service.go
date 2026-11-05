@@ -89,7 +89,10 @@ type IdentityItem struct {
 
 // IdentityListInput 是 GET /admin/v1/identities 的入参。
 type IdentityListInput struct {
-	AppID          int64
+	AppID int64
+	// AppIDs 是受限管理员的应用范围（nil = 不受限，空切片 = 一个都不许看）。
+	// 由 handler 从中间件上下文取，透传到 SQL，而不是取完再过滤。
+	AppIDs         []int64
 	Platform       string
 	OpenID         string
 	IdentityKey    string
@@ -110,6 +113,7 @@ type IdentityListOutput struct {
 func (s *Service) ListIdentities(ctx context.Context, in IdentityListInput) (*IdentityListOutput, error) {
 	rows, total, err := s.deps.Identities.ListAdmin(ctx, identity.AdminQuery{
 		AppID:          in.AppID,
+		AppIDs:         in.AppIDs,
 		Platform:       in.Platform,
 		OpenID:         in.OpenID,
 		IdentityKey:    in.IdentityKey,
@@ -224,7 +228,9 @@ func (s *Service) GetIdentity(ctx context.Context, appID, id int64) (*IdentityDe
 
 // BindingListInput 是绑定查询入参。
 type BindingListInput struct {
-	AppID          int64
+	AppID int64
+	// AppIDs 同 IdentityListInput.AppIDs：nil = 不受限，空切片 = 一个都不许看。
+	AppIDs         []int64
 	ExternalUserID string
 	Status         string
 	IdentityID     int64
@@ -247,6 +253,7 @@ func (s *Service) ListBindings(ctx context.Context, in BindingListInput) (*Bindi
 	}
 	rows, total, err := s.deps.Bindings.ListAdmin(ctx, binding.AdminFilter{
 		AppID:          in.AppID,
+		AppIDs:         in.AppIDs,
 		ExternalUserID: in.ExternalUserID,
 		Status:         in.Status,
 		IdentityID:     in.IdentityID,

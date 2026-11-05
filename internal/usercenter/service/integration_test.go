@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/djackcurry30/social-login/internal/pkg/ids"
+	"github.com/djackcurry30/social-login/internal/pkg/reqmeta"
 	"github.com/djackcurry30/social-login/internal/usercenter/app"
 	"github.com/djackcurry30/social-login/internal/usercenter/cryptox"
 	"github.com/djackcurry30/social-login/internal/usercenter/domain"
@@ -38,7 +39,10 @@ import (
 var (
 	initOnce sync.Once
 	shared   *service.Service
-	initErr  error
+	// sharedStore 只给审计用例读 account_audit_logs 用：审计是对外的
+	// 合规事实，必须从库里读出来验证，而不是断言"我调用过写审计的函数"。
+	sharedStore *postgres.Store
+	initErr     error
 )
 
 // svc 返回共享的服务实例（连接池与迁移只做一次）。
@@ -67,6 +71,7 @@ func build(dsn string) (*service.Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	sharedStore = store
 
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -640,4 +645,114 @@ func TestIntegrationValidation(t *testing.T) {
 		Claims:         []domain.Claim{{Type: "open_id", Value: "oX123"}},
 	})
 	wantCode(t, err, domain.CodeInvalid)
+}
+
+// TestIntegrationAuditTrail 验证"谁在什么时候对哪个账号做了什么"确实落库。
+//
+// 为什么必须从库里读回来断言：
+//
+//	审计的价值全在"事后能查"。如果只断言"调用过写审计的函数"，把 INSERT
+//	写错一个列名、或事务提前提交，用例照样绿，而合规查询会永远查不到记录。
+//
+// 顺带守住三条硬要求：trace_id 与调用方同值、actor 可区分调用方、
+// detail 里【不含】手机号明文。
+func TestIntegrationAuditTrail(t *testing.T) {
+	s := svc(t)
+	app := newApp(t)
+
+	// 构造一次真实的调用上下文：trace id 与 actor 都由 HTTP 层填入，
+	// 这里手工模拟，验证它们能一路传到审计行。
+	ctx := reqmeta.With(context.Background(), reqmeta.Meta{
+		TraceID:   "tr_it_" + strings.ToLower(ids.ULID()),
+		ClientIP:  "10.0.0.8",
+		UserAgent: "integration-test",
+		Actor:     "social-login",
+	})
+
+	const phoneValue = "13900001111"
+	created, err := s.Create(ctx, app, service.CreateRequest{
+		IdempotencyKey: "audit-1",
+		Claims:         []domain.Claim{phone(phoneValue)},
+	})
+	if err != nil {
+		t.Fatalf("建号失败: %v", err)
+	}
+	userID := created.Account.UserID
+
+	// 换绑：动作应是 "claim.replaced"（不是 claim.bound）。
+	if _, err := s.ReplaceClaim(ctx, app, userID, "phone", "13900002222", "wechat_phone"); err != nil {
+		t.Fatalf("换绑失败: %v", err)
+	}
+	// 合并：源账号并进来。
+	src := mustCreate(t, app, "audit-2", email("audit-src@example.com"))
+	if _, err := s.Merge(ctx, app, service.MergeRequest{
+		IdempotencyKey: "audit-merge",
+		TargetUserID:   userID,
+		SourceUserID:   src.UserID,
+		Reason:         "集成测试",
+	}); err != nil {
+		t.Fatalf("合并失败: %v", err)
+	}
+	// 关闭。
+	if err := s.Close(ctx, app, src.UserID); err != nil {
+		t.Fatalf("关闭失败: %v", err)
+	}
+
+	list, err := sharedStore.ListAudit(context.Background(), postgres.AuditFilter{
+		AppID: app.ID, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("读取审计失败: %v", err)
+	}
+
+	// 按 (user_id, action) 汇总：同一账号上应当出现建号、换绑、合并、关闭。
+	type key struct{ user, action string }
+	seen := map[key]int{}
+	for _, r := range list {
+		seen[key{r.UserID, r.Action}]++
+		if r.Actor != "social-login" {
+			t.Fatalf("actor 应透传调用方，实际 %q（action=%s）", r.Actor, r.Action)
+		}
+		if r.TraceID != reqmeta.From(ctx).TraceID {
+			t.Fatalf("trace_id 应与调用方一致，实际 %q", r.TraceID)
+		}
+		if r.ClientIP != "10.0.0.8" {
+			t.Fatalf("client_ip 应落库，实际 %q", r.ClientIP)
+		}
+		// detail 不允许出现凭证明文：审计表保留期更长、可查的人更多。
+		if strings.Contains(string(r.Detail), phoneValue) {
+			t.Fatalf("审计 detail 泄漏了手机号明文: %s", r.Detail)
+		}
+	}
+
+	want := []key{
+		{userID, postgres.AuditAccountCreated},
+		{userID, postgres.AuditClaimBound},    // 建号带手机号 → 首次绑定
+		{userID, postgres.AuditClaimReplaced}, // 换绑
+		{userID, postgres.AuditAccountMerged},
+		{src.UserID, postgres.AuditAccountClosed},
+	}
+	for _, k := range want {
+		if seen[k] == 0 {
+			t.Fatalf("缺少审计记录 %v，实际: %+v", k, seen)
+		}
+	}
+
+	// 幂等重放不写审计：它没有改变任何数据，写进来会让"这个账号被改过几次"不可读。
+	before := len(list)
+	if _, err := s.Create(ctx, app, service.CreateRequest{
+		IdempotencyKey: "audit-1",
+		Claims:         []domain.Claim{phone(phoneValue)},
+	}); err != nil {
+		t.Fatalf("重放失败: %v", err)
+	}
+	after, err := sharedStore.ListAudit(context.Background(), postgres.AuditFilter{
+		AppID: app.ID, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("重读审计失败: %v", err)
+	}
+	if len(after) != before {
+		t.Fatalf("幂等重放不应新增审计：%d → %d", before, len(after))
+	}
 }
