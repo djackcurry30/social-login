@@ -183,9 +183,9 @@ func (r *AuditRepository) ListAdmin(ctx context.Context, f audit.AdminFilter) ([
 		if f.TargetID != "" {
 			q = q.Where("target_id = ?", f.TargetID)
 		}
-		if f.AppID > 0 {
-			q = q.Where("app_id = ?", f.AppID)
-		}
+		// 受限管理员只能看到自己范围内应用的审计。app_id 为 NULL 的全局记录
+		// 在 IN 条件下自然被排除——这是有意的：全局动作不属于任何应用。
+		q = applyAppScope(q, f.AppID, f.AppIDs, "app_id")
 		if f.Result != "" {
 			q = q.Where("result = ?", f.Result)
 		}

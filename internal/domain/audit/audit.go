@@ -127,11 +127,16 @@ type AdminFilter struct {
 	TargetType string
 	TargetID   string
 	AppID      int64
-	Result     string
-	From       *time.Time
-	To         *time.Time
-	Page       int
-	PageSize   int
+	// AppIDs 是受限管理员的应用范围（nil = 不受限，空切片 = 一个都不许看）。
+	//
+	// ⚠️ 受限时 app_id 为 NULL 的记录（全局动作，如签名密钥轮换）也不可见：
+	// 那些记录不属于任何应用，"过滤一部分"无从谈起。
+	AppIDs   []int64
+	Result   string
+	From     *time.Time
+	To       *time.Time
+	Page     int
+	PageSize int
 }
 
 // Query 是审计查询端口（H 组 + 异步导出）。

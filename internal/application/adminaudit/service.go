@@ -128,11 +128,13 @@ type AdminListInput struct {
 	TargetType string
 	TargetID   string
 	AppID      int64
-	Result     string
-	From       string
-	To         string
-	Page       int
-	PageSize   int
+	// AppIDs 是受限管理员的应用范围（nil = 不受限，空切片 = 一个都不许看）。
+	AppIDs   []int64
+	Result   string
+	From     string
+	To       string
+	Page     int
+	PageSize int
 }
 
 // AdminItem 是一条管理端审计的对外视图。
@@ -169,6 +171,7 @@ func (s *Service) ListAdmin(ctx context.Context, in AdminListInput) (*AdminListO
 		TargetType: in.TargetType,
 		TargetID:   in.TargetID,
 		AppID:      in.AppID,
+		AppIDs:     in.AppIDs,
 		Result:     in.Result,
 		Page:       in.Page,
 		PageSize:   in.PageSize,

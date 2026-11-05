@@ -76,6 +76,7 @@ func (h *AuditLogsHandler) ListAdmin(c *gin.Context) {
 		TargetType: c.Query("target_type"),
 		TargetID:   c.Query("target_id"),
 		AppID:      appID,
+		AppIDs:     scopeAppIDs(c),
 		Result:     c.Query("result"),
 		From:       c.Query("from"),
 		To:         c.Query("to"),
