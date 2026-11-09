@@ -253,3 +253,12 @@ admin:
   #   config.rotate         渠道 client_secret 轮换
   #   key.rotate            签名密钥轮换（JWKS 变更，影响所有业务方验签）
   approval_required_actions: []
+
+internal:
+  # 服务间内部接口令牌（X-Service-Token）。
+  #
+  # 用于 /internal/v1/** ——目前只有用户中心推来的 claim.invalidated。
+  # 为空时这些接口一律返回 503（不是放行）：漏配一个环境变量就变成
+  # 公网可写的口子，是这类端点最常见的事故。
+  # 生产未配置会在启动校验时直接失败。
+  service_token: "dev-internal-token"

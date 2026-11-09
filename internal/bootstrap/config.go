@@ -42,6 +42,17 @@ type Config struct {
 	Tracing TracingConfig `mapstructure:"tracing"`
 	// Admin 是管理端的横切配置。
 	Admin AdminConfig `mapstructure:"admin"`
+	// Internal 是服务间内部接口的配置。
+	Internal InternalConfig `mapstructure:"internal"`
+}
+
+// InternalConfig 是内部接口（X-Service-Token）配置。
+//
+// 目前只有一个接收端点：用户中心推来的 claim.invalidated。
+// 令牌独立于业务方的 app_secret 与用户令牌：它代表"另一个内部服务"，
+// 泄漏范围应该只覆盖内部接口，而不是能签发令牌的那套凭据。
+type InternalConfig struct {
+	ServiceToken string `mapstructure:"service_token"`
 }
 
 // AdminConfig 是管理端配置。
@@ -643,6 +654,13 @@ func (c *Config) normalizeAndValidate() error {
 	}
 
 	// 生产模式的强校验。
+	// 生产必须有内部接口令牌：为空时这些端点返回 503，而且"推不进来"
+	// 不会有任何告警——只在某个用户的 claim 该失效却没失效时才看得出来。
+	if c.Server.IsProduction() && strings.TrimSpace(c.Internal.ServiceToken) == "" {
+		return errs.New(errs.CodeConfigInvalid,
+			"生产模式缺少 internal.service_token：用户中心无法推送 claim.invalidated")
+	}
+
 	if c.Server.IsProduction() {
 		if c.Security.MasterKey == "" {
 			return errs.New(errs.CodeConfigInvalid,

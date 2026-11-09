@@ -19,6 +19,9 @@ type MergeInput struct {
 	// Audit 为 nil 表示不写审计；生产路径由 service 构造。
 	// 重放（已合并）不写审计：本次没有改变任何数据。
 	Audit *AuditInput
+	// Notify 是给登录侧的出站事件（source 账号已被关掉）。
+	// 与审计同事务写入；重放路径不会走到这里（那里直接 return）。
+	Notify *OutboxInput
 }
 
 // MergeResult 是合并结果。
@@ -223,6 +226,9 @@ func (s *Store) MergeAccounts(ctx context.Context, in MergeInput) (*MergeResult,
 			if err := insertAudit(ctx, tx, &a); err != nil {
 				return err
 			}
+		}
+		if err := insertOutbox(ctx, tx, in.Notify); err != nil {
+			return err
 		}
 		return nil
 	})

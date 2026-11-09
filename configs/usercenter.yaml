@@ -78,3 +78,23 @@ tracing:
   export_timeout: "5s"
   batch_timeout: "5s"
   max_queue_size: 2048
+
+notify:
+  # 出站事件投递（用户中心 → 登录中心）。
+  #
+  # 只做一件事：换绑 / 注销 / 合并后通知登录侧失效它的本地 claim，
+  # 避免它继续用过期手机号做归并判定（架构 §8.5 第 2 条）。
+  #
+  # 默认关闭：单独跑本服务或契约测试时打开它只会每 5 秒刷一条投递失败。
+  enabled: false
+  # 登录侧的接收地址（容器内用服务名，本机调试用 127.0.0.1:8080）。
+  endpoint: "http://127.0.0.1:8080/internal/v1/usercenter/claim-invalidated"
+  # 与登录侧 internal.service_token 保持一致。
+  token: "dev-internal-token"
+  # 扫描间隔与每轮条数。
+  interval: "5s"
+  batch: 20
+  # 领取租约：进程在投递途中崩溃时，事件在这之后重新可投。
+  lease: "60s"
+  # 退避重试累计到该次数后进死信（期间按 5s、10s、20s… 指数退避，上限 1h）。
+  max_attempts: 10

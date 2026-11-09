@@ -183,6 +183,10 @@ services:
       # 已绑定用户登录时回源核对账号（状态闸门 + 平台侧凭证变更换绑）。
       # allow_on_unavailable=false 表示对端不可用时拒绝登录（架构 §6.2）。
       SOCIAL_LOGIN_ACCOUNT_GATE_ALLOW_ON_UNAVAILABLE: ${ACCOUNT_GATE_ALLOW:-false}
+      # 服务间内部接口令牌：用户中心推 claim.invalidated 时携带（X-Service-Token）。
+      # 与 UC_TOKEN 是两个方向的两把凭据，故意不复用：一把泄漏不该同时
+      # 打开"读账号"与"改本地 claim"两个方向。
+      SOCIAL_LOGIN_INTERNAL_SERVICE_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
       # 入站限流：默认关闭。本地想验证时用 RATE_LIMIT_ENABLED=true 起来。
       SOCIAL_LOGIN_RATELIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
       SOCIAL_LOGIN_RATELIMIT_IDENTITY_PER_MINUTE: ${RATE_LIMIT_IDENTITY:-30}
@@ -241,6 +245,11 @@ services:
       # 独立库：与 social-login 不共享表，跨服务只走 HTTP 契约。
       UC_DATABASE_DSN: postgres://postgres:postgres@pg:5432/user_center?sslmode=disable
       UC_SECURITY_SERVICE_TOKEN: ${UC_TOKEN:-dev-usercenter-token}
+      # 出站事件：换绑/注销后通知登录中心失效本地 claim（架构 §8.5 第 2 条）。
+      # 对端不可用时进入 outbox 重试，不会丢事件。
+      UC_NOTIFY_ENABLED: ${UC_NOTIFY_ENABLED:-true}
+      UC_NOTIFY_ENDPOINT: ${UC_NOTIFY_ENDPOINT:-http://app:8080/internal/v1/usercenter/claim-invalidated}
+      UC_NOTIFY_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
       # 本地固定主密钥，避免重启后已入库的凭据解不开。
       # ⚠️ 仅本地：生产必须由密钥管理系统注入 UC_SECURITY_MASTER_KEY。
       UC_SECURITY_MASTER_KEY: ${UC_MASTER_KEY:-dSmcH26cwhbLBQSMCD2/E3NV9Hs4c8Bmz+E75YP4Uo4=}

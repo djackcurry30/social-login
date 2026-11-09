@@ -19,6 +19,12 @@ type Metrics struct {
 	Merges           *metrics.Counter
 	ClaimConflicts   *metrics.Counter
 	IdempotentReplay *metrics.Counter
+
+	// 出站事件（claim.invalidated 等）的投递结果。
+	// sent 与 failed 分开：failed 高说明对端不可用，sent 高才是正常。
+	OutboxSent   *metrics.Counter
+	OutboxFailed *metrics.Counter
+	OutboxDead   *metrics.Counter
 }
 
 // NewMetrics 注册全部指标。
@@ -38,6 +44,12 @@ func NewMetrics(reg *metrics.Registry) *Metrics {
 			"凭证冲突次数", "app_key", "op"),
 		IdempotentReplay: reg.Counter("user_center_idempotent_replay_total",
 			"幂等键重放次数", "app_key"),
+		OutboxSent: reg.Counter("user_center_outbox_sent_total",
+			"出站事件投递成功数"),
+		OutboxFailed: reg.Counter("user_center_outbox_failed_total",
+			"出站事件投递失败数", "retryable"),
+		OutboxDead: reg.Counter("user_center_outbox_dead_total",
+			"出站事件进入死信数"),
 	}
 }
 
@@ -73,5 +85,30 @@ func (m *Metrics) RecordConflict(appKey, op string) {
 func (m *Metrics) RecordReplay(appKey string) {
 	if m != nil {
 		m.IdempotentReplay.Inc(appKey)
+	}
+}
+
+// RecordOutboxSent 实现 notify.Metrics。
+func (m *Metrics) RecordOutboxSent() {
+	if m != nil {
+		m.OutboxSent.Inc()
+	}
+}
+
+// RecordOutboxFailed 实现 notify.Metrics。
+//
+// retryable 作为标签而不是两个计数器：运维要回答的是
+// "失败里有几成还会自己好"，分开成两个指标反而要人做减法。
+func (m *Metrics) RecordOutboxFailed(retryable bool) {
+	if m == nil {
+		return
+	}
+	v := "permanent"
+	if retryable {
+		v = "retryable"
+	}
+	m.OutboxFailed.Inc(v)
+	if !retryable {
+		m.OutboxDead.Inc()
 	}
 }

@@ -106,3 +106,52 @@ groups:
           description: >-
             所有应用都未同步。优先检查 /readyz 与 usercenter 的健康状态，
             以及 accounts.http.token 是否与对端一致。
+
+  # 用户中心侧：出站事件（claim.invalidated）投递。
+  #
+  # 指标在 user_center 进程的 /metrics 上（见 internal/usercenter/app/app.go）。
+  # 与上面的 social_login_outbox_* 不是一回事：那是登录侧发给业务方的事件，
+  # 这是用户中心发给登录侧的"你的 claim 过期了"。
+  - name: usercenter
+    rules:
+      # 死信 = 重试耗尽。后果是登录侧会一直用过期手机号做归并判定，
+      # 而且没有任何其他地方会报错——必须人工重投或修数据。
+      - alert: UserCenterOutboxDead
+        expr: user_center_outbox_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: usercenter
+        annotations:
+          summary: "用户中心的 claim.invalidated 事件进入死信"
+          description: >-
+            登录侧不会收到这些换绑/注销通知，本地 claim 会一直过期。
+            处理：SELECT id, app_id, last_error FROM uc_outbox WHERE status='dead';
+            修好原因后把 status 改回 'pending'、next_attempt_at 置 now() 即可重投。
+
+      # 积压：不是 0 而是"持续不为 0"。单实例下正常值应在个位数秒内清零。
+      - alert: UserCenterOutboxBacklog
+        expr: user_center_outbox_pending > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: usercenter
+        annotations:
+          summary: "用户中心出站事件积压超过 100 条"
+          description: >-
+            持续 10 分钟说明投递跟不上或对端持续失败。先看
+            user_center_outbox_failed_total{retryable="retryable"} 与登录侧 /readyz。
+
+      # 投递成功率侧面指标：对端拒绝（4xx）说明契约/令牌/应用维度出了配置问题，
+      # 这类失败不会自愈，重试只会把它们送进死信。
+      - alert: UserCenterOutboxPermanentFailures
+        expr: increase(user_center_outbox_failed_total{retryable="permanent"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: usercenter
+        annotations:
+          summary: "用户中心出站事件出现永久失败"
+          description: >-
+            通常是 400（事件体/类型不认识）、401（令牌不一致）或 404（应用未登记）。
+            查 uc_outbox.last_error 与两侧 internal/notify token 配置。

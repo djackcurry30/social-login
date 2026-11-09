@@ -167,6 +167,11 @@ func (f *fakeClaims) PurgeByIdentities(_ context.Context, _ int64, ids []int64) 
 	return f.n, f.err
 }
 
+// RevokeByType 是用户中心通知用的按类型撤销；本包（注销）用不到。
+func (f *fakeClaims) RevokeByType(context.Context, int64, int64, string, time.Time) (int64, error) {
+	return 0, nil
+}
+
 type fakeAudit struct{ events []*audit.Event }
 
 func (f *fakeAudit) Write(_ context.Context, e *audit.Event) error {

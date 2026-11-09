@@ -15,6 +15,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/accountsync"
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	"github.com/djackcurry30/social-login/internal/application/claimsync"
 	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
@@ -661,6 +662,25 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 	_ = adminDeps
 
+	// 指标注册表提前到这里：接收端（claim.invalidated）与路由都要它。
+	// 后面那一大段 gauge 注册仍留在原处，只把"创建"提前，避免再造第二个注册表。
+	metricsReg := metrics.NewRegistry()
+
+	// 用户中心推来的 claim 失效通知。
+	//
+	// 这是【反向】依赖（UC → 本服务），与 account provider 的正向依赖
+	// 互不冲突：两边各有一个受控的内部接口，谁也不读对方的库。
+	claimInvalidatedCtr := metricsReg.Counter("social_login_claim_invalidated_total",
+		"按用户中心通知失效 claim 的次数", "result")
+	claimSyncSvc := claimsync.New(claimsync.Deps{
+		Apps:     appRepo,
+		Bindings: bindingRepo,
+		Claims:   claimRepo,
+		Audit:    auditRepo,
+		Metrics:  claimSyncMetrics{ctr: claimInvalidatedCtr},
+		Log:      logger,
+	})
+
 	// --- 接入层 ---
 	h := handler.New(handler.Deps{
 		Tenant:       tenantSvc,
@@ -670,6 +690,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Notify:       notifySvc,
 		Merge:        mergeSvc,
 		AccountClose: accountCloseSvc,
+		ClaimsSync:   claimSyncSvc,
 		Signer:       signer,
 		SecretHasher: appSecretHasher,
 		Issuer:       cfg.Server.Issuer,
@@ -711,8 +732,6 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	//
 	// 登录成功率不单独建指标：/v1/oauth/callback 的 2xx 比例就是它，
 	// 从 HTTP 指标里算即可。为它再维护一套埋点只会多一个漂移的口径。
-	metricsReg := metrics.NewRegistry()
-
 	// 采集时查库：用带超时的独立 context，避免慢查询拖住 /metrics 端点。
 	gatherCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), 2*time.Second)
@@ -810,16 +829,17 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		})
 
 	app.router = httpapi.NewRouter(httpapi.RouterDeps{
-		Handler:      h,
-		Tenant:       tenantSvc,
-		Tokens:       tokenSvc,
-		SecretHasher: appSecretHasher,
-		Limiter:      limiter,
-		Logger:       logger,
-		Admin:        adminDeps,
-		WebFS:        embedweb.FS(),
-		Metrics:      metricsReg,
-		ServiceName:  cfg.Tracing.TracingOptions(Version).ServiceName,
+		Handler:       h,
+		Tenant:        tenantSvc,
+		Tokens:        tokenSvc,
+		SecretHasher:  appSecretHasher,
+		Limiter:       limiter,
+		Logger:        logger,
+		Admin:         adminDeps,
+		WebFS:         embedweb.FS(),
+		Metrics:       metricsReg,
+		ServiceName:   cfg.Tracing.TracingOptions(Version).ServiceName,
+		InternalToken: cfg.Internal.ServiceToken,
 	})
 	app.server = httpapi.HTTPServer(cfg.Server.Addr, app.router)
 	app.dispatcher = outboxDispatcher
@@ -953,6 +973,16 @@ func approvalActionSet(actions []string) map[string]bool {
 		out[a] = true
 	}
 	return out
+}
+
+// claimSyncMetrics 把 claim 失效的处理结果接到指标上。
+//
+// revoked 不进标签（基数不可控），只进日志——指标回答"有多少次通知、
+// 其中多少被忽略"，"撤销了多少行"是排障细节。
+type claimSyncMetrics struct{ ctr *metrics.Counter }
+
+func (m claimSyncMetrics) RecordClaimInvalidated(result string, _ int) {
+	m.ctr.Inc(result)
 }
 
 // configPath 返回生效的配置文件路径（未指定时取默认值）。

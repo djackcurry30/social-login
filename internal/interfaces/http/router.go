@@ -63,6 +63,9 @@ type RouterDeps struct {
 	// ServiceName 是链路追踪里的服务名，出现在 span 的 service.name 上。
 	// 为空时取 "social-login"。测试与嵌入式场景可以用它区分实例。
 	ServiceName string
+	// InternalToken 是服务间内部接口的令牌（X-Service-Token）。
+	// 为空时内部接口一律 503：宁可不可用，也不要变成公网可写的口子。
+	InternalToken string
 }
 
 // NewRouter 构造 gin 引擎。
@@ -146,6 +149,20 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	// JWKS 与 discovery 是公开的：公钥本来就是要给业务方用的。
 	r.GET("/v1/jwks", h.JWKS)
 	r.GET("/.well-known/openid-configuration", h.Discovery)
+
+	// --- 内部端点（服务间调用） ---
+	//
+	// 这些接口不面向业务方与浏览器：调用方只有用户中心。因此单独一组、
+	// 单独鉴权（X-Service-Token），并同样套超时中间件——内部调用一样会
+	// 因为数据库慢而挂住，没有超时就会占满连接。
+	internal := r.Group("/internal/v1",
+		middleware.ServiceToken(deps.InternalToken),
+		middleware.Timeout(TimeoutNormal),
+	)
+	{
+		// 用户中心换绑/注销后通知本服务失效本地 claim（架构 §8.5 第 2 条）。
+		internal.POST("/usercenter/claim-invalidated", h.ClaimInvalidated)
+	}
 
 	// --- 应用端点（app_id + app_secret） ---
 	//

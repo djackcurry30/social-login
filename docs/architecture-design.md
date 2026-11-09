@@ -1988,7 +1988,11 @@ POST /token (grant_type=refresh_token, refresh_token=RT1)
 **解决方案（组合采用）**：
 
 1. **归并前回源核对**（强制）。凡是用手机号做归并判定（`on_login = claim_verified` 或合并前的凭证校验），必须先调 `AccountProvider.GetByClaim` 确认用户中心侧该手机号**当前**确实属于被归并的账号。核对不一致 → **拒绝归并**、记录 `identity.claim_mismatch` 事件并告警。
-2. **用户中心变更时反向通知**（建议）。用户中心在手机号变更时推送 `claim.invalidated` 事件 → 本服务将该 `identity_claims` 记录置 `revoked_at = now()`。
+2. **用户中心变更时反向通知**（2026-11-09 已实现）。用户中心在换绑/注销/合并时，
+   与业务同事务写 `uc_outbox`，由投递器推 `claim.invalidated` 到本服务的
+   `POST /internal/v1/usercenter/claim-invalidated`（`X-Service-Token`）→
+   本服务按 `(app_id, identity_id, claim_type)` 撤销本地 claim。
+   事件体不含新旧号码；重复投递幂等。详见 implementation-status §39。
 3. **claim 不需要主数据的一致性**。因为有了第 1 条的强制回源核对，claim 即使滞后也不会造成错误归并——最坏情况是"该归并没发生"，而不是"归并错了账号"。**这个不对称性是刻意设计的：宁可漏归并，不可错归并。**
 
 **与用户中心的对齐要求**（补充到 §13 并行事项）：`GetByClaim` 必须保证**强一致读**，不能用有延迟的从库——否则回源核对本身就可能读到过期数据，防线失效。
@@ -2209,7 +2213,7 @@ Admin API 更新配置
 | `GetByClaim` 必须**强一致读**（不能用延迟从库） | 见 §8.5，它是归并前的最后一道防线 |
 | 提供 `Create`（或明确不提供） | 决定首次三方登录能否走 `auto_create` |
 | 订阅 `account.merged` 事件并处理数据迁移 | C4 模式下的核心耦合点 |
-| 手机号变更时推送 `claim.invalidated` | 见 §8.5 第 2 条，用于让本服务及时失效过期 claim |
+| 手机号变更时推送 `claim.invalidated` | 已实现（§39）：outbox + 内部接收端，至少一次投递、接收方幂等 |
 | 内部服务鉴权（mTLS 或签名） | `Merge` 是高危接口 |
 
 ---

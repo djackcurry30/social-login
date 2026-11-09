@@ -254,7 +254,7 @@ return "placeholder:" + plain, nil   // 明文直接拼在哈希位
 | `HTTPAccountProvider`（真实用户中心） | ❌ 未实现 | `account.provider=http` 启动即报错；当前只有内存 `StubAccountProvider`，**重启即丢账号** |
 | 用户中心 `Merge` 幂等语义 | 待对齐 | 不满足则第三期补偿只能降级为"只告警" |
 | 用户中心 `GetByClaim` 强一致读 | 待对齐 | 归并最后一道防线 |
-| 用户中心推送 `claim.invalidated` | 待对齐 | 手机号变更后 claim 无法及时失效 |
+| 用户中心推送 `claim.invalidated` | ✅ 已落地 | 2026-11-09：outbox + 内部接收端，见 §39 |
 
 ---
 
@@ -2137,8 +2137,8 @@ handler panic 会先被内层 Recovery 捕获并写成 500，Metrics 的 defer �
 缺口按 `docs/user-center-mvp-design.md` §10 分期：
 
 - **P0.5**：✅ 应用注册与对账、停用拒绝、注销、审计日志（§38.1）、慢查询（§38.2）。
-- **P1**：`claim.invalidated` 推送、注销的完整链路、管理端账号只读视图、
-  换绑 24h 回滚窗口、`discarded_claims` 通知用户。其中"停用状态在登录链路生效"
+- **P1**：✅ `claim.invalidated` 推送（2026-11-09，见 §39）；余下：注销的完整链路、
+  管理端账号只读视图、换绑 24h 回滚窗口、`discarded_claims` 通知用户。其中"停用状态在登录链路生效"
   本轮已由登录侧的 `accountgate.go` 补上（对端不需要改）。
 - **P2**：分区/RLS、批量对账、`claim_types` 注册表、KMS。
 
@@ -2231,7 +2231,8 @@ $ scripts/check-usercenter-contract.sh http://127.0.0.1:19091 "" --write --claim
 
 1. `by-claim` 的**强一致读**——mock 天然强一致，证明不了对端
 2. `merge` 的**真幂等**——mock 是 20 行 map，证明不了对端事务边界
-3. `claim.invalidated` 反向通知（对端推换号事件，本侧自动失效 claim）——本侧接收端也没写
+3. ~~`claim.invalidated` 反向通知~~ —— 已实现（§39）：对端 outbox 投递，本侧
+   `/internal/v1/usercenter/claim-invalidated` 接收并按类型撤销。
 4. 账号注销（本侧发起、对端执行）——契约未定义
 5. 批量对账（`identity_claims` vs 对端全量）——离线任务，量级与限流需单独设计
 
@@ -3590,3 +3591,104 @@ appIDs == []     1 = 0（"一个都不许看"，绝不能退化成不过滤）
 - **全局动作审计对受限管理员不可见**：见 §38.4；若确需让他们看到"全局轮换发生过"，
   应新增一个不含明细的通知接口，而不是放开这张表。
 - **`Unbind` 平台侧**：仍卡在"是否持久化渠道 refresh_token"的安全取舍。
+
+---
+
+## 39. `claim.invalidated` 反向通知（2026-11-09）
+
+> 上一状态：架构 §8.5 第 2 条只写了"建议"。用户中心换号后，登录侧
+> `identity_claims` 里"该身份拥有这个手机号"的记录一直是旧的，只能靠
+> J 组人工对账发现。这是"两个服务各持一半数据"必然留下的窗口。
+
+### 39.1 链路
+
+```
+UC ReplaceClaim / Close / Merge
+   └─ 同一事务写 uc_outbox（claim.invalidated，不含号码）
+        └─ Dispatcher（5s 轮询、租约领取、指数退避、死信）
+             └─ POST /internal/v1/usercenter/claim-invalidated（X-Service-Token）
+                  └─ 登录侧 claimsync：app_key+user_id → 活跃绑定 → 撤销对应类型 claim
+```
+
+### 39.2 用户中心侧：为什么必须有 outbox
+
+换绑与注销是**已经发生的事实**。如果"改完直接发一个 HTTP"失败就丢，
+登录侧会一直拿过期 claim 做归并判定，而这件事在生产上**没有任何信号**——
+最坏的结果是把两个账号错误地并在一起。
+
+所以事件与业务写在同一个事务里（`uc_outbox`），投递交给后台：
+
+| 机制 | 取值 | 理由 |
+| --- | --- | --- |
+| 领取 | `FOR UPDATE SKIP LOCKED` + 条件 UPDATE | 多实例不重复领、不互相阻塞 |
+| 租约 | 60s | 进程投递途中崩溃，事件到期自动重新可投（所以没有 processing 状态） |
+| 退避 | 5s·2^(n-1)，上限 1h | 固定 5s×10 次只覆盖 50 秒，扛不过一次发布 |
+| 死信 | 10 次或永久失败 | 死亡事件用 Error 级别，进告警 |
+| 事件体 | 只有 `claim_type` 与 `reason` | **不带新旧号码**：接收方按 user_id 反查，不需要这份明文 |
+
+`close`/`merge` 的 `claim_type` 为空，表示"全部类型"——注销与合并都是
+"这个账号的凭证整体失效"，逐类型发三条只会让接收方多三次查询。
+
+### 39.3 登录侧：接收端的三条纪律
+
+1. **幂等**：重复投递返回 200 且 `revoked=0`。撤销已撤销的行本来就是 no-op，
+   所以不需要去重表——"至少一次投递 + 接收方幂等"比"恰好一次"便宜得多。
+2. **按类型撤销，不按值**：`RevokeByType` 只用 `(app_id, identity_id, claim_type)`
+   定位。宁可多撤一条（下次授权会重写），也不留一条错的。
+3. **失败语义对齐投递方**：400/401/404 是永久失败（进死信，要人处理），
+   5xx 与网络错误才重试。把 4xx 当可重试会让一条坏事件长期占着队列。
+
+同时写一条业务审计（`action=claim_invalidated`，detail 带 `event_id`、
+`claim_type`、`revoked`），并把结果打到
+`social_login_claim_invalidated_total{result=ok|ignored|failed}`。
+
+### 39.4 两把令牌，两个方向
+
+| 方向 | 头 | 配置项 |
+| --- | --- | --- |
+| 登录 → 用户中心（读账号、合并、注销） | `Authorization: Bearer` | `account.http.token` / `UC_SECURITY_SERVICE_TOKEN` |
+| 用户中心 → 登录（claim.invalidated） | `X-Service-Token` | `internal.service_token` / `UC_NOTIFY_TOKEN` |
+
+**故意不复用**：一把泄漏不该同时打开"读账号"和"改本地 claim"两个方向。
+登录侧未配置令牌时内部接口返回 **503 而不是放行**；生产环境未配置会在启动校验直接失败。
+
+### 39.5 实机验证（本机 compose，`ACCOUNT_PROVIDER=http`）
+
+| 步骤 | 结果 |
+| --- | --- |
+| UC 启动 | `goose: successfully migrated database to version: 3`；`出站事件投递已启用 {"endpoint": "http://app:8080/...", "interval": 5000}` |
+| 换绑手机号 | `uc_outbox` 一行 `claim.invalidated`，**首次投递即 sent，attempts=1** |
+| 登录侧效果 | `identity_claims.revoked_at = 2026-11-09 07:38:05`，审计行 `revoked=1` |
+| 停掉登录侧再换绑 | 事件 `pending`，`last_error=投递失败: Post "http://app:8080/..."`，attempts 1 → 2 |
+| 恢复登录侧 | 下一次重试 `sent`（attempts=4），本地 claim 已被撤销 |
+| 重复投递同一事件 | `HTTP 200 {"identities":1,"revoked":0}`（幂等） |
+| 不带令牌 | `HTTP 401` |
+| 未知 app_key | `HTTP 404`（投递方据此进死信，而不是无限重试） |
+| 类型隔离 | 发 `claim_type=phone` 时，同身份的 `email` claim 保持未撤销 |
+| 指标 | `social_login_claim_invalidated_total{result="ignored"} 3`（重启后计数归零，故首次的 ok 不在） |
+| 告警规则 | `deploy/prometheus/alerts.yaml` 新增 `usercenter` 组三条（死信 / 积压 / 永久失败） |
+
+### 39.6 测试
+
+| 包 | 用例 | 守住什么 |
+| --- | --- | --- |
+| `usercenter/notify` | 6 + 4 | 成功标记、指数退避、永久失败立即死信、达到上限死信、单条失败不阻塞整批；HTTP 4xx/5xx/429 的重试分类与信封字段 |
+| `application/claimsync` | 8 | 多绑定全部撤销、空类型=全部、无绑定成功、重复投递 0 行、未知应用 404、未知类型 400、审计字段 |
+| `domain/identity` 替身 | 3 处 | 接口扩展的连带成本（注销/管理端/登录链路各补一个 panic 替身） |
+
+### 39.7 与"归并前回源核对"的关系（不要误读成本轮解决了漂移）
+
+回源核对是**闸门**（宁可漏归并，不可错归并），本轮是**追赶**（让本地数据
+尽快接近权威源）。两者缺一不可：
+
+- 只有推送、没有闸门 → 推送延迟或丢失期间仍可能错并；
+- 只有闸门、没有推送 → 每次归并都多一次跨服务读，且漂移记录一直不清零。
+
+### 39.8 仍未做
+
+- **UC 侧没有"事件重放"的管理入口**：死信只能手工改库（文档给了 SQL）。
+  正确做法是管理端加一个"重投"按钮 + 审计，属 P2。
+- **没有按 app 的投递隔离**：一个应用对端持续 4xx 会占满批次（当前 batch=20，
+  下一轮再处理其余）。量级变大后需要按 app 分片或提高优先级。
+- **接收端未校验 `occurred_at`**：晚到的旧事件会撤销新写入的 claim。
+  现实中窗口极小（推送是秒级），但严格做法是比对 `verified_at` 再决定是否撤销。

@@ -225,6 +225,48 @@ POST /internal/v1/apps
 > 看到 `social-login → usercenter` 的完整链路。反过来，对端若回写
 > `X-Trace-Id`/`X-Request-Id`，本服务会原样沿用，见 implementation-status §36。
 
+### 3.5 反向：用户中心 → 本服务（`claim.invalidated`）
+
+这是**唯一一个由对端调用本服务的接口**，2026-11-09 起可用（本侧已实现，
+对端可按需接入；不接也不影响任何现有契约）。
+
+```
+POST /internal/v1/usercenter/claim-invalidated
+X-Service-Token: <internal.service_token>
+Content-Type: application/json
+
+{
+  "event_id":   "17",
+  "event_type": "claim.invalidated",
+  "payload": {
+    "app_key":     "app-xxxxxxxx",
+    "user_id":     "01M6ZK...",
+    "claim_type":  "phone",        // 空串 = 全部类型
+    "reason":      "replaced",     // replaced | closed | merged_source
+    "occurred_at": "2026-11-09T07:38:05Z"
+  }
+}
+```
+
+响应：
+
+| 状态 | 含义 | 对端应如何处理 |
+| --- | --- | --- |
+| 200 `{"identities":1,"revoked":2}` | 已处理（`revoked=0` 表示重复投递） | 标记事件已投递 |
+| 400 | 报文/`claim_type` 不认识 | **永久失败**，不要重试 |
+| 401 | 令牌不一致 | 永久失败（改配置） |
+| 404 | `app_key` 未在本服务登记 | 永久失败（应由应用对账修复） |
+| 5xx | 本服务暂时不可用 | 重试（指数退避） |
+
+四条约定：
+
+1. **不要带新旧号码**。本服务按 `user_id` 反查绑定，拿到凭证值会多一份明文，
+   却不多一分能力。
+2. **至少一次投递 + 本侧幂等**：重复投递是安全的，不需要对端做「恰好一次」。
+3. **`claim_type` 为空表示全部类型**（换绑用具体类型，注销/合并用空）。
+4. **令牌独立于 `Authorization`**：`X-Service-Token` 只用于内部接口，
+   与业务方的 `app_secret`、用户的 access_token 都不共用。
+
 ---
 
 ## 4. 对端就绪后怎么买账：联调步骤
@@ -383,5 +425,6 @@ GROUP BY 1,2 ORDER BY 3 DESC;
 | --- | --- |
 | 2026-10-29 | 首版：契约 v1、进度标记 16 项、假对端与契约脚本、切换清单 |
 | 2026-11-02 | 补应用注册同步（§2.6 落地）：`POST /internal/v1/apps` 纳入契约，本服务侧即时同步 + 5 分钟全量对账，状态落 `applications.uc_synced_at / uc_sync_error`，管理端应用列表展示「已同步 / 未同步」；契约脚本扩到 18 项（第 0 步自动注册被测应用） |
+| 2026-11-09 | 新增反向推送契约（§3.5）：`POST /internal/v1/usercenter/claim-invalidated` + `X-Service-Token`。用户中心换绑/注销/合并后主动失效本侧 claim；事件不含号码，重复投递幂等；400/401/404 为永久失败、5xx 可重试 |
 | 2026-11-05 | 审计与慢查询落地（对端侧，不影响契约）：① 写入 `account_audit_logs`（与业务同事务），`actor` 取本服务发的 `X-Actor: social-login`，真人靠 `trace_id` 与我校验；② 新增只读查询 `GET /internal/v1/apps/{app_key}/audit`（仅内部，业务方不接触）；③ 慢查询日志只记 SQL 模板与参数个数，不记值 |
 | 2026-11-02 | 契约升到 v1.1 并在代码中落地：① 全部路径加 `/v1/apps/{app_key}`（应用隔离）；② 统一错误信封，适配层按 `code` 翻译、状态码只兜底；③ 补换绑端点 `PUT .../claims/{type}`；④ 合并回传 `discarded_claims`。同步改：5 处调用点、stub 按应用分区、假对端加应用维度与信封、契约脚本扩到 16 项（含跨应用隔离）。v1 的"待修订"警示已移除 |

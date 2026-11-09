@@ -23,6 +23,30 @@ type Config struct {
 	Log      LogConfig      `mapstructure:"log"`
 	Migrate  MigrateConfig  `mapstructure:"migrate"`
 	Tracing  TracingConfig  `mapstructure:"tracing"`
+	Notify   NotifyConfig   `mapstructure:"notify"`
+}
+
+// NotifyConfig 是出站事件投递配置（用户中心 → 登录中心）。
+//
+// 默认关闭：没有登录中心的环境（单独跑 UC、契约测试）打开它只会每 5 秒
+// 刷一条"投递失败"，把真正的告警盖掉。
+type NotifyConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Endpoint 是登录侧的接收地址。enabled 时必须非空——
+	// 配了开关没配地址，表现是"事件一直 pending 直到死信"，
+	// 而这在启动时就能查出来，没必要留到线上。
+	Endpoint string `mapstructure:"endpoint"`
+	// Token 是服务间令牌（登录侧校验 X-Service-Token）。
+	Token string `mapstructure:"token"`
+	// Interval 是扫描间隔。
+	Interval time.Duration `mapstructure:"interval"`
+	// Batch 是每轮最多投递多少条。
+	Batch int `mapstructure:"batch"`
+	// Lease 是领取租约：进程在投递途中崩溃时，事件在这之后重新可投。
+	// 必须大于单次投递超时（3s），否则会在上一轮未完时被别的实例领走。
+	Lease time.Duration `mapstructure:"lease"`
+	// MaxAttempts 之后进死信。
+	MaxAttempts int `mapstructure:"max_attempts"`
 }
 
 // TracingConfig 是链路追踪配置。
@@ -196,6 +220,12 @@ func setDefaults(v *viper.Viper) {
 	// 200ms 已经意味着"锁等待或索引失效"，值得记一条。
 	v.SetDefault("database.slow_query_threshold", 200*time.Millisecond)
 
+	v.SetDefault("notify.enabled", false)
+	v.SetDefault("notify.interval", 5*time.Second)
+	v.SetDefault("notify.batch", 20)
+	v.SetDefault("notify.lease", time.Minute)
+	v.SetDefault("notify.max_attempts", 10)
+
 	// 追踪默认关闭；开启时按 10% 采样（与登录中心同一策略，
 	// 否则会出现"上游记了、下游没记"的半截链路）。
 	v.SetDefault("tracing.enabled", false)
@@ -258,6 +288,12 @@ func (c *Config) normalizeAndValidate() error {
 	}
 	if c.Tracing.SampleRatio < 0 || c.Tracing.SampleRatio > 1 {
 		return fmt.Errorf("tracing.sample_ratio 必须在 0–1 之间（当前 %v）", c.Tracing.SampleRatio)
+	}
+
+	// 开启了投递却没给地址：这不是"少配一项"，而是"所有通知都会变成死信"。
+	// 启动就失败，别让它跑到线上才发现登录侧从来没收到过事件。
+	if c.Notify.Enabled && strings.TrimSpace(c.Notify.Endpoint) == "" {
+		return fmt.Errorf("notify.enabled=true 但缺少 notify.endpoint（登录侧接收地址）")
 	}
 
 	if c.Server.IsProduction() {

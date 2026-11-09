@@ -25,7 +25,9 @@ import (
 //	如果这里加了 FOR UPDATE，后到者会等第一个提交、然后看到【新】凭证并把
 //	它撤销，最后两个请求都返回 200（last-write-wins）。用户看到"换成了 A"，
 //	实际生效的是 B——这种静默覆盖比报错危险得多。
-func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, in ClaimInput, audit *AuditInput) error {
+func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, in ClaimInput,
+	audit *AuditInput, notify *OutboxInput,
+) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		// ① 定位账号。已关闭的账号不允许换绑：它的凭证应当已经全部撤销，
 		//    再插一条会让"已注销"的账号重新出现在 by-claim 的结果里。
@@ -131,6 +133,9 @@ func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, 
 				return err
 			}
 		}
+		if err := insertOutbox(ctx, tx, notify); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -143,7 +148,9 @@ func (s *Store) ReplaceClaim(ctx context.Context, appID int64, publicID string, 
 //
 // 幂等：已关闭账号再次注销返回 nil，不报错。注销是用户可能重复点击的操作，
 // 第二次报"账号不存在"会让前端弹出莫名其妙的错误。
-func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string, audit *AuditInput) error {
+func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string,
+	audit *AuditInput, notify *OutboxInput,
+) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		var accountID int64
 		var status string
@@ -185,6 +192,11 @@ func (s *Store) CloseAccount(ctx context.Context, appID int64, publicID string, 
 			if err := insertAudit(ctx, tx, &a); err != nil {
 				return err
 			}
+		}
+		// 出站事件与审计同理：注销会释放全部凭证，登录侧必须立刻失效本地 claim，
+		// 否则它还会用"这个人拥有这个手机号"做归并判定。
+		if err := insertOutbox(ctx, tx, notify); err != nil {
+			return err
 		}
 		return nil
 	})

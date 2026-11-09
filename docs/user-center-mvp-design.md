@@ -521,7 +521,7 @@ social-login 在调用前就归一化并只传归一化后的值，UC 不再做�
 | --- | --- | --- | --- |
 | E1 | 凭证类型 | `CHECK (claim_type IN ('phone','email'))` + 一个 `normalize()` 函数 | 新增类型 = 一条迁移 + 一个 switch case；若类型多到需要动态配置，再引入 `claim_types` 注册表（届时把校验从 CHECK 挪到应用层） |
 | E2 | 账号属性 | **MVP 不设 `attrs` 列**（决策见 §12）。只保留 `nickname` / `avatar_url` 两个显式列 | 需要时新增 `attrs jsonb` + 白名单校验；不预留空列，避免"随手往里塞字段" |
-| E3 | 事件外发 | MVP 只写 `merges` 表（够审计） | 加 `outbox` 表 + worker，推 `account.merged` / `claim.invalidated` / `account.closed` |
+| E3 | 事件外发 | 加 `uc_outbox` + worker，**已完成 `claim.invalidated`**（2026-11-09） | 余下 `account.merged` / `account.closed` 的外发（目前只写 merges/审计表） |
 | E4 | 接口版本 | 路径带 `/v1` | 新增端点用 `/v1` 内扩展；不兼容变更才开 `/v2`，并在一段时间内双写 |
 | E5 | 分片 | 所有唯一键以 `app_id` 开头 | 按 `app_id` 分库/分区；路由层已有 app_key，天然是分片键 |
 | E6 | 服务间鉴权 | 单一 Bearer token | 演进到每应用凭据或 mTLS（`social-login` 侧只需换 `httpx` 的 transport） |
@@ -568,7 +568,10 @@ social-login 在调用前就归一化并只传归一化后的值，UC 不再做�
 
 ### P1 · 补齐契约语义
 
-- `claim.invalidated` 推送（对端换号 → social-login 自动失效 claim，J 组漂移会大幅减少）
+- ✅ `claim.invalidated` 推送（2026-11-09）：换绑/注销/合并时与业务**同事务**写
+  `uc_outbox`，后台投递器按 `FOR UPDATE SKIP LOCKED` 领取、60s 租约、指数退避、
+  10 次后进死信；事件体只有 `claim_type` 与 `reason`，不带号码。
+  详情见 implementation-status §39。
 - 注销的完整链路（与 social-login 的注销流程对齐顺序）
 - 错误信封在适配层的解析（§2.5）与归一化下沉（§7）
 - 登录链路识别"平台侧手机号已变"并调用换绑接口（§5.4）

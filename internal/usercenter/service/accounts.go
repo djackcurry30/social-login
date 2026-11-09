@@ -177,6 +177,9 @@ func (s *Service) Merge(ctx context.Context, app domain.App, req MergeRequest) (
 		Audit: s.auditFor(ctx, app, postgres.AuditAccountMerged, req.TargetUserID, map[string]any{
 			"trigger": "merge",
 		}),
+		// source 被关掉 = 它的全部凭证都失效了（部分迁移到 target，
+		// 部分被撤销）。登录侧需要把这些身份的本地 claim 清掉。
+		Notify: s.claimInvalidated(ctx, app, req.SourceUserID, "", "merged_source"),
 	})
 	if err != nil {
 		if e, ok := domain.As(err); ok && e.Code == domain.CodeMergeRejected {
@@ -231,7 +234,8 @@ func (s *Service) ReplaceClaim(ctx context.Context, app domain.App, userID, clai
 	// 动作名（绑定 / 换绑）由 store 判定：只有它知道这次是首次绑定还是覆盖。
 	// 这里只给触发者与元信息。
 	audit := s.auditFor(ctx, app, postgres.AuditClaimBound, userID, map[string]any{})
-	if err := s.store.ReplaceClaim(ctx, app.ID, userID, inputs[0], audit); err != nil {
+	notify := s.claimInvalidated(ctx, app, userID, claimType, "replaced")
+	if err := s.store.ReplaceClaim(ctx, app.ID, userID, inputs[0], audit, notify); err != nil {
 		if e, ok := domain.As(err); ok &&
 			(e.Code == domain.CodeClaimTaken || e.Code == domain.CodeConflict) {
 			s.m.RecordConflict(app.Key, "replace")
@@ -252,7 +256,9 @@ func (s *Service) Close(ctx context.Context, app domain.App, userID string) erro
 		return domain.New(domain.CodeInvalid, "缺少 user_id")
 	}
 	audit := s.auditFor(ctx, app, postgres.AuditAccountClosed, userID, nil)
-	if err := s.store.CloseAccount(ctx, app.ID, userID, audit); err != nil {
+	// 注销：全部类型的 claim 都失效，claim_type 留空让接收方一次清干净。
+	notify := s.claimInvalidated(ctx, app, userID, "", "closed")
+	if err := s.store.CloseAccount(ctx, app.ID, userID, audit, notify); err != nil {
 		return err
 	}
 	s.m.RecordClosed(app.Key)

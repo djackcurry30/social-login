@@ -683,8 +683,17 @@ func TestIntegrationAuditTrail(t *testing.T) {
 	if _, err := s.ReplaceClaim(ctx, app, userID, "phone", "13900002222", "wechat_phone"); err != nil {
 		t.Fatalf("换绑失败: %v", err)
 	}
-	// 合并：源账号并进来。
-	src := mustCreate(t, app, "audit-2", email("audit-src@example.com"))
+	// 合并：源账号并进来。用同一个 ctx 建号——必须显式传 ctx，
+	// 否则会走 mustCreate 的 context.Background()，那行的 actor 是 "service"，
+	// 断言会误报（第一版就是这么红的：把测试自己造的数据当成了被测行为）。
+	srcOut, err := s.Create(ctx, app, service.CreateRequest{
+		IdempotencyKey: "audit-2",
+		Claims:         []domain.Claim{email("audit-src@example.com")},
+	})
+	if err != nil {
+		t.Fatalf("建源账号失败: %v", err)
+	}
+	src := srcOut.Account
 	if _, err := s.Merge(ctx, app, service.MergeRequest{
 		IdempotencyKey: "audit-merge",
 		TargetUserID:   userID,
@@ -693,8 +702,18 @@ func TestIntegrationAuditTrail(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("合并失败: %v", err)
 	}
-	// 关闭。
-	if err := s.Close(ctx, app, src.UserID); err != nil {
+	// 关闭：另建一个账号来关。不能拿 src——它在合并时已被置 closed，
+	// close 是幂等 no-op，不会产生审计（合并的审计里已经带了 source_user_id，
+	// 再记一条 account.closed 会让"这个账号被关了两次"这种错觉出现在审计里）。
+	victimOut, err := s.Create(ctx, app, service.CreateRequest{
+		IdempotencyKey: "audit-3",
+		Claims:         []domain.Claim{phone("13900003333")},
+	})
+	if err != nil {
+		t.Fatalf("建待关闭账号失败: %v", err)
+	}
+	victim := victimOut.Account
+	if err := s.Close(ctx, app, victim.UserID); err != nil {
 		t.Fatalf("关闭失败: %v", err)
 	}
 
@@ -725,12 +744,14 @@ func TestIntegrationAuditTrail(t *testing.T) {
 		}
 	}
 
+	// 建号只写一条 account.created：凭证是建号的一部分，不该再记一条
+	// claim.bound——否则"账号被创建"与"用户绑了手机号"在审计里看起来
+	// 是两次独立操作，客服读起来会以为中间隔了一段时间。
 	want := []key{
 		{userID, postgres.AuditAccountCreated},
-		{userID, postgres.AuditClaimBound},    // 建号带手机号 → 首次绑定
-		{userID, postgres.AuditClaimReplaced}, // 换绑
+		{userID, postgres.AuditClaimReplaced},
 		{userID, postgres.AuditAccountMerged},
-		{src.UserID, postgres.AuditAccountClosed},
+		{victim.UserID, postgres.AuditAccountClosed},
 	}
 	for _, k := range want {
 		if seen[k] == 0 {

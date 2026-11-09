@@ -26,6 +26,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/usercenter/cryptox"
 	"github.com/djackcurry30/social-login/internal/usercenter/domain"
 	"github.com/djackcurry30/social-login/internal/usercenter/httpapi"
+	"github.com/djackcurry30/social-login/internal/usercenter/notify"
 	"github.com/djackcurry30/social-login/internal/usercenter/observe"
 	"github.com/djackcurry30/social-login/internal/usercenter/service"
 	"github.com/djackcurry30/social-login/internal/usercenter/store/postgres"
@@ -42,6 +43,8 @@ type App struct {
 	server *http.Server
 	// tracer 是链路追踪生命周期。关闭追踪时是非 nil 的空壳。
 	tracer *tracing.Provider
+	// outbox 是出站事件投递器。未启用时为 nil（不会起后台循环）。
+	outbox *notify.Dispatcher
 }
 
 // New 构造服务。
@@ -89,6 +92,51 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	obs := observe.NewMetrics(reg)
 	svc := service.New(store, hasher, env, log, obs)
 
+	// 出站队列的两个 gauge 在采集时查库，而不是自增/自减：
+	// 自减计数在进程崩溃、批量标记失败时都会漂移，而"现在积压多少"
+	// 是运维最需要准确的数字。
+	reg.GaugeFunc("user_center_outbox_pending", "待投递的出站事件数", func() float64 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		n, err := store.CountPendingOutbox(ctx)
+		if err != nil {
+			return -1 // -1 明确表示"采集失败"，比谎报 0 好
+		}
+		return float64(n)
+	})
+	reg.GaugeFunc("user_center_outbox_dead", "进入死信的出站事件数", func() float64 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		n, err := store.CountDeadOutbox(ctx)
+		if err != nil {
+			return -1
+		}
+		return float64(n)
+	})
+
+	var outbox *notify.Dispatcher
+	if cfg.Notify.Enabled {
+		sender := notify.NewHTTPSender(notify.HTTPSenderConfig{
+			Endpoint: cfg.Notify.Endpoint,
+			Token:    cfg.Notify.Token,
+			Timeout:  3 * time.Second,
+		})
+		outbox = notify.New(notify.Deps{
+			Store:   store,
+			Sender:  sender,
+			Log:     log,
+			Metrics: obs,
+		}, notify.Config{
+			Interval:    cfg.Notify.Interval,
+			Batch:       cfg.Notify.Batch,
+			Lease:       cfg.Notify.Lease,
+			MaxAttempts: cfg.Notify.MaxAttempts,
+		})
+		log.Info("用户中心出站事件投递已启用",
+			zap.String("endpoint", cfg.Notify.Endpoint),
+			zap.Duration("interval", cfg.Notify.Interval))
+	}
+
 	router := httpapi.NewRouter(httpapi.Deps{
 		Service:         svc,
 		Store:           store,
@@ -106,6 +154,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		log:    log,
 		store:  store,
 		tracer: tracer,
+		outbox: outbox,
 		server: &http.Server{
 			Addr:    cfg.Server.Addr,
 			Handler: router,
@@ -131,6 +180,12 @@ func (a *App) Run(ctx context.Context) error {
 			a.log.Warn("链路追踪刷盘失败（不影响退出）", zap.Error(err))
 		}
 	}()
+
+	if a.outbox != nil {
+		// 与 HTTP 同时起：投递是独立的后台循环，服务不可用时它仍会重试
+		// （登录侧挂掉不代表用户中心不能用）。
+		go a.outbox.Run(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

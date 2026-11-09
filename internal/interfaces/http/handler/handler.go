@@ -10,6 +10,7 @@ import (
 	"github.com/djackcurry30/social-login/internal/application/accountclose"
 	"github.com/djackcurry30/social-login/internal/application/authflow"
 	"github.com/djackcurry30/social-login/internal/application/binding"
+	"github.com/djackcurry30/social-login/internal/application/claimsync"
 	appmerge "github.com/djackcurry30/social-login/internal/application/merge"
 	"github.com/djackcurry30/social-login/internal/application/oauthnotify"
 	"github.com/djackcurry30/social-login/internal/application/tenantconfig"
@@ -30,7 +31,9 @@ type Deps struct {
 	Merge *appmerge.Service
 	// AccountClose 是账号注销用例（数据合规，见 accountclose 包注释）。
 	AccountClose *accountclose.Service
-	Signer       *jwtkit.Signer
+	// ClaimsSync 处理用户中心推来的"凭证已失效"通知（claim.invalidated）。
+	ClaimsSync *claimsync.Service
+	Signer     *jwtkit.Signer
 	// SecretHasher 用于校验 /v1/token 请求体里携带的 client_secret
 	// （该接口不挂 AppAuth 中间件，见 token.go 的说明），
 	// 以及 AppAuth 中间件校验应用凭据。

@@ -463,3 +463,8 @@ func TestTryClaimMergeRejectsConflictingClaims(t *testing.T) {
 func (f *fakeClaims) PurgeByIdentities(context.Context, int64, []int64) (int64, error) {
 	panic("unexpected PurgeByIdentities")
 }
+
+// RevokeByType 是用户中心通知用的按类型撤销；登录链路不涉及。
+func (f *fakeClaims) RevokeByType(context.Context, int64, int64, string, time.Time) (int64, error) {
+	panic("unexpected RevokeByType")
+}

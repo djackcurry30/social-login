@@ -118,6 +118,16 @@ type ClaimRepository interface {
 	// Revoke 撤销某身份下的指定凭证（换号/解绑）。
 	Revoke(ctx context.Context, appID, identityID int64, claimType, valueHash string, at time.Time) error
 
+	// RevokeByType 撤销某身份下某类型的全部有效凭证，返回实际撤销行数。
+	//
+	// 与 Revoke 的区别是"不知道凭证值"：用户中心推 claim.invalidated 时
+	// 只告诉我们"这个用户的 phone 变了"，不会带新旧号码（带过去就多一份明文）。
+	// claimType 为空表示全部类型（注销 / 合并场景）。
+	//
+	// 幂等：已撤销的行不在 WHERE 范围内，重复调用返回 0——这正是
+	// "至少一次投递 + 接收方幂等"能成立的基础。
+	RevokeByType(ctx context.Context, appID, identityID int64, claimType string, at time.Time) (int64, error)
+
 	// PurgeByIdentities 物理删除若干身份下的全部凭证，返回删除行数。
 	//
 	// 只用于账号注销（数据合规），不要用在换号/解绑上——那两个场景要保留

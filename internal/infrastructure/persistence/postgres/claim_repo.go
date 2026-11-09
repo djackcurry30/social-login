@@ -196,6 +196,34 @@ func (r *ClaimRepository) Revoke(ctx context.Context, appID, identityID int64, c
 	return nil
 }
 
+// RevokeByType 撤销某身份下某类型的全部有效凭证。
+//
+// claimType 为空表示全部类型——注销/合并时用它一次清干净。
+// 返回影响行数：调用方据此判断"这次通知是否真的改变了本地数据"
+// （重复投递会返回 0，正好用来识别幂等重放）。
+func (r *ClaimRepository) RevokeByType(ctx context.Context, appID, identityID int64,
+	claimType string, at time.Time,
+) (int64, error) {
+	if appID <= 0 || identityID <= 0 {
+		return 0, errs.New(errs.CodeInternal, "凭证撤销参数不完整")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	ctx = appctx.WithAppScope(ctx, appID)
+
+	q := r.db.WithContext(ctx).Model(&claimModel{}).
+		Where("app_id = ? AND identity_id = ? AND revoked_at IS NULL", appID, identityID)
+	if claimType != "" {
+		q = q.Where("claim_type = ?", claimType)
+	}
+	res := q.Update("revoked_at", at)
+	if res.Error != nil {
+		return 0, errs.Wrap(errs.CodeInternal, "按类型撤销归并凭证失败", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // PurgeByIdentities 物理删除若干身份下的全部凭证（账号注销专用）。
 //
 // 用单条 DELETE ... IN (...) 而不是逐条删：注销是"要么这些都没了、
